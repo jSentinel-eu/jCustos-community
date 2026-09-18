@@ -46,7 +46,7 @@
       real exploitation surface is zero. The bump is the right hygiene
       step anyway and keeps the SBOM clean.
     -->
-    <bouncycastle.version>1.84</bouncycastle.version>
+    <bouncycastle.version>1.85</bouncycastle.version>
   </properties>
 
   <dependencies>
