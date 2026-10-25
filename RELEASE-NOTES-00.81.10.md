@@ -104,5 +104,5 @@ release under the jCustos name. The project itself moves to
 
 ---
 
-Concept: `Konzept-V00.81.10.md` · Plan: ClickUp parent `86cbb2aqw` ·
+Concept: `Konzept-V00.81.10.md` (archived in the project umbrella under `docs/v00.81.10/`) · Plan: ClickUp parent `86cbb2aqw` ·
 Predecessor: `RELEASE-NOTES-00.81.00.md` (the last jSentinel release)
