@@ -45,6 +45,8 @@ import eu.jsentinel.jcustos.oauth2.api.StateEntry;
 import eu.jsentinel.jcustos.oauth2.api.StateStore;
 import com.vaadin.flow.server.VaadinSession;
 
+import eu.jsentinel.jcustos.util.CapacityBound;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
@@ -66,14 +68,33 @@ public final class VaadinSessionStateStore implements StateStore {
 
   private static final String ATTRIBUTE = VaadinSessionStateStore.class.getName() + ".entries";
 
+  /** Default upper bound on pending states per Vaadin session. */
+  public static final int DEFAULT_MAX_ENTRIES_PER_SESSION = 32;
+
   private final Supplier<Instant> clock;
+  private final int maxEntriesPerSession;
 
   public VaadinSessionStateStore() {
     this(Instant::now);
   }
 
   public VaadinSessionStateStore(Supplier<Instant> clock) {
+    this(clock, DEFAULT_MAX_ENTRIES_PER_SESSION);
+  }
+
+  /**
+   * @param clock                time source for expiry
+   * @param maxEntriesPerSession upper bound on pending states held per Vaadin
+   *                             session (JS-SEC-078, CWE-770): a client can start
+   *                             any number of authorisation flows without ever
+   *                             finishing one; expired entries are dropped on
+   *                             every {@code bind} and, at the bound, the entry
+   *                             expiring soonest goes first
+   * @since 00.84.00
+   */
+  public VaadinSessionStateStore(Supplier<Instant> clock, int maxEntriesPerSession) {
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.maxEntriesPerSession = CapacityBound.requirePositiveCapacity(maxEntriesPerSession);
   }
 
   private record Stored(StateEntry entry, Instant expiresAt) {
@@ -89,7 +110,27 @@ public final class VaadinSessionStateStore implements StateStore {
       throw new IllegalStateException(
           "No active VaadinSession — bind must run on a Vaadin request thread");
     }
-    entries(session).put(stateKey, new Stored(entry, clock.get().plus(ttl)));
+    Map<String, Stored> entries = entries(session);
+    Instant now = clock.get();
+    // JS-SEC-078 (CWE-770): expired states never consume; drop them instead of keeping them
+    entries.values().removeIf(stored -> now.isAfter(stored.expiresAt()));
+    while (entries.size() >= maxEntriesPerSession && !entries.containsKey(stateKey)) {
+      // at the bound the state expiring soonest is the least likely to be completed
+      entries.entrySet().stream()
+          .min(Map.Entry.comparingByValue(java.util.Comparator.comparing(Stored::expiresAt)))
+          .map(Map.Entry::getKey)
+          .ifPresent(entries::remove);
+    }
+    entries.put(stateKey, new Stored(entry, now.plus(ttl)));
+  }
+
+  /**
+   * @return number of pending states in the current Vaadin session, or 0 without one
+   * @since 00.84.00
+   */
+  public int pendingCount() {
+    VaadinSession session = VaadinSession.getCurrent();
+    return session == null ? 0 : entries(session).size();
   }
 
   @Override

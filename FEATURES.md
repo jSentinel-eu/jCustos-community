@@ -132,7 +132,7 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | `EmailVerificationTokenStore` | core/accountlifecycle | `EmailVerificationTokenRecord` (hash-only, single-use); `InMemoryEmailVerificationTokenStore` seit **V00.84** kapazitätsbegrenzt (JS-SEC-074) | Email-Verifikations-Flow |
 | `ApiKeyStore` | core/authentication | `ApiKeyRecord` (hash-only, mit Scopes) | Long-Lived API-Keys |
 | `RefreshTokenStore` | core/authentication | `RefreshTokenRecord` (hash-only, rotating mit `markReplaced`) | Rotating Refresh-Tokens mit Replay-Defense |
-| `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter |
+| `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter; seit **V00.84** `tryAdmit(key, at, since, limit)` als atomare Zulassung (CWE-367), In-Memory-Store kapazitätsbegrenzt mit Verdrängung des ältesten Schlüssels und Fensterbeschnitt (JS-SEC-078) |
 
 ### JCustosVersion / Drift Detection (Phase 4 — ⚠️)
 
@@ -162,7 +162,7 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 
 | SPI / Klasse | Modul | Default | Zweck |
 |---|---|---|---|
-| `RateLimitPolicy` | core/ratelimiting | `InMemoryRateLimitPolicy` (Sliding-Window) | Per-Scope Rate-Limit (getrennt von `LoginAttemptPolicy`); `tryAcquire(RateLimitKey)` → `RateLimitDecision(Allowed \| Throttled)` |
+| `RateLimitPolicy` | core/ratelimiting | `InMemoryRateLimitPolicy` (Sliding-Window) | Per-Scope Rate-Limit (getrennt von `LoginAttemptPolicy`); `tryAcquire(RateLimitKey)` → `RateLimitDecision(Allowed \| Throttled)`; `tryAcquire` nutzt seit **V00.84** `RateLimitStore.tryAdmit` — N parallele Anfragen bei limit-1 lassen höchstens `limit` durch (JS-SEC-078) |
 
 ### Store-backed Services (Phase 4b — ⚠️)
 

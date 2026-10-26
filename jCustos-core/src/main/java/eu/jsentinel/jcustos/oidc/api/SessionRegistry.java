@@ -41,4 +41,16 @@ public interface SessionRegistry {
    * / {@code sid}): by {@code sid} when present, otherwise every session of the subject.
    */
   Set<String> terminate(String issuer, Optional<String> subject, Optional<String> sid);
+
+  /**
+   * Forgets one RP session id, for example when the servlet container destroys
+   * the session (JS-SEC-078, CWE-770): without it every registered session
+   * stays in the registry until a logout for its subject or sid arrives, and
+   * the registry grows with every login. The Vaadin adapter wires this through
+   * {@code VaadinSessionRegistryCleanup}.
+   *
+   * @param sessionId the RP session id passed to {@link #register}
+   * @since 00.84.00
+   */
+  void unregister(String sessionId);
 }

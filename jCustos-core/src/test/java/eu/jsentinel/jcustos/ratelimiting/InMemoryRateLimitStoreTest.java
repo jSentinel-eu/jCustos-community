@@ -26,6 +26,7 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("InMemoryRateLimitStore + RateLimitKey")
 class InMemoryRateLimitStoreTest {
@@ -40,6 +41,35 @@ class InMemoryRateLimitStoreTest {
   }
 
   // ── Key invariants ──────────────────────────────────────────────
+
+  @Test
+  @DisplayName("JS-SEC-078: 200 000 distinct keys stay within the capacity bound, oldest keys go first")
+  void boundedByDistinctKeys() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(1_000);
+    for (int i = 0; i < 200_000; i++) {
+      bounded.recordEvent(key("client:" + i), T0.plusSeconds(i));
+    }
+    assertEquals(1_000, bounded.trackedKeyCount());
+    assertEquals(0, bounded.countSince(key("client:0"), T0), "the key seen first was evicted");
+    assertEquals(1, bounded.countSince(key("client:199999"), T0), "the newest key is tracked");
+    assertThrows(IllegalArgumentException.class, () -> new InMemoryRateLimitStore(0));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-078: tryAdmit records only below the limit and drops events outside the window")
+  void tryAdmitPrunesAndLimits() {
+    RateLimitKey k = key("ip:9.9.9.9");
+    for (int i = 0; i < 3; i++) {
+      assertTrue(store.tryAdmit(k, T0.plusSeconds(i), T0.minusSeconds(60), 3).admitted());
+    }
+    RateLimitStore.Admission throttled = store.tryAdmit(k, T0.plusSeconds(3), T0.minusSeconds(60), 3);
+    assertEquals(false, throttled.admitted());
+    assertEquals(3, throttled.eventsInWindow());
+    RateLimitStore.Admission later = store.tryAdmit(k, T0.plusSeconds(100), T0.plusSeconds(50), 3);
+    assertTrue(later.admitted());
+    assertEquals(1, later.eventsInWindow(), "pruned to the single new event");
+    assertEquals(1, store.countSince(k, T0), "old events are gone from the bucket, not just ignored");
+  }
 
   @Nested
   @DisplayName("RateLimitKey invariants")

@@ -86,4 +86,39 @@ public interface RateLimitStore {
    * @return number of events purged
    */
   int purgeOlderThan(Instant cutoff);
+
+  /**
+   * Outcome of {@link #tryAdmit}: whether the event was recorded and how many
+   * events the key holds in the window afterwards.
+   *
+   * @param admitted       {@code true} when the event was recorded
+   * @param eventsInWindow events at or after {@code since}, including this one when admitted
+   * @since 00.84.00
+   */
+  record Admission(boolean admitted, int eventsInWindow) {
+  }
+
+  /**
+   * Counts the key's events at or after {@code since} and records {@code at}
+   * only when fewer than {@code limit} are present — the check and the
+   * record as one step (JS-SEC-078, CWE-367). The default is the non-atomic
+   * {@link #countSince} + {@link #recordEvent} sequence for stores that
+   * cannot do better; {@code InMemoryRateLimitStore} performs it atomically
+   * per key and drops events older than {@code since} on the way.
+   *
+   * @param key   bucket key
+   * @param at    event instant
+   * @param since window start; events before it do not count
+   * @param limit maximum events in the window including this one
+   * @return the admission outcome
+   * @since 00.84.00
+   */
+  default Admission tryAdmit(RateLimitKey key, Instant at, Instant since, int limit) {
+    int current = countSince(key, since);
+    if (current >= limit) {
+      return new Admission(false, current);
+    }
+    recordEvent(key, at);
+    return new Admission(true, current + 1);
+  }
 }

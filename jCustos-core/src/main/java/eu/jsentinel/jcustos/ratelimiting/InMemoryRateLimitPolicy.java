@@ -109,16 +109,17 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
     requireNonNull(key, "key must not be null");
     Instant now = clock.instant();
     Instant cutoff = now.minus(window);
-    int current = store.countSince(key, cutoff);
-    if (current >= limit) {
-      // Throttled: do NOT record the event — only successful
-      // acquisitions count toward the window.
+    // JS-SEC-078 (CWE-367): check and record as one step — the store decides
+    // atomically whether this event still fits the window, so N concurrent
+    // callers at limit-1 cannot all pass. Throttled calls record nothing: only
+    // admitted events count toward the window.
+    RateLimitStore.Admission admission = store.tryAdmit(key, now, cutoff, limit);
+    if (!admission.admitted()) {
       Duration retryAfter = window;
-      publishExceeded(now, key, current);
-      return new RateLimitDecision.Throttled(current, limit, window, retryAfter);
+      publishExceeded(now, key, admission.eventsInWindow());
+      return new RateLimitDecision.Throttled(admission.eventsInWindow(), limit, window, retryAfter);
     }
-    store.recordEvent(key, now);
-    return new RateLimitDecision.Allowed(current + 1, limit, window);
+    return new RateLimitDecision.Allowed(admission.eventsInWindow(), limit, window);
   }
 
   /**

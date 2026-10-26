@@ -401,6 +401,45 @@ Verified: with a sink that throws on every publish and three accounts, `forceAll
 returns `changed == 3` without an exception, every account is at the target status and the
 report shows three audit failures.
 
+## Five in-memory structures bounded; rate limiting checks and records atomically (ER11, JS-SEC-078, CWE-770, CWE-367)
+
+Five in-memory structures are filled with keys an attacker chooses — client address, username,
+refresh-token family id, RP session id, OAuth2 state — and were never bounded or cleaned:
+`InMemoryRateLimitStore` kept every admitted event for ever (`purgeOlderThan` is called by no
+shipped module) and `InMemoryRateLimitPolicy.tryAcquire` counted and recorded in two steps, so
+N parallel requests at `limit - 1` all passed; `AbusePatternMonitor` emptied its deques but never
+dropped a key; `InMemoryRefreshTokenFamilyStore` remembered families and revoked ids for ever;
+`InMemorySessionRegistry` had no `unregister`; `VaadinSessionStateStore` kept expired entries.
+JS-SEC-030, -048 and -015 had bounded their sister classes.
+
+- **Rate limiting.** `RateLimitStore` gains `tryAdmit(key, at, since, limit)` with an
+  `Admission` result — check and record as one step. The default is the old two-step sequence
+  for stores that cannot do better; `InMemoryRateLimitStore` performs it atomically per key
+  under `ConcurrentHashMap.compute` and drops events older than `since` on the way, so buckets
+  no longer grow beyond the window. The store is bounded (`CapacityBound.DEFAULT_MAX_ENTRIES`,
+  constructor overload) and evicts the key seen first in constant amortised time.
+  `InMemoryRateLimitPolicy.tryAcquire` uses `tryAdmit`.
+- **Abuse monitor.** Each of the three pattern maps is bounded (constructor overload with
+  `maxTrackedKeys`, default `DEFAULT_MAX_ENTRIES`), the key seen first is evicted at the bound,
+  and `purgeIdle(now)` removes keys whose observations all lie outside their window.
+- **Refresh-token families.** `InMemoryRefreshTokenFamilyStore` is bounded for current and
+  revoked families alike and forgets a revoked id after a retention (default seven days);
+  constructor overload with capacity, retention and clock.
+- **OIDC session registry.** `SessionRegistry` gains `unregister(sessionId)`; the in-memory
+  registry implements it, is bounded, and forgets the session registered first at the bound.
+  `terminate` now drops the terminated ids from the registry entirely. The new
+  `VaadinSessionRegistryCleanup` (`jCustos-identity-oidc-vaadin`) is a `SessionDestroyListener`
+  that unregisters the RP session when Vaadin destroys it — register it once per service.
+  Implementers of `SessionRegistry` must add `unregister`; the in-memory registry is the only
+  one shipped.
+- **OAuth2 state in the Vaadin session.** `VaadinSessionStateStore` drops expired entries on
+  every `bind` and caps pending states per session (default 32; constructor overload); at the
+  cap the state expiring soonest goes first. `pendingCount()` reports the current size.
+
+Verified: 200 000 distinct keys keep each store within its bound; 50 threads against a limit of
+10 admit exactly 10; the registry is empty after every session is unregistered; with the atomic
+admission and the bound removed, the new tests fail.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

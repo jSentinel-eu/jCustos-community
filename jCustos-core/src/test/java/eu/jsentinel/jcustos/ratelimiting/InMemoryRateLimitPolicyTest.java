@@ -59,6 +59,38 @@ class InMemoryRateLimitPolicyTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-078: 50 threads against limit 10 admit at most 10 (check-then-act is atomic)")
+  void concurrentAcquireRespectsLimit() throws Exception {
+    InMemoryRateLimitStore store = new InMemoryRateLimitStore();
+    InMemoryRateLimitPolicy policy = new InMemoryRateLimitPolicy(
+        store, new CollectingAuditService(), 10, Duration.ofMinutes(1), fixed(T0));
+    int threads = 50;
+    java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+    java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicInteger allowed = new java.util.concurrent.atomic.AtomicInteger();
+    try {
+      List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+      for (int i = 0; i < threads; i++) {
+        futures.add(pool.submit(() -> {
+          start.await(5, java.util.concurrent.TimeUnit.SECONDS);
+          if (policy.tryAcquire(IP_KEY) instanceof RateLimitDecision.Allowed) {
+            allowed.incrementAndGet();
+          }
+          return null;
+        }));
+      }
+      start.countDown();
+      for (java.util.concurrent.Future<?> f : futures) {
+        f.get(10, java.util.concurrent.TimeUnit.SECONDS);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    assertEquals(10, allowed.get(), "exactly the limit may pass, never more");
+    assertEquals(10, store.countSince(IP_KEY, T0.minusSeconds(1)));
+  }
+
+  @Test
   @DisplayName("first N events are admitted, the (N+1)-th is throttled and emits audit")
   void slidingWindowEnforcesLimit() {
     InMemoryRateLimitStore store = new InMemoryRateLimitStore();

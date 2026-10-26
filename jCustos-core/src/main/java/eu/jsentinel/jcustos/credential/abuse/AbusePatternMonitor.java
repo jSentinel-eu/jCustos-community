@@ -22,6 +22,8 @@
  */
 package eu.jsentinel.jcustos.credential.abuse;
 
+import eu.jsentinel.jcustos.util.CapacityBound;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -35,6 +37,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Consumer;
 
 /**
@@ -124,11 +127,31 @@ public final class AbusePatternMonitor {
   /** username -> deque of timestamps */
   private final ConcurrentHashMap<String, Deque<Instant>> resetByUser =
       new ConcurrentHashMap<>();
+  // JS-SEC-078 (CWE-770): every map is keyed by attacker-chosen values (client
+  // address, username). Each is bounded; at the bound the key seen first goes.
+  private final ConcurrentLinkedQueue<String> sprayingArrival = new ConcurrentLinkedQueue<>();
+  private final ConcurrentLinkedQueue<String> stuffingArrival = new ConcurrentLinkedQueue<>();
+  private final ConcurrentLinkedQueue<String> resetArrival = new ConcurrentLinkedQueue<>();
+  private final int maxTrackedKeys;
 
+  /** Bounded to {@link CapacityBound#DEFAULT_MAX_ENTRIES} keys per pattern. */
   public AbusePatternMonitor(
       Config config, Consumer<AbusePatternSignal> signalSink) {
+    this(config, signalSink, CapacityBound.DEFAULT_MAX_ENTRIES);
+  }
+
+  /**
+   * @param config         thresholds and windows
+   * @param signalSink     receiver of detected patterns
+   * @param maxTrackedKeys upper bound on tracked keys per pattern; at the bound
+   *                       the key seen first is evicted
+   * @since 00.84.00
+   */
+  public AbusePatternMonitor(
+      Config config, Consumer<AbusePatternSignal> signalSink, int maxTrackedKeys) {
     this.config = Objects.requireNonNull(config, "config");
     this.signalSink = Objects.requireNonNull(signalSink, "signalSink");
+    this.maxTrackedKeys = CapacityBound.requirePositiveCapacity(maxTrackedKeys);
   }
 
   /**
@@ -171,8 +194,7 @@ public final class AbusePatternMonitor {
     }
     String client = context.clientAddress().get();
     String username = context.username().get();
-    Deque<TimedTarget> deque = sprayingByClient.computeIfAbsent(
-        client, k -> new ArrayDeque<>());
+    Deque<TimedTarget> deque = tracked(sprayingByClient, sprayingArrival, client);
     synchronized (deque) {
       pruneByTime(deque, context.at(), config.sprayingWindow());
       deque.addLast(new TimedTarget(context.at(), username));
@@ -203,8 +225,7 @@ public final class AbusePatternMonitor {
     }
     String username = context.username().get();
     String client = context.clientAddress().get();
-    Deque<TimedTarget> deque = stuffingByUser.computeIfAbsent(
-        username, k -> new ArrayDeque<>());
+    Deque<TimedTarget> deque = tracked(stuffingByUser, stuffingArrival, username);
     synchronized (deque) {
       pruneByTime(deque, context.at(), config.stuffingWindow());
       deque.addLast(new TimedTarget(context.at(), client));
@@ -234,8 +255,7 @@ public final class AbusePatternMonitor {
       return Optional.empty();
     }
     String username = context.username().get();
-    Deque<Instant> deque = resetByUser.computeIfAbsent(
-        username, k -> new ArrayDeque<>());
+    Deque<Instant> deque = tracked(resetByUser, resetArrival, username);
     synchronized (deque) {
       pruneInstantDeque(deque, context.at(), config.resetAbuseWindow());
       deque.addLast(context.at());
@@ -250,6 +270,65 @@ public final class AbusePatternMonitor {
       }
       return Optional.empty();
     }
+  }
+
+  private <T> Deque<T> tracked(
+      ConcurrentHashMap<String, Deque<T>> map, ConcurrentLinkedQueue<String> arrival, String key) {
+    if (map.size() >= maxTrackedKeys && !map.containsKey(key)) {
+      String oldest;
+      while ((oldest = arrival.poll()) != null) {
+        if (map.remove(oldest) != null) {
+          break;
+        }
+      }
+    }
+    return map.computeIfAbsent(key, k -> {
+      arrival.add(k);
+      return new ArrayDeque<>();
+    });
+  }
+
+  /**
+   * Drops every key whose observations all lie outside its pattern window at
+   * {@code now} (JS-SEC-078, CWE-770). Call it from a retention sweep; the
+   * per-pattern capacity bound protects the heap in between.
+   *
+   * @param now reference instant
+   * @return number of keys removed
+   * @since 00.84.00
+   */
+  public int purgeIdle(Instant now) {
+    Objects.requireNonNull(now, "now");
+    int removed = 0;
+    removed += purgeIdleTargets(sprayingByClient, now, config.sprayingWindow());
+    removed += purgeIdleTargets(stuffingByUser, now, config.stuffingWindow());
+    for (String key : resetByUser.keySet()) {
+      if (resetByUser.computeIfPresent(key, (k, deque) -> {
+        synchronized (deque) {
+          pruneInstantDeque(deque, now, config.resetAbuseWindow());
+          return deque.isEmpty() ? null : deque;
+        }
+      }) == null) {
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  private int purgeIdleTargets(
+      ConcurrentHashMap<String, Deque<TimedTarget>> map, Instant now, Duration window) {
+    int removed = 0;
+    for (String key : map.keySet()) {
+      if (map.computeIfPresent(key, (k, deque) -> {
+        synchronized (deque) {
+          pruneByTime(deque, now, window);
+          return deque.isEmpty() ? null : deque;
+        }
+      }) == null) {
+        removed++;
+      }
+    }
+    return removed;
   }
 
   private static void pruneByTime(

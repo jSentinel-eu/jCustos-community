@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.credential.abuse;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -201,6 +202,28 @@ class AbusePatternMonitorTest {
           AttemptOutcome.SUCCESS);
     }
     assertTrue(signals.isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-078: 200 000 distinct clients stay within the per-pattern bound; idle keys are purged")
+  void boundedAndPurgeable() {
+    java.util.List<AbusePatternSignal> signals = new java.util.ArrayList<>();
+    AbusePatternMonitor monitor = new AbusePatternMonitor(AbusePatternMonitor.Config.defaults(), signals::add, 1_000);
+    java.time.Instant t0 = java.time.Instant.parse("2026-06-01T12:00:00Z");
+    for (int i = 0; i < 200_000; i++) {
+      monitor.observe(login("user-" + i, "10.0." + (i / 256) + "." + (i % 256), t0.plusMillis(i)), AttemptOutcome.FAILURE);
+    }
+    assertTrue(monitor.snapshotCardinalities().get(AbusePattern.PASSWORD_SPRAYING) <= 1_000,
+        "spraying keys must stay within the bound");
+    assertTrue(monitor.snapshotCardinalities().get(AbusePattern.CREDENTIAL_STUFFING) <= 1_000,
+        "stuffing keys must stay within the bound");
+
+    int removed = monitor.purgeIdle(t0.plus(java.time.Duration.ofDays(1)));
+    assertTrue(removed > 0, "idle keys are removed once their window has passed");
+    assertEquals(0, monitor.snapshotCardinalities().get(AbusePattern.PASSWORD_SPRAYING));
+    assertEquals(0, monitor.snapshotCardinalities().get(AbusePattern.CREDENTIAL_STUFFING));
+    assertThrows(IllegalArgumentException.class,
+        () -> new AbusePatternMonitor(AbusePatternMonitor.Config.defaults(), signals::add, 0));
   }
 
   @Test
