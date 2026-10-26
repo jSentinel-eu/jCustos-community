@@ -153,6 +153,49 @@ Verified: with no registered policy, a navigation 31 minutes after the last acti
 clears the subject, forwards to the login view and audits `SessionExpired(IdleTimeout)`.
 
 
+## Client address behind a reverse proxy (R2, JS-SEC-061, CWE-348)
+
+`LoginView` took the client address from `VaadinRequest.getRemoteAddr()`, and the demos'
+authentication services did the same. Behind a reverse proxy on loopback that address is
+the proxy, so every client shared one brute-force bucket; with Jetty's
+`ForwardedRequestCustomizer` installed, Jetty also honoured RFC 7239 `Forwarded`,
+`X-Forwarded-Server`, `X-Forwarded-Port` and `X-Proxied-Https`, none of which a plain Caddy
+set-up rewrites, so an Internet client could forge the address that keys the throttle. The
+REST adapter recorded no client address at all.
+
+New in `jCustos-core`, package `eu.jsentinel.jcustos.net` (all `@ExperimentalJCustosApi`):
+
+- `ClientAddressResolver` — SPI deciding which address identifies the client, resolved
+  through `JCustosServiceResolver.clientAddressResolver()` / `findClientAddressResolver()` /
+  `setClientAddressResolver(...)`, SPI-discoverable via `META-INF/services`.
+- `DefaultClientAddressResolver` — the default: the connection peer, no header consulted.
+- `TrustedProxyClientAddressResolver` (`ClientAddressResolver.trustedProxies(...)`) — honours
+  `X-Forwarded-For` only when the peer is a configured trusted proxy (addresses or CIDR
+  ranges, IPv4 and IPv6); reads the header from the right, skips trusted hops, ignores
+  `Forwarded`, `X-Real-IP` and friends, falls back to the peer with a one-time `WARN` for
+  untrusted peers or malformed entries. IP literals are parsed without name resolution.
+- `ClientRequestView` — the transport-neutral request view the resolver works on.
+
+Adapters: `VaadinClientAddress.current()` replaces `getRemoteAddr()` in `LoginView` and in all
+Vaadin demos; `RestRequest.remoteAddress()` (default `null`, so existing implementations
+keep compiling) exposes the peer, `RestClientAddress.resolve(request)` resolves it and
+`RestAccessContextFactory` records it as attribute `clientAddress` (scrubbed). The REST demos
+and the enterprise `HttpExchangeRestRequest` expose their peer; `demo-rest` drops its
+`X-Demo-Remote-Addr` header hack. DX: `.clientAddress(ClientAddressResolver)` on every
+bootstrap registers the resolver at `install()`.
+
+Documentation: `docs/security/deployment/reverse-proxy.md` describes both supported
+topologies — the jCustos resolver with trusted peers, or Jetty's customizer with the
+`Forwarded`, `X-Proxied-Https`, `X-Forwarded-Server` and `X-Forwarded-Port` headers stripped
+at the proxy (Caddy fragment included) — and what not to combine.
+
+Migration: nothing changes for direct connections. Behind a reverse proxy call
+`.clientAddress(ClientAddressResolver.trustedProxies("127.0.0.1", "::1"))` (or register the
+resolver programmatically) so throttling keys on the real client again. Verified: forged
+`X-Forwarded-For` and `Forwarded` from an untrusted peer leave the resolved address at the
+peer; the same header from a trusted peer yields the appended client address, in core,
+REST and a browserless Vaadin request alike.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

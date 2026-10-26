@@ -78,6 +78,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
 | `LoginAttemptPolicy` | core | `InMemoryLoginAttemptPolicy` | Login-Throttling + Lockout-Entscheidungen |
+| `ClientAddressResolver` | core | `DefaultClientAddressResolver` (Verbindungs-Peer, kein Header) | **V00.84** (JS-SEC-061, CWE-348): entscheidet, welche Adresse Throttling, Abuse-Erkennung und Audit-Zeilen schlüsselt. `TrustedProxyClientAddressResolver` wertet `X-Forwarded-For` nur von konfigurierten Proxys (Adressen/CIDR) aus, liest von rechts, ignoriert `Forwarded`/`X-Real-IP`. Adapter: `VaadinClientAddress`, `RestClientAddress`, `RestRequest.remoteAddress()`, DX `.clientAddress(...)`. Doku: `docs/security/deployment/reverse-proxy.md` |
 | `SessionPolicy<U>` | core | `TimeoutSessionPolicy` (seit **V00.84 auch Resolver-Default**: 30 min Leerlauf, 12 h Gesamtlebensdauer, Rotation nach Login, Login-Route aus dem Resolver — JS-SEC-065; `NoopSessionPolicy` ist der ausdrückliche Opt-out) | Lifecycle-Hooks + Idle/Absolute-Timeout |
 
 ### Logout

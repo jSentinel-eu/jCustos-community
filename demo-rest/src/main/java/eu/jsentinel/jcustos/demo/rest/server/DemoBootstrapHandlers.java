@@ -29,7 +29,7 @@ import eu.jsentinel.jcustos.demo.rest.shared.DemoJson;
 import eu.jsentinel.jcustos.rest.BodyRestRequest;
 import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.rest.BootstrapRestStatusMapper;
-import eu.jsentinel.jcustos.rest.RestHeaders;
+import eu.jsentinel.jcustos.rest.RestClientAddress;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 
@@ -89,7 +89,8 @@ public final class DemoBootstrapHandlers {
   }
 
   public void createInitialAdmin(RestRequest request, RestResponse response) {
-    String clientAddress = RestHeaders.first(request, DemoHandlers.REMOTE_ADDR_HEADER).orElse(null);
+    // JS-SEC-061 (CWE-348): resolved through the registered ClientAddressResolver.
+    String clientAddress = RestClientAddress.resolve(request).orElse(null);
     LoginAttemptContext attempt = LoginAttemptContext.now(
         BOOTSTRAP_THROTTLE_KEY, clientAddress, null);
 

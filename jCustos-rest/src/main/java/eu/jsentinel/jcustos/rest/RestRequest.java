@@ -50,4 +50,17 @@ public interface RestRequest {
    * @return query parameters
    */
   Map<String, String> queryParameters();
+
+  /**
+   * Address of the peer that opened the connection, as the transport reports it
+   * (JS-SEC-061, CWE-348). Adapters that know their transport override this;
+   * the default keeps existing implementations compiling and means "unknown",
+   * in which case no client address is recorded.
+   *
+   * @return the peer address, or {@code null} when the transport does not expose it
+   * @since 00.84.00
+   */
+  default String remoteAddress() {
+    return null;
+  }
 }

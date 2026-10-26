@@ -31,6 +31,8 @@ import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.propagation.OutboundTokenStrategy;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
+import eu.jsentinel.jcustos.net.DefaultClientAddressResolver;
 import eu.jsentinel.jcustos.policy.impl.InMemoryPolicyRegistry;
 import eu.jsentinel.jcustos.policy.impl.InMemoryResourceResolverRegistry;
 import eu.jsentinel.jcustos.policy.spi.PolicyRegistry;
@@ -106,6 +108,9 @@ public final class JCustosContext {
   private final AtomicReference<JCustosVersionStore> securityVersionStoreRef =
       new AtomicReference<>();
   private final AtomicReference<SubjectIdResolver<?>> subjectIdResolverRef =
+      new AtomicReference<>();
+  // V00.84 (JS-SEC-061, CWE-348): which address identifies the client.
+  private final AtomicReference<ClientAddressResolver> clientAddressResolverRef =
       new AtomicReference<>();
   private final AtomicReference<String> stepUpRouteNameRef =
       new AtomicReference<>();
@@ -436,6 +441,67 @@ public final class JCustosContext {
    */
   public void setLoginAttemptPolicy(LoginAttemptPolicy policy) {
     loginAttemptPolicyRef.set(policy);
+  }
+
+  // ── ClientAddressResolver ──────────────────────────────────────
+
+  /**
+   * Returns the registered {@link ClientAddressResolver}, or the default
+   * ({@link DefaultClientAddressResolver}: the connection peer, no header
+   * consulted) if no SPI implementation is configured (JS-SEC-061, CWE-348).
+   * This method <strong>never</strong> throws.
+   *
+   * @return the resolver, never {@code null}
+   * @since 00.84.00
+   */
+  public ClientAddressResolver clientAddressResolver() {
+    ClientAddressResolver cached = clientAddressResolverRef.get();
+    if (cached != null) {
+      return cached;
+    }
+
+    ClientAddressResolver loaded = findSingleService(
+        ClientAddressResolver.class,
+        ServiceLoader.load(ClientAddressResolver.class))
+        .orElse(DefaultClientAddressResolver.INSTANCE);
+
+    clientAddressResolverRef.compareAndSet(null, loaded);
+    return clientAddressResolverRef.get();
+  }
+
+  /**
+   * Returns the registered {@link ClientAddressResolver}, or empty if none
+   * is configured. Use {@link #clientAddressResolver()} for the default
+   * fallback; diagnostics use this method to tell a default from a registration.
+   *
+   * @return the SPI-registered or explicitly set resolver, or empty
+   * @since 00.84.00
+   */
+  public Optional<ClientAddressResolver> findClientAddressResolver() {
+    ClientAddressResolver cached = clientAddressResolverRef.get();
+    if (cached != null && cached != DefaultClientAddressResolver.INSTANCE) {
+      return Optional.of(cached);
+    }
+    if (cached == DefaultClientAddressResolver.INSTANCE) {
+      return Optional.empty();
+    }
+
+    Optional<ClientAddressResolver> loaded = findSingleService(
+        ClientAddressResolver.class,
+        ServiceLoader.load(ClientAddressResolver.class));
+    loaded.ifPresent(resolver -> clientAddressResolverRef.compareAndSet(null, resolver));
+    return loaded;
+  }
+
+  /**
+   * Replaces the cached {@link ClientAddressResolver}. Intended for the DX
+   * bootstrap, tests and applications that prefer programmatic wiring over SPI.
+   *
+   * @param resolver the resolver, or {@code null} to clear
+   * @since 00.84.00
+   */
+  public void setClientAddressResolver(ClientAddressResolver resolver) {
+    clientAddressResolverRef.set(resolver);
   }
 
   // ── SessionPolicy ──────────────────────────────────────────────
@@ -1122,6 +1188,7 @@ public final class JCustosContext {
     roleHierarchyRef.set(null);
     securityVersionStoreRef.set(null);
     subjectIdResolverRef.set(null);
+    clientAddressResolverRef.set(null);
     stepUpRouteNameRef.set(null);
     loginRouteNameRef.set(null);
     denyByDefaultRef.set(false);

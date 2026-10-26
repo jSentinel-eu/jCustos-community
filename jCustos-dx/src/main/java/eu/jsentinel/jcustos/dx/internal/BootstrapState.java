@@ -15,6 +15,7 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
@@ -44,6 +45,8 @@ public final class BootstrapState {
   // V00.74: direct-set services on CommonJCustosBootstrap
   private LogoutService logoutService;
   private LoginAttemptPolicy loginAttemptPolicy;
+  // V00.84 (JS-SEC-061): client-address resolution.
+  private ClientAddressResolver clientAddressResolver;
   private RateLimitPolicy rateLimitPolicy;
   private ApiKeyAuthenticationService apiKeyAuthenticationService;
   private TokenService tokenService;
@@ -231,6 +234,14 @@ public final class BootstrapState {
 
   public void loginAttemptPolicy(LoginAttemptPolicy policy) {
     this.loginAttemptPolicy = policy;
+  }
+
+  public ClientAddressResolver clientAddressResolver() {
+    return clientAddressResolver;
+  }
+
+  public void clientAddressResolver(ClientAddressResolver resolver) {
+    this.clientAddressResolver = resolver;
   }
 
   public RateLimitPolicy rateLimitPolicy() {

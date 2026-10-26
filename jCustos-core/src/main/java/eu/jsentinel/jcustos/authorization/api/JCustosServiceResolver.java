@@ -27,6 +27,7 @@ import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.propagation.OutboundTokenStrategy;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.policy.impl.InMemoryPolicyRegistry;
 import eu.jsentinel.jcustos.policy.impl.InMemoryResourceResolverRegistry;
 import eu.jsentinel.jcustos.policy.spi.PolicyRegistry;
@@ -283,6 +284,42 @@ public final class JCustosServiceResolver {
    */
   public static void setLoginAttemptPolicy(LoginAttemptPolicy policy) {
     DEFAULT.setLoginAttemptPolicy(policy);
+  }
+
+  // ── ClientAddressResolver ──────────────────────────────────────
+
+  /**
+   * Returns the registered {@link ClientAddressResolver}, or the default
+   * (connection peer, no header consulted) if no SPI implementation is
+   * configured (JS-SEC-061, CWE-348). Never throws.
+   *
+   * @return the resolver, never {@code null}
+   * @since 00.84.00
+   */
+  public static ClientAddressResolver clientAddressResolver() {
+    return DEFAULT.clientAddressResolver();
+  }
+
+  /**
+   * Returns the registered {@link ClientAddressResolver}, or empty if none
+   * is configured. Use {@link #clientAddressResolver()} for the default fallback.
+   *
+   * @return the SPI-registered or explicitly set resolver, or empty
+   * @since 00.84.00
+   */
+  public static Optional<ClientAddressResolver> findClientAddressResolver() {
+    return DEFAULT.findClientAddressResolver();
+  }
+
+  /**
+   * Replaces the cached {@link ClientAddressResolver}. Intended for the DX
+   * bootstrap, tests and applications that prefer programmatic wiring over SPI.
+   *
+   * @param resolver the resolver, or {@code null} to clear
+   * @since 00.84.00
+   */
+  public static void setClientAddressResolver(ClientAddressResolver resolver) {
+    DEFAULT.setClientAddressResolver(resolver);
   }
 
   // ── SessionPolicy ──────────────────────────────────────────────

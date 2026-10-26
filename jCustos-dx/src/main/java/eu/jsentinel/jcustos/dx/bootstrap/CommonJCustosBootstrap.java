@@ -15,6 +15,7 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.logout.LogoutService;
@@ -123,6 +124,20 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
    * @since 00.74.00
    */
   B bruteForce(LoginAttemptPolicy policy);
+
+  /**
+   * V00.84 (JS-SEC-061, CWE-348): registers how the client address is resolved.
+   * Behind a reverse proxy pass {@code ClientAddressResolver.trustedProxies(...)}
+   * with the proxy addresses so {@code X-Forwarded-For} is honoured from those
+   * peers only; without this call the connection peer is the client. Wired
+   * through {@code JCustosServiceResolver.setClientAddressResolver(...)} by
+   * {@code install()}.
+   *
+   * @param resolver non-null resolver
+   * @return this builder
+   * @since 00.84.00
+   */
+  B clientAddress(ClientAddressResolver resolver);
 
   /**
    * V00.74: registers a rate-limit policy. Stored in DX state /

@@ -29,7 +29,7 @@ import eu.jsentinel.jcustos.demo.app.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectory;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
-import com.vaadin.flow.server.VaadinRequest;
+import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -94,12 +94,8 @@ public class MyAuthenticationService
    * Best-effort: Vaadin exposes the current request only on the request
    * thread. Returns {@code null} when called outside of one.
    */
+  /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
-    try {
-      VaadinRequest request = VaadinRequest.getCurrent();
-      return request == null ? null : request.getRemoteAddr();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+    return VaadinClientAddress.current().orElse(null);
   }
 }

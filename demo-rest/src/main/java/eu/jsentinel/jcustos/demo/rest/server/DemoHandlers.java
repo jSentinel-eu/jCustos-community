@@ -60,7 +60,7 @@ import eu.jsentinel.jcustos.jwt.api.JwtValidator;
 import eu.jsentinel.jcustos.jwt.api.ValidatedJwt;
 import eu.jsentinel.jcustos.rest.BearerTokenExtractor;
 import eu.jsentinel.jcustos.rest.BodyRestRequest;
-import eu.jsentinel.jcustos.rest.RestHeaders;
+import eu.jsentinel.jcustos.rest.RestClientAddress;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 import eu.jsentinel.jcustos.accountlifecycle.PasswordResetService;
@@ -98,9 +98,6 @@ import java.util.Set;
  * enforce them. Authenticated-only endpoints are handled by the router.
  */
 public final class DemoHandlers {
-
-  /** Header key under which {@code DemoHttpRouter} stashes the remote IP. */
-  public static final String REMOTE_ADDR_HEADER = "X-Demo-Remote-Addr";
 
   private final DemoUserStore userStore;
   private final DemoTokenStore tokenStore;
@@ -459,7 +456,8 @@ public final class DemoHandlers {
       return;
     }
 
-    String clientAddress = RestHeaders.first(request, REMOTE_ADDR_HEADER).orElse(null);
+    // JS-SEC-061 (CWE-348): resolved through the registered ClientAddressResolver.
+    String clientAddress = RestClientAddress.resolve(request).orElse(null);
 
     // V00.70 Phase-7c per-IP rate limit — refuses with 429 + Retry-After
     // before the per-username brute-force policy. Configured for an order

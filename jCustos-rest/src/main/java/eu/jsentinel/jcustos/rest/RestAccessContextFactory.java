@@ -30,6 +30,14 @@ import java.util.Optional;
 public final class RestAccessContextFactory {
 
   /**
+   * Attribute key under which the resolved client address is recorded
+   * (JS-SEC-061); absent when the transport exposes no peer address.
+   *
+   * @since 00.84.00
+   */
+  public static final String CLIENT_ADDRESS_ATTRIBUTE = "clientAddress";
+
+  /**
    * Creates an access context from a REST request.
    *
    * @param request    request
@@ -53,6 +61,12 @@ public final class RestAccessContextFactory {
     contextAttributes.put("method", request.method());
     contextAttributes.put("path", safePath);
     contextAttributes.put("queryParameters", Map.copyOf(request.queryParameters()));
+    // JS-SEC-061 (CWE-348): the client address comes from the registered ClientAddressResolver,
+    // so behind a reverse proxy it is the trusted proxy's X-Forwarded-For entry and never a
+    // header the client chose. Scrubbed like the path because it reaches audit lines.
+    RestClientAddress.resolve(request)
+        .ifPresent(address -> contextAttributes.put(
+            CLIENT_ADDRESS_ATTRIBUTE, LogFieldScrubber.scrub(address)));
     return new AccessContext(
         subject,
         "rest-endpoint",

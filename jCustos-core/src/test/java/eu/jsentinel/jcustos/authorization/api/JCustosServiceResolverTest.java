@@ -33,6 +33,8 @@ import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
+import eu.jsentinel.jcustos.net.DefaultClientAddressResolver;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import eu.jsentinel.jcustos.session.NoopSessionPolicy;
@@ -353,6 +355,37 @@ class JCustosServiceResolverTest {
 
     assertSame(NoopLoginAttemptPolicy.INSTANCE,
         JCustosServiceResolver.loginAttemptPolicy());
+  }
+
+  // ── ClientAddressResolver (JS-SEC-061) ─────────────────────────
+
+  @Test
+  @DisplayName("clientAddressResolver falls back to DefaultClientAddressResolver when no SPI is registered")
+  void clientAddressResolver_defaultsToRemotePeer() {
+    assertSame(DefaultClientAddressResolver.INSTANCE,
+        JCustosServiceResolver.clientAddressResolver());
+  }
+
+  @Test
+  @DisplayName("findClientAddressResolver returns empty for the default")
+  void findClientAddressResolver_emptyByDefault() {
+    JCustosServiceResolver.clientAddressResolver();
+    assertTrue(JCustosServiceResolver.findClientAddressResolver().isEmpty());
+  }
+
+  @Test
+  @DisplayName("setClientAddressResolver overrides both accessors; resetAll restores the default")
+  void setClientAddressResolver_overridesAndResets() {
+    ClientAddressResolver trusted = ClientAddressResolver.trustedProxies("127.0.0.1");
+    JCustosServiceResolver.setClientAddressResolver(trusted);
+
+    assertSame(trusted, JCustosServiceResolver.clientAddressResolver());
+    assertSame(trusted, JCustosServiceResolver.findClientAddressResolver().orElseThrow());
+
+    JCustosServiceResolver.resetAll();
+
+    assertSame(DefaultClientAddressResolver.INSTANCE,
+        JCustosServiceResolver.clientAddressResolver());
   }
 
   static final class BlockEverything implements LoginAttemptPolicy {

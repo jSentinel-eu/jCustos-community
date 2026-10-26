@@ -110,9 +110,10 @@ class DemoLoginRateLimitTest {
   private DemoHttpResponse runLogin(String username, String password) {
     DemoHttpRequest req = new DemoHttpRequest(
         "POST", "/api/login",
-        Map.of(DemoHandlers.REMOTE_ADDR_HEADER, IP),
         Map.of(),
-        "{\"username\":\"" + username + "\",\"password\":\"" + password + "\"}");
+        Map.of(),
+        "{\"username\":\"" + username + "\",\"password\":\"" + password + "\"}",
+        IP);
     DemoHttpResponse res = new DemoHttpResponse();
     handlers.login(req, res);
     return res;

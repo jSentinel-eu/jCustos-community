@@ -117,6 +117,14 @@ public final class Router implements HttpHandler {
     String method = exchange.getRequestMethod();
     String path = uri.getPath();
     return new RestRequest() {
+      /** JS-SEC-061: expose the connection peer; the ClientAddressResolver decides the client. */
+      @Override
+      public String remoteAddress() {
+        var remote = exchange.getRemoteAddress();
+        return remote == null || remote.getAddress() == null
+            ? null : remote.getAddress().getHostAddress();
+      }
+
       @Override
       public String method() {
         return method;

@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
@@ -77,6 +78,28 @@ class DirectServiceBootstrapTest {
     assertSame(policy, JCustosServiceResolver.findLoginAttemptPolicy().orElseThrow());
     assertTrue(runtime.services().stream()
         .anyMatch(s -> LoginAttemptPolicy.class.equals(s.spi())));
+  }
+
+  @Test
+  @DisplayName(".clientAddress(resolver) registers via JCustosServiceResolver.setClientAddressResolver(...) (JS-SEC-061)")
+  void clientAddressWiresResolver() {
+    ClientAddressResolver resolver = ClientAddressResolver.trustedProxies("127.0.0.1");
+    JCustosRuntime runtime = new TestBootstrap()
+        .clientAddress(resolver)
+        .install();
+    assertSame(resolver, JCustosServiceResolver.findClientAddressResolver().orElseThrow());
+    assertSame(resolver, JCustosServiceResolver.clientAddressResolver());
+    assertTrue(runtime.services().stream()
+        .anyMatch(s -> ClientAddressResolver.class.equals(s.spi())));
+  }
+
+  @Test
+  @DisplayName("without .clientAddress(...) the resolver default applies and nothing is registered")
+  void clientAddressDefaultsToPeer() {
+    JCustosRuntime runtime = new TestBootstrap().install();
+    assertTrue(JCustosServiceResolver.findClientAddressResolver().isEmpty());
+    assertFalse(runtime.services().stream()
+        .anyMatch(s -> ClientAddressResolver.class.equals(s.spi())));
   }
 
   @Test

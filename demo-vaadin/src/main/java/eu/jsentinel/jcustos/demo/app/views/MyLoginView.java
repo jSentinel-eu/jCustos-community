@@ -35,7 +35,6 @@ import com.vaadin.flow.component.select.Select;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
-import com.vaadin.flow.server.VaadinRequest;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.WrappedSession;
 import eu.jsentinel.jcustos.demo.app.security.model.Credentials;
@@ -45,6 +44,7 @@ import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -110,13 +110,9 @@ public class MyLoginView
     }
   }
 
+  /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
-    try {
-      VaadinRequest request = VaadinRequest.getCurrent();
-      return request == null ? null : request.getRemoteAddr();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+    return VaadinClientAddress.current().orElse(null);
   }
 
   private static void showLockoutBanner(LoginAttemptDecision.LockedOut lockout) {

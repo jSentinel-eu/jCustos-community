@@ -29,6 +29,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
   private final Map<String, String> headers;
   private final Map<String, String> queryParameters;
   private final byte[] body;
+  private final String remoteAddress;
 
   public DemoHttpRequest(
       String method,
@@ -36,11 +37,37 @@ public final class DemoHttpRequest implements BodyRestRequest {
       Map<String, String> headers,
       Map<String, String> queryParameters,
       byte[] body) {
+    this(method, path, headers, queryParameters, body, null);
+  }
+
+  /**
+   * @param remoteAddress connection peer as the transport reports it, or {@code null}
+   *                      (JS-SEC-061: the client address is resolved from it, never from a header)
+   */
+  public DemoHttpRequest(
+      String method,
+      String path,
+      Map<String, String> headers,
+      Map<String, String> queryParameters,
+      byte[] body,
+      String remoteAddress) {
     this.method = method;
     this.path = path;
     this.headers = Map.copyOf(headers);
     this.queryParameters = Map.copyOf(queryParameters);
     this.body = body == null ? new byte[0] : body.clone();
+    this.remoteAddress = remoteAddress;
+  }
+
+  public DemoHttpRequest(
+      String method,
+      String path,
+      Map<String, String> headers,
+      Map<String, String> queryParameters,
+      String body,
+      String remoteAddress) {
+    this(method, path, headers, queryParameters,
+        body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8), remoteAddress);
   }
 
   /** Convenience for callers that already have a string body (UTF-8 assumed). */
@@ -62,6 +89,11 @@ public final class DemoHttpRequest implements BodyRestRequest {
   @Override
   public String path() {
     return path;
+  }
+
+  @Override
+  public String remoteAddress() {
+    return remoteAddress;
   }
 
   @Override

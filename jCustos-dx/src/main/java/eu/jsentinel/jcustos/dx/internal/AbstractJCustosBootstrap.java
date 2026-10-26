@@ -26,6 +26,7 @@ import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.credential.change.PasswordChangeService;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
@@ -177,6 +178,12 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
   @Override
   public B bruteForce(LoginAttemptPolicy policy) {
     state.loginAttemptPolicy(Objects.requireNonNull(policy, "policy"));
+    return self();
+  }
+
+  @Override
+  public B clientAddress(ClientAddressResolver resolver) {
+    state.clientAddressResolver(Objects.requireNonNull(resolver, "resolver"));
     return self();
   }
 
@@ -1173,6 +1180,13 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       JCustosServiceResolver.setLoginAttemptPolicy(state.loginAttemptPolicy());
       services.add(new RegisteredJCustosService(
           LoginAttemptPolicy.class, state.loginAttemptPolicy().getClass(),
+          "bootstrap-explicit", false));
+    }
+    if (state.clientAddressResolver() != null) {
+      // JS-SEC-061 (CWE-348): the resolver decides which address keys throttles and audit lines.
+      JCustosServiceResolver.setClientAddressResolver(state.clientAddressResolver());
+      services.add(new RegisteredJCustosService(
+          ClientAddressResolver.class, state.clientAddressResolver().getClass(),
           "bootstrap-explicit", false));
     }
     // R029: rateLimit / apiKeys / refreshTokens have no global resolver setter,

@@ -25,6 +25,7 @@ import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
 import eu.jsentinel.jcustos.session.JCustosVersion;
 import eu.jsentinel.jcustos.session.JCustosVersionKey;
 import eu.jsentinel.jcustos.session.JCustosVersionStore;
@@ -422,13 +423,13 @@ public abstract class LoginView
     }
   }
 
+  /**
+   * JS-SEC-061 (CWE-348): the client address comes from the registered
+   * {@code ClientAddressResolver}, never from {@code getRemoteAddr()} directly,
+   * so a reverse-proxy deployment cannot be keyed on a forgeable header.
+   */
   private static String currentClientAddress() {
-    try {
-      VaadinRequest request = VaadinRequest.getCurrent();
-      return request == null ? null : request.getRemoteAddr();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+    return VaadinClientAddress.current().orElse(null);
   }
 
   /**

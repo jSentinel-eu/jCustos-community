@@ -16,8 +16,11 @@
  */
 package eu.jsentinel.jcustos.rest;
 
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
+import eu.jsentinel.jcustos.net.ClientAddressResolver;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -44,6 +47,66 @@ class RestAccessContextFactoryTest {
 
   private static SimpleRequest req() {
     return new SimpleRequest("GET", "/api/x", Map.of(), Map.of("q", "1"));
+  }
+
+  /** A request whose transport exposes the connection peer. */
+  private record PeerRequest(
+      String method, String path,
+      Map<String, String> headers, Map<String, String> queryParameters,
+      String remoteAddress
+  ) implements RestRequest {
+  }
+
+  @AfterEach
+  void resetResolver() {
+    JCustosServiceResolver.resetAll();
+  }
+
+  // ── client address (JS-SEC-061, CWE-348) ─────────────────────────
+
+  @Test
+  @DisplayName("no peer address exposed → no clientAddress attribute")
+  void noPeer_noClientAddressAttribute() {
+    AccessContext ctx = factory.create(req(), Optional.empty(), "read", Map.of());
+    assertFalse(ctx.attributes().containsKey(RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE));
+  }
+
+  @Test
+  @DisplayName("default resolver: the peer is the client, forged X-Forwarded-For / Forwarded are ignored")
+  void defaultResolver_peerWins() {
+    PeerRequest request = new PeerRequest("GET", "/api/x",
+        Map.of("X-Forwarded-For", "198.51.100.9", "Forwarded", "for=198.51.100.9"),
+        Map.of(), "203.0.113.5");
+    AccessContext ctx = factory.create(request, Optional.empty(), "read", Map.of());
+    assertEquals("203.0.113.5", ctx.attributes().get(RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE));
+  }
+
+  @Test
+  @DisplayName("trusted proxy resolver: X-Forwarded-For from the trusted peer is honoured")
+  void trustedProxy_forwardedForHonoured() {
+    JCustosServiceResolver.setClientAddressResolver(ClientAddressResolver.trustedProxies("127.0.0.1"));
+    PeerRequest request = new PeerRequest("GET", "/api/x",
+        Map.of("X-Forwarded-For", "198.51.100.9, 203.0.113.5"), Map.of(), "127.0.0.1");
+    AccessContext ctx = factory.create(request, Optional.empty(), "read", Map.of());
+    assertEquals("203.0.113.5", ctx.attributes().get(RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE));
+  }
+
+  @Test
+  @DisplayName("trusted proxy resolver: an untrusted peer keeps its own address")
+  void trustedProxy_untrustedPeerKeepsOwnAddress() {
+    JCustosServiceResolver.setClientAddressResolver(ClientAddressResolver.trustedProxies("127.0.0.1"));
+    PeerRequest request = new PeerRequest("GET", "/api/x",
+        Map.of("X-Forwarded-For", "198.51.100.9"), Map.of(), "203.0.113.5");
+    AccessContext ctx = factory.create(request, Optional.empty(), "read", Map.of());
+    assertEquals("203.0.113.5", ctx.attributes().get(RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE));
+  }
+
+  @Test
+  @DisplayName("RestClientAddress.resolve mirrors the factory and never throws")
+  void helperMirrorsFactory() {
+    assertTrue(RestClientAddress.resolve(req()).isEmpty());
+    assertEquals(Optional.of("203.0.113.5"), RestClientAddress.resolve(
+        new PeerRequest("GET", "/x", Map.of(), Map.of(), "203.0.113.5")));
   }
 
   @Test

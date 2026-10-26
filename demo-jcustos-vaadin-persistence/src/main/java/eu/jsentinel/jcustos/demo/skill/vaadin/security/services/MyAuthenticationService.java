@@ -9,10 +9,10 @@ import eu.jsentinel.jcustos.autoservice.api.JCustosAutoService;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
-import com.vaadin.flow.server.VaadinRequest;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.UserDirectoryProvider;
+import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -78,12 +78,8 @@ public class MyAuthenticationService
     }
   }
 
+  /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
-    try {
-      VaadinRequest request = VaadinRequest.getCurrent();
-      return request == null ? null : request.getRemoteAddr();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+    return VaadinClientAddress.current().orElse(null);
   }
 }

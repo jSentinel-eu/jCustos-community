@@ -26,13 +26,13 @@ import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.demo.restclient.backend.BackendClientProvider;
 import eu.jsentinel.jcustos.demo.restclient.backend.Credentials;
 import eu.jsentinel.jcustos.demo.restclient.backend.RemoteUser;
+import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.notification.NotificationVariant;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
-import com.vaadin.flow.server.VaadinRequest;
 
 @Route(MyLoginView.NAV)
 public class MyLoginView extends LoginView implements HasLogger, BeforeEnterObserver {
@@ -101,13 +101,9 @@ public class MyLoginView extends LoginView implements HasLogger, BeforeEnterObse
     }
   }
 
+  /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
-    try {
-      VaadinRequest request = VaadinRequest.getCurrent();
-      return request == null ? null : request.getRemoteAddr();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+    return VaadinClientAddress.current().orElse(null);
   }
 
   private static void showLockoutBanner(LoginAttemptDecision.LockedOut lockout) {

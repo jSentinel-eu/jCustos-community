@@ -268,23 +268,24 @@ public final class DemoHttpRouter implements HttpHandler {
     }
     URI uri = exchange.getRequestURI();
     Map<String, String> headers = flattenHeaders(exchange.getRequestHeaders());
-    addRemoteAddress(headers, exchange);
     return new DemoHttpRequest(
         exchange.getRequestMethod(),
         uri.getPath(),
         headers,
         parseQuery(uri.getRawQuery()),
-        body);
+        body,
+        remoteAddress(exchange));
   }
 
-  private static void addRemoteAddress(Map<String, String> headers, HttpExchange exchange) {
+  /** JS-SEC-061: the peer travels as request metadata, not as a forgeable header. */
+  private static String remoteAddress(HttpExchange exchange) {
     try {
       var remote = exchange.getRemoteAddress();
-      if (remote != null && remote.getAddress() != null) {
-        headers.put(DemoHandlers.REMOTE_ADDR_HEADER, remote.getAddress().getHostAddress());
-      }
+      return remote == null || remote.getAddress() == null
+          ? null : remote.getAddress().getHostAddress();
     } catch (RuntimeException ignored) {
       // never block the request because we can't determine the remote address
+      return null;
     }
   }
 

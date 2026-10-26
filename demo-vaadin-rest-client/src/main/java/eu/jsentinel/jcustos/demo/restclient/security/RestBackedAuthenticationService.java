@@ -28,7 +28,7 @@ import eu.jsentinel.jcustos.demo.restclient.backend.BackendClientProvider;
 import eu.jsentinel.jcustos.demo.restclient.backend.Credentials;
 import eu.jsentinel.jcustos.demo.restclient.backend.LoginResult;
 import eu.jsentinel.jcustos.demo.restclient.backend.RemoteUser;
-import com.vaadin.flow.server.VaadinRequest;
+import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -97,12 +97,8 @@ public class RestBackedAuthenticationService
     return RemoteUser.class;
   }
 
+  /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
-    try {
-      VaadinRequest request = VaadinRequest.getCurrent();
-      return request == null ? null : request.getRemoteAddr();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+    return VaadinClientAddress.current().orElse(null);
   }
 }
