@@ -616,6 +616,17 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
   protected final void applyAuditConfiguration(List<RegisteredJCustosService> services,
                                                List<JCustosBootstrapWarning> warnings) {
     if (!state.auditConfigured()) {
+      // JS-SEC-080 (CWE-778): no .audit(...) and nothing registered elsewhere means the
+      // application runs without an audit trail. Say so - as an error in STRICT.
+      if (JCustosServiceResolver.findJCustosAuditService().isEmpty()) {
+        Severity severity = state.mode() == JCustosBootstrapMode.STRICT ? Severity.ERROR : Severity.WARNING;
+        warnings.add(new JCustosBootstrapWarning(
+            severity,
+            "audit/noop-fallback",
+            "No JCustosAuditService is configured; security events are discarded.",
+            "Call .audit(a -> a.logging()) (or .ringBuffer(n), .storeBacked(...)) or register a "
+                + "JCustosAuditService via META-INF/services."));
+      }
       return;
     }
     AuditState audit = state.auditState();

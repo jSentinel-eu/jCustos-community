@@ -157,6 +157,39 @@ class AuditBootstrapTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-080: STRICT without .audit(...) and without a registered service throws audit/noop-fallback")
+  void strictWithoutAnyAuditThrows() {
+    JCustosBootstrapException ex = assertThrows(
+        JCustosBootstrapException.class,
+        () -> new TestAuditOnlyBootstrap()
+            .mode(JCustosBootstrapMode.STRICT)
+            .install());
+    assertTrue(ex.warnings().stream()
+        .anyMatch(w -> "audit/noop-fallback".equals(w.code()) && w.severity() == Severity.ERROR));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-080: PRODUCTION without .audit(...) records a WARNING audit/noop-fallback and boots")
+  void productionWithoutAnyAuditWarns() {
+    JCustosRuntime runtime = new TestAuditOnlyBootstrap()
+        .mode(JCustosBootstrapMode.PRODUCTION)
+        .install();
+    assertTrue(runtime.warnings().stream()
+        .anyMatch(w -> "audit/noop-fallback".equals(w.code()) && w.severity() == Severity.WARNING));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-080: a service registered outside the bootstrap silences audit/noop-fallback")
+  void registeredServiceSilencesNoopFallback() {
+    JCustosServiceResolver.setJCustosAuditService(new RecordingAuditService());
+    JCustosRuntime runtime = new TestAuditOnlyBootstrap()
+        .mode(JCustosBootstrapMode.STRICT)
+        .install();
+    assertFalse(runtime.warnings().stream()
+        .anyMatch(w -> "audit/noop-fallback".equals(w.code())));
+  }
+
+  @Test
   @DisplayName("STRICT .storeBacked(null) throws audit/store-backed-without-store")
   void strictStoreBackedNullThrows() {
     JCustosBootstrapException ex = assertThrows(

@@ -457,6 +457,28 @@ same reference. Verified with a real recording SLF4J logger: a `SessionCreated` 
 `ABCDEF0123456789` produces a line without that substring but with a deterministic `sessionRef=`,
 and two events with the same id share the reference.
 
+## A missing audit service is announced, not silently swallowed (ER13, JS-SEC-080, CWE-778)
+
+`JCustosServiceResolver.securityAuditService()` fell back to `NoopJCustosAuditService.INSTANCE`
+without a word when no `JCustosAuditService` was registered: every `publish` succeeded and nothing
+was recorded. The resolver recognised the fallback by identity only, so a
+`new NoopJCustosAuditService()` — which the DX bootstrap constructs for the session policy — read
+as a configured audit service. The DX bootstrap reported an empty `.audit(a -> {})` but said
+nothing when `.audit(...)` was never called at all.
+
+The first fallback now logs one WARN `audit/noop-fallback` per JVM through the shared logger;
+`findJCustosAuditService()` treats any `NoopJCustosAuditService` — the shared instance or a fresh
+one — as "nothing configured"; and the DX bootstrap adds `audit/noop-fallback` when neither
+`.audit(...)` nor a registered service exists: an ERROR in STRICT, a WARNING in every other mode. The Noop fallback is no longer cached: a
+negative `ServiceLoader` result on a thread with the wrong context class loader no longer cements
+itself, and a service that becomes visible later is picked up by the next lookup.
+**STRICT consumers:** a STRICT bootstrap that never configured audit now fails at `install()` —
+call `.audit(a -> a.logging())` (or `.ringBuffer(n)`, `.storeBacked(...)`) or register a
+`JCustosAuditService` via `META-INF/services`. Verified with isolated contexts and the real DX
+adapter: no SPI yields the Noop plus exactly one warning, a repeated fallback does not warn again, a service
+set afterwards wins, and
+an explicitly set Noop no longer reads as configured.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

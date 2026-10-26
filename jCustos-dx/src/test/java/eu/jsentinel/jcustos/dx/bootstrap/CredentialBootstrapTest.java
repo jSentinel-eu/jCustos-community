@@ -106,6 +106,7 @@ class CredentialBootstrapTest {
   void modernInStrictWiresArgon2id() {
     JCustosRuntime runtime = new TestBootstrap()
         .credentials(c -> c.modern())
+        .audit(a -> a.logging()) // JS-SEC-080: STRICT refuses to boot without an audit trail
         .mode(JCustosBootstrapMode.STRICT)
         .install();
     assertTrue(runtime.services().stream()

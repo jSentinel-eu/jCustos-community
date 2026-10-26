@@ -109,6 +109,7 @@ class StandaloneJCustosBootstrapTest {
     JCustosRuntime runtime = StandaloneSecurity.bootstrap()
         .authentication(FakeAuthenticationService.forType(String.class))
         .authorization(new FakeAuthorizationService<String>())
+        .audit(a -> a.logging()) // JS-SEC-080: without an audit trail the bootstrap now reports audit/noop-fallback
         .install();
 
     assertNotNull(runtime);

@@ -636,4 +636,37 @@ class JCustosServiceResolverTest {
     SubjectIdResolver<String> resolver = s -> new SubjectId(s);
     assertSame(TenantId.DEFAULT, resolver.tenantFor("alice"));
   }
+
+  // ── JCustosAuditService fallback (JS-SEC-080) ───────────────────
+
+  @Test
+  @DisplayName("securityAuditService falls back to Noop exactly once with a warning; find reports nothing configured")
+  void auditFallsBackToNoopWithOneWarning() {
+    JCustosContext ctx = new JCustosContext();
+    JCustosContext.resetNoopAuditFallbackWarning();
+    assertEquals(0, JCustosContext.noopAuditFallbackWarnings());
+
+    JCustosAuditService first = ctx.securityAuditService();
+    assertTrue(first instanceof NoopJCustosAuditService, "no SPI -> Noop");
+    assertEquals(1, JCustosContext.noopAuditFallbackWarnings(), "the fallback is announced exactly once");
+    assertTrue(ctx.findJCustosAuditService().isEmpty(), "the fallback is not a configuration");
+
+    assertSame(first, ctx.securityAuditService(), "the fallback is the shared Noop instance ...");
+    assertEquals(1, JCustosContext.noopAuditFallbackWarnings(), "... and a repeated fallback does not warn again");
+
+    // JS-SEC-080: the negative result is not cemented - a service set later is picked up.
+    JCustosAuditService late = new RecordingAuditService();
+    ctx.setJCustosAuditService(late);
+    assertSame(late, ctx.securityAuditService(), "a service registered after the fallback must win");
+  }
+
+  @Test
+  @DisplayName("an explicitly set Noop (as the DX bootstrap constructs it) is detected by type, not identity")
+  void explicitNoopCountsAsUnconfigured() {
+    JCustosContext ctx = new JCustosContext();
+    ctx.setJCustosAuditService(new NoopJCustosAuditService());
+    assertTrue(ctx.findJCustosAuditService().isEmpty(),
+        "a fresh NoopJCustosAuditService must not read as a configured audit service");
+    assertTrue(ctx.securityAuditService() instanceof NoopJCustosAuditService);
+  }
 }

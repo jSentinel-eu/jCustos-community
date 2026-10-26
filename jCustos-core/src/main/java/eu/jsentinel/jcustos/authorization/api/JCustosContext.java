@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authorization.api;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.action.ActionAuthorizationService;
 import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
@@ -47,6 +48,7 @@ import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -87,6 +89,10 @@ public final class JCustosContext {
       new AtomicReference<>();
   private final AtomicReference<AuthorizationService<?>> authorizationServiceRef =
       new AtomicReference<>();
+  /** JS-SEC-080: one warning per JVM when the audit service silently falls back to Noop. */
+  private static final AtomicBoolean NOOP_AUDIT_WARNED = new AtomicBoolean(false);
+  /** Diagnostics: how many times the warning was actually written (0 or 1 per JVM unless re-armed). */
+  private static final AtomicInteger NOOP_AUDIT_WARNINGS = new AtomicInteger();
   private final AtomicReference<JCustosAuditService> auditServiceRef =
       new AtomicReference<>();
   private final AtomicReference<ActionAuthorizationService<?>> actionAuthServiceRef =
@@ -294,10 +300,50 @@ public final class JCustosContext {
     JCustosAuditService loaded = findSingleService(
         JCustosAuditService.class,
         ServiceLoader.load(JCustosAuditService.class))
-        .orElse(NoopJCustosAuditService.INSTANCE);
+        .orElse(null);
+    if (loaded == null) {
+      // JS-SEC-080 (CWE-778): running without an audit trail must never be silent.
+      // The fallback is announced once per JVM, findJCustosAuditService() keeps
+      // reporting "nothing configured", and the Noop is deliberately NOT cached:
+      // ServiceLoader.load(Class) consults the thread-context class loader, so a
+      // first lookup on a container thread must not cement a negative result. A
+      // service that becomes visible later, or is set through the resolver, is
+      // picked up by the next lookup.
+      if (NOOP_AUDIT_WARNED.compareAndSet(false, true)) {
+        NOOP_AUDIT_WARNINGS.incrementAndGet();
+        HasLogger.staticLogger().warn("audit/noop-fallback: no JCustosAuditService is registered "
+            + "(META-INF/services or JCustosServiceResolver.setJCustosAuditService); security events "
+            + "are discarded until one is configured.");
+      }
+      return NoopJCustosAuditService.INSTANCE;
+    }
 
     auditServiceRef.compareAndSet(null, loaded);
     return auditServiceRef.get();
+  }
+
+  /**
+   * Diagnostics hook: whether the one-time {@code audit/noop-fallback} warning has been emitted.
+   *
+   * @return {@code true} once an audit lookup fell back to the Noop service
+   */
+  static boolean noopAuditFallbackWarned() {
+    return NOOP_AUDIT_WARNED.get();
+  }
+
+  /**
+   * Diagnostics hook: how often the {@code audit/noop-fallback} warning was written.
+   *
+   * @return the number of warnings since start-up or the last re-arm
+   */
+  static int noopAuditFallbackWarnings() {
+    return NOOP_AUDIT_WARNINGS.get();
+  }
+
+  /** Test hook: re-arms the one-time {@code audit/noop-fallback} warning. */
+  static void resetNoopAuditFallbackWarning() {
+    NOOP_AUDIT_WARNED.set(false);
+    NOOP_AUDIT_WARNINGS.set(0);
   }
 
   /**
@@ -309,10 +355,13 @@ public final class JCustosContext {
    */
   public Optional<JCustosAuditService> findJCustosAuditService() {
     JCustosAuditService cached = auditServiceRef.get();
-    if (cached != null && cached != NoopJCustosAuditService.INSTANCE) {
+    // JS-SEC-080: any Noop - the shared INSTANCE or a fresh one the DX bootstrap
+    // constructs - means "no audit configured"; detection by type, not identity,
+    // like the other SPIs in this class.
+    if (cached != null && !(cached instanceof NoopJCustosAuditService)) {
       return Optional.of(cached);
     }
-    if (cached == NoopJCustosAuditService.INSTANCE) {
+    if (cached instanceof NoopJCustosAuditService) {
       return Optional.empty();
     }
 

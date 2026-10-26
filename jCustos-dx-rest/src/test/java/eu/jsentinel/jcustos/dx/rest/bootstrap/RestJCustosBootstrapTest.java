@@ -55,6 +55,7 @@ class RestJCustosBootstrapTest {
         .authentication(FakeAuthenticationService.forType(String.class))
         .authorization(new FakeAuthorizationService<String>())
         .subjectResolver(TEST_RESOLVER)
+        .audit(a -> a.logging()) // JS-SEC-080: without an audit trail the bootstrap now reports audit/noop-fallback
         .install();
 
     assertTrue(runtime.warnings().isEmpty(),

@@ -130,6 +130,7 @@ class SessionBootstrapTest {
   void strictStoreWithoutLifetimeBootsOnSecureDefault() {
     var runtime = new VaadinTestBootstrap()
         .mode(JCustosBootstrapMode.STRICT)
+        .audit(a -> a.logging()) // JS-SEC-080: STRICT refuses to boot without an audit trail
         .sessions(s -> s.storeBacked(new InMemorySessionStore()))
         .install();
     assertTrue(runtime.warnings().stream()

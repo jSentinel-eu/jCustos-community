@@ -360,7 +360,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 |---|---|---|
 | `JCustosAuditService` (Interface) | core | API: `publish(AuditEvent)` + `query(AuditQuery)` |
 | `AuditSink` (Interface) | core | Write-only, single-method, never-throws |
-| `NoopJCustosAuditService` | core | Default-Fallback wenn keine SPI registriert |
+| `NoopJCustosAuditService` | core | Default-Fallback wenn keine SPI registriert — seit **V00.84** (JS-SEC-080, CWE-778) einmalige WARN-Meldung `audit/noop-fallback` beim ersten Rückfall; `findJCustosAuditService()` meldet jeden Noop (auch eine frische Instanz) als „nicht konfiguriert“; der DX-Bootstrap meldet fehlendes Audit als `audit/noop-fallback` (STRICT: ERROR, sonst WARNING) |
 | `CompositeAuditService` | core | RingBuffer + zusätzliche Sinks; query gegen den RingBuffer |
 | `DefaultCompositeAuditService` | core | No-arg, SPI-registrierbar; RingBuffer + LoggingAuditSink |
 | `RingBufferAuditSink` | core | Default-Cap 256 Events, älteste fliegen raus, thread-safe |
