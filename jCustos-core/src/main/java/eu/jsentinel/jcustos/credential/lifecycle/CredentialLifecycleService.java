@@ -172,11 +172,22 @@ public final class CredentialLifecycleService {
         CredentialStatus.ACTIVE,
         CredentialStatus.COMPROMISED,
         CredentialStatus.DISABLED));
+    // JS-SEC-076 (CWE-284): a compromised secret must never be accepted again
+    // unchanged. The only ways out of COMPROMISED rotate the secret (forced
+    // change, reset) or retire the credential; ACTIVE is reachable from there
+    // only after the rotation. The incident-response bulk path
+    // (MassCredentialStatusChange) writes statuses directly and is unaffected.
     map.put(CredentialStatus.COMPROMISED, EnumSet.of(
-        CredentialStatus.DISABLED,
-        CredentialStatus.ACTIVE));
+        CredentialStatus.MUST_CHANGE,
+        CredentialStatus.RESET_PENDING,
+        CredentialStatus.DISABLED));
+    // Re-enabling a disabled credential is an administrative decision about
+    // the account, not a statement about the secret, so ACTIVE stays allowed;
+    // MUST_CHANGE and RESET_PENDING offer the safer re-enable.
     map.put(CredentialStatus.DISABLED, EnumSet.of(
-        CredentialStatus.ACTIVE));
+        CredentialStatus.ACTIVE,
+        CredentialStatus.MUST_CHANGE,
+        CredentialStatus.RESET_PENDING));
     return java.util.Collections.unmodifiableMap(map);
   }
 }

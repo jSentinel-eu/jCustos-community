@@ -365,6 +365,27 @@ after `register(A, sid)` and `register(B, sid)`, `sessionsOf(B)` lists the id, `
 does not, the record carries B's version and `clearAll(A)` leaves B's session alone; a record
 saved as `EXPIRED` or `REVOKED` is `ACTIVE` and listed again after the next `register`.
 
+## A compromised credential cannot return to ACTIVE without a new secret (ER09, JS-SEC-076, CWE-284)
+
+The credential state machine allowed `COMPROMISED → ACTIVE` and nothing else that would
+rotate the secret: no transition to `MUST_CHANGE` or `RESET_PENDING`, and
+`credential.reset.PasswordResetService.issue` refused a `COMPROMISED` credential as `Blocked`.
+The only way back into service re-accepted the compromised hash unchanged.
+
+`CredentialLifecycleService` now allows `COMPROMISED → MUST_CHANGE`, `RESET_PENDING` and
+`DISABLED`, and no longer `ACTIVE`; `ACTIVE` is reachable again only after the rotation. The
+reset service lets a `COMPROMISED` credential start a reset — the reset is the rotation — and
+the subsequent `consume` writes the new hash and moves the credential to `ACTIVE`; `DISABLED`
+stays blocked because re-enabling is an administrative decision. `DISABLED` additionally gains
+`MUST_CHANGE` and `RESET_PENDING` as the safer re-enable paths while `DISABLED → ACTIVE` stays
+available to administrators. The incident-response bulk path (`MassCredentialStatusChange`)
+writes statuses directly and is unaffected.
+
+Verified: `isAllowed(COMPROMISED, ACTIVE)` is `false`, `isAllowed(COMPROMISED, MUST_CHANGE)` and
+`isAllowed(COMPROMISED, RESET_PENDING)` are `true`; issuing a reset for a `COMPROMISED`
+credential yields `Created`, consuming it ends in `ACTIVE` with a different hash; a reset for
+`MUST_CHANGE` stays `Created`, for `DISABLED` stays `Blocked`.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

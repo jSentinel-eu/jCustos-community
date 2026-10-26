@@ -149,7 +149,10 @@ public final class PasswordResetService {
       return ResetTokenCreationResult.UnknownUser.INSTANCE;
     }
     CredentialStatus status = credential.get().status();
-    if (status == CredentialStatus.DISABLED || status == CredentialStatus.COMPROMISED) {
+    // JS-SEC-076 (CWE-284): a reset IS the way out of COMPROMISED — it rotates
+    // the secret. Only DISABLED stays blocked; re-enabling is an administrative
+    // decision, not something a password-reset link may perform.
+    if (status == CredentialStatus.DISABLED) {
       return ResetTokenCreationResult.Blocked.INSTANCE;
     }
 
@@ -176,7 +179,8 @@ public final class PasswordResetService {
         || status == CredentialStatus.MUST_CHANGE
         || status == CredentialStatus.REHASH_REQUIRED
         || status == CredentialStatus.DEPRECATED_ALGORITHM
-        || status == CredentialStatus.LOCKED) {
+        || status == CredentialStatus.LOCKED
+        || status == CredentialStatus.COMPROMISED) {
       if (lifecycleService.isAllowed(status, CredentialStatus.RESET_PENDING)) {
         lifecycleService.transition(
             username, status, CredentialStatus.RESET_PENDING,

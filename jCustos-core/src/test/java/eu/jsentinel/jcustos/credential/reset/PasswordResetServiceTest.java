@@ -59,6 +59,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PasswordResetServiceTest {
@@ -214,6 +215,34 @@ class PasswordResetServiceTest {
     ResetTokenCreationResult result = f.service.issue("alice", TTL);
     assertSame(ResetTokenCreationResult.Blocked.INSTANCE, result);
     assertEquals(0, f.tokens.size());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-076: a COMPROMISED credential may start a reset — the reset rotates the secret")
+  void issueCompromisedStartsReset() {
+    Fixture f = new Fixture();
+    String oldHash = f.register("alice", "Old-Password-1", CredentialStatus.COMPROMISED);
+    ResetTokenCreationResult issued = f.service.issue("alice", TTL);
+    assertInstanceOf(ResetTokenCreationResult.Created.class, issued, "a reset is the way out of COMPROMISED");
+    assertEquals(CredentialStatus.RESET_PENDING, f.credentials.findByUsername("alice").orElseThrow().status());
+
+    f.clock.advance(Duration.ofSeconds(1));
+    assertInstanceOf(PasswordResetConsumeResult.Succeeded.class,
+        f.service.consume(((ResetTokenCreationResult.Created) issued).token().encode(),
+            SecretValue.ofChars("New-Password-1".toCharArray())));
+    CredentialRecord after = f.credentials.findByUsername("alice").orElseThrow();
+    assertEquals(CredentialStatus.ACTIVE, after.status());
+    assertFalse(oldHash.equals(after.encodedHash()), "the compromised hash must be gone");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-076: MUST_CHANGE still issues a reset token; DISABLED stays blocked")
+  void issueMustChangeCreatedDisabledBlocked() {
+    Fixture f = new Fixture();
+    f.register("alice", "Old-Password-1", CredentialStatus.MUST_CHANGE);
+    f.register("bob", "Old-Password-1", CredentialStatus.DISABLED);
+    assertInstanceOf(ResetTokenCreationResult.Created.class, f.service.issue("alice", TTL));
+    assertInstanceOf(ResetTokenCreationResult.Blocked.class, f.service.issue("bob", TTL));
   }
 
   @Test

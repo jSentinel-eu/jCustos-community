@@ -160,9 +160,9 @@ class CredentialLifecycleServiceTest {
     InvalidStatusTransitionException ex = assertThrows(
         InvalidStatusTransitionException.class,
         () -> svc.transition("alice",
-            CredentialStatus.DISABLED, CredentialStatus.RESET_PENDING, "weird"));
+            CredentialStatus.DISABLED, CredentialStatus.LOCKED, "weird"));
     assertEquals(CredentialStatus.DISABLED, ex.from());
-    assertEquals(CredentialStatus.RESET_PENDING, ex.to());
+    assertEquals(CredentialStatus.LOCKED, ex.to());
     // store untouched
     assertEquals(CredentialStatus.DISABLED,
         store.findByUsername("alice").orElseThrow().status());
@@ -183,7 +183,7 @@ class CredentialLifecycleServiceTest {
   }
 
   @Test
-  @DisplayName("Compromised → Disabled is allowed; Compromised → MUST_CHANGE is not")
+  @DisplayName("JS-SEC-076: Compromised → Disabled and → MUST_CHANGE are allowed; Compromised → ACTIVE is not")
   void compromisedTransitions() {
     InMemoryCredentialStore store = storeWithAlice(CredentialStatus.COMPROMISED);
     RecordingAuditService audit = new RecordingAuditService();
@@ -200,7 +200,13 @@ class CredentialLifecycleServiceTest {
         other, audit, FIXED);
     assertThrows(InvalidStatusTransitionException.class,
         () -> bobSvc.transition("bob",
-            CredentialStatus.COMPROMISED, CredentialStatus.MUST_CHANGE, null));
+            CredentialStatus.COMPROMISED, CredentialStatus.ACTIVE, "unchanged-secret"),
+        "a compromised secret must never be accepted again without rotation");
+    assertInstanceOf(CredentialUpdateResult.Updated.class,
+        bobSvc.transition("bob",
+            CredentialStatus.COMPROMISED, CredentialStatus.MUST_CHANGE, "rotate-on-next-login"));
+    assertEquals(CredentialStatus.MUST_CHANGE,
+        other.findByUsername("bob").orElseThrow().status());
   }
 
   @Test
@@ -226,6 +232,14 @@ class CredentialLifecycleServiceTest {
     assertTrue(svc.isAllowed(CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE));
     assertFalse(svc.isAllowed(CredentialStatus.DISABLED, CredentialStatus.LOCKED));
     assertFalse(svc.isAllowed(CredentialStatus.RESET_PENDING, CredentialStatus.LOCKED));
+    // JS-SEC-076 (CWE-284): out of COMPROMISED only through rotation or retirement
+    assertFalse(svc.isAllowed(CredentialStatus.COMPROMISED, CredentialStatus.ACTIVE));
+    assertTrue(svc.isAllowed(CredentialStatus.COMPROMISED, CredentialStatus.MUST_CHANGE));
+    assertTrue(svc.isAllowed(CredentialStatus.COMPROMISED, CredentialStatus.RESET_PENDING));
+    assertTrue(svc.isAllowed(CredentialStatus.COMPROMISED, CredentialStatus.DISABLED));
+    assertTrue(svc.isAllowed(CredentialStatus.DISABLED, CredentialStatus.ACTIVE), "administrative re-enable stays");
+    assertTrue(svc.isAllowed(CredentialStatus.DISABLED, CredentialStatus.MUST_CHANGE));
+    assertTrue(svc.isAllowed(CredentialStatus.DISABLED, CredentialStatus.RESET_PENDING));
   }
 
   @Test
