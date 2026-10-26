@@ -78,6 +78,7 @@ final class VaadinJCustosBootstrapImpl
   }
 
   @Override
+  @Deprecated(since = "00.84.00", forRemoval = true)
   public VaadinJCustosBootstrap securedComponents() {
     this.securedComponents = true;
     return this;
@@ -181,6 +182,26 @@ final class VaadinJCustosBootstrapImpl
               + "via @JCustosAutoService(AuthorizationService.class)."));
     }
 
+    if (loginRoute != null) {
+      // JS-SEC-084 (CWE-684): .loginRoute(...) used to be discarded, so an application with a
+      // differently named login view was still sent to "login" on Unauthenticated and landed
+      // in RouteNotFoundError. The resolver is what AuthorizationListener, the lifetime
+      // listener and the logout default consult.
+      JCustosServiceResolver.setLoginRouteName(loginRoute);
+      services.add(new RegisteredJCustosService(
+          JCustosServiceResolver.class, String.class, "bootstrap-login-route=" + loginRoute, false));
+    }
+    if (subjectType != null && authn != null && authn.subjectType() != null
+        && !subjectType.equals(authn.subjectType())) {
+      // JS-SEC-084: .subjectType(...) now has a consumer - it is checked against the
+      // authentication service instead of being silently dropped.
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.WARNING,
+          "bootstrap/subject-type-mismatch",
+          ".subjectType(" + subjectType.getName() + ") differs from the authentication service's "
+              + "subject type " + authn.subjectType().getName() + ".",
+          "Remove .subjectType(...) or pass the type the AuthenticationService reports."));
+    }
     if (stepUpRoute != null) {
       JCustosServiceResolver.setStepUpRouteName(stepUpRoute);
     }
@@ -273,9 +294,8 @@ final class VaadinJCustosBootstrapImpl
       throw new JCustosBootstrapException(warnings);
     }
 
-    // Suppress unused-warning until the starter consumes these in Phase 3.
-    discard(subjectType);
-    discard(loginRoute);
+    // JS-SEC-084: loginRoute and subjectType are consumed above; the securedComponents opt-in
+    // has no consumer (the secured components work without it) and is deprecated.
     discard(securedComponents);
 
     return new JCustosRuntime(services, warnings, mode);

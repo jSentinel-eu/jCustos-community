@@ -36,4 +36,17 @@ public interface VaadinLogoutGateway {
 
   /** Invalidates the underlying servlet session. */
   void invalidateHttpSession();
+
+  /**
+   * The id of the HTTP session the current request belongs to, or {@code null}
+   * when none is bound. Since 00.84.00 (JS-SEC-084) the logout service passes it
+   * into {@code SessionPolicy.onLogout} so the logout audit correlates with the
+   * login; the default keeps older gateways source-compatible.
+   *
+   * @return the wrapped session id, or {@code null}
+   * @since 00.84.00
+   */
+  default String currentSessionId() {
+    return null;
+  }
 }

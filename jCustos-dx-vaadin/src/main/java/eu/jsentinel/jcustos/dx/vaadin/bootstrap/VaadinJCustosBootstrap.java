@@ -22,8 +22,10 @@ public interface VaadinJCustosBootstrap
     extends CommonJCustosBootstrap<VaadinJCustosBootstrap> {
 
   /**
-   * Records the configured subject type for downstream observers
-   * (e.g. the Vaadin starter). Optional.
+   * Records the configured subject type. Optional. Since 00.84.00 (JS-SEC-084) it
+   * is checked against the authentication service's subject type at
+   * {@code install()}; a mismatch is reported as
+   * {@code bootstrap/subject-type-mismatch}.
    *
    * @param subjectType non-null subject Class
    * @return this builder
@@ -31,10 +33,13 @@ public interface VaadinJCustosBootstrap
   VaadinJCustosBootstrap subjectType(Class<?> subjectType);
 
   /**
-   * Records the application's login route name. Optional; the starter
-   * uses this for default-after-login routing.
+   * Records the application's login route name. Optional. Since 00.84.00
+   * (JS-SEC-084) {@code install()} publishes it through
+   * {@code JCustosServiceResolver.setLoginRouteName}, so the authorisation
+   * listener, the session-lifetime listener and the logout default send
+   * unauthenticated or expired users to this route instead of {@code "login"}.
    *
-   * @param route non-null route name (e.g. {@code "login"})
+   * @param route non-null route name (e.g. {@code "signin"})
    * @return this builder
    */
   VaadinJCustosBootstrap loginRoute(String route);
@@ -50,10 +55,13 @@ public interface VaadinJCustosBootstrap
 
   /**
    * Marks the bootstrap as opting into the secured-UI components.
-   * Consumed by the Vaadin starter in Phase 3.
    *
    * @return this builder
+   * @deprecated since 00.84.00 (JS-SEC-084): the flag never had a consumer - the
+   *     secured components work without an opt-in. The method is a no-op and will
+   *     be removed in a later release.
    */
+  @Deprecated(since = "00.84.00", forRemoval = true)
   VaadinJCustosBootstrap securedComponents();
 
   /**

@@ -62,6 +62,16 @@ class DefaultVaadinLogoutGatewayWithUITest extends BrowserlessTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-084: currentSessionId is the wrapped HTTP session id")
+  void currentSessionId_isWrappedSessionId() {
+    navigate(Fixture.class);
+
+    WrappedSession wrapped = VaadinSession.getCurrent().getSession();
+    assertNotNull(wrapped, "Browserless must expose a wrapped session");
+    assertEquals(wrapped.getId(), gateway.currentSessionId());
+  }
+
+  @Test
   @DisplayName("closeVaadinSession transitions the session to CLOSING")
   void closeVaadinSession_marksSessionClosing() {
     navigate(Fixture.class);

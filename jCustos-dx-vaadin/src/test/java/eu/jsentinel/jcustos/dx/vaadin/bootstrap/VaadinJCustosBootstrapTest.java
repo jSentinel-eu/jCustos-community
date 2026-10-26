@@ -217,11 +217,47 @@ class VaadinJCustosBootstrapTest {
     VaadinSecurity.bootstrap()
         .authentication(authn)
         .authorization(authz)
-        .loginRoute("login")
+        .loginRoute("signin")
         .stepUpRoute("step-up")
         .install();
 
     assertEquals("step-up", JCustosServiceResolver.stepUpRouteName());
+    // JS-SEC-084: .loginRoute(...) used to be discarded.
+    assertEquals("signin", JCustosServiceResolver.loginRouteName(),
+        "the configured login route must reach the resolver the listeners consult");
+  }
+
+  @Test
+  void subjectTypeMismatch_isReported() {
+    FakeAuthenticationService<String, String> authn = FakeAuthenticationService.forType(String.class);
+    FakeAuthorizationService<String> authz = new FakeAuthorizationService<>();
+
+    JCustosRuntime runtime = VaadinSecurity.bootstrap()
+        .authentication(authn)
+        .authorization(authz)
+        .subjectType(Integer.class)
+        .audit(a -> a.logging())
+        .install();
+
+    assertTrue(runtime.warnings().stream()
+        .anyMatch(w -> "bootstrap/subject-type-mismatch".equals(w.code())),
+        "JS-SEC-084: .subjectType(...) is checked against the authentication service; got " + runtime.warnings());
+  }
+
+  @Test
+  void matchingSubjectType_isSilent() {
+    FakeAuthenticationService<String, String> authn = FakeAuthenticationService.forType(String.class);
+    FakeAuthorizationService<String> authz = new FakeAuthorizationService<>();
+
+    JCustosRuntime runtime = VaadinSecurity.bootstrap()
+        .authentication(authn)
+        .authorization(authz)
+        .subjectType(String.class)
+        .audit(a -> a.logging())
+        .install();
+
+    assertTrue(runtime.warnings().stream()
+        .noneMatch(w -> "bootstrap/subject-type-mismatch".equals(w.code())));
   }
 
   @Test

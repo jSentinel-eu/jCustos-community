@@ -548,6 +548,33 @@ audit field contains the credential, and `ActionDenied.subjectId()` equals
 for the four places that derive subject ids (session policy, lifetime listener, context factory,
 action service) is the subject of ER30.
 
+## The Vaadin bootstrap's login route is honoured; logout defaults follow it and carries the session id (ER17, JS-SEC-084, CWE-684)
+
+`VaadinJCustosBootstrap.loginRoute(...)` was recorded and then discarded at `install()`:
+`JCustosServiceResolver.setLoginRouteName` had no caller outside core, so an application with
+`.loginRoute("signin")` was still sent to `login` on an unauthenticated navigation and ended in
+`RouteNotFoundError`. `.subjectType(...)` and `.securedComponents()` were equally inert. The
+convenience constructor of `VaadinLogoutService` redirected to a hard-coded `/login`, and the
+`SessionPolicy.onLogout` notification carried `sessionId == null` although the wrapped session id
+was at hand — the logout audit could not be correlated with the login.
+
+`install()` now publishes the login route to the resolver (and lists it as
+`bootstrap-login-route=…` among the registered services), so `AuthorizationListener`, the
+session-lifetime listener and the logout default all send users to the configured route.
+`.subjectType(...)` has a consumer: it is checked against the authentication service's subject type
+and a mismatch is reported as `bootstrap/subject-type-mismatch`. `.securedComponents()` is
+deprecated for removal — the secured components never needed the opt-in. `VaadinLogoutService` gained
+a constructor `(SubjectStore, Class<U>, VaadinLogoutGateway)` that redirects to
+`"/" + loginRouteName()` resolved at logout time; the two-argument constructor uses it with the
+default gateway. `VaadinLogoutGateway` gained the default method `currentSessionId()` (the default
+gateway returns the wrapped session id), and the logout service passes it into the
+`SessionContext` given to `SessionPolicy.onLogout`, so `SessionInvalidated` names the session that
+`SessionCreated` named. Verified: a bootstrap with `.loginRoute("signin")` yields
+`loginRouteName() == "signin"` and an anonymous browserless navigation to a `@RequiresRole` route
+ends on the signin view; logout through the new constructor calls `gateway.redirectTo("/signin")`;
+the `SessionContext.sessionId()` handed to the policy equals the gateway's session id, which for the
+default gateway is the wrapped session id.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

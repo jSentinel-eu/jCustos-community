@@ -33,6 +33,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Vaadin-aware {@link LogoutService}. Wraps a core
@@ -66,17 +67,37 @@ public final class VaadinLogoutService<U> implements LogoutService {
   private final Class<U> subjectType;
   private final VaadinLogoutGateway gateway;
   private final SubjectClearingLogoutService<U> coreService;
-  private final String targetRoute;
+  private final Supplier<String> targetRoute;
   private final boolean closeVaadinSessionOnLogout;
   private final boolean invalidateHttpSessionOnLogout;
 
   /**
    * Convenience: full-invalidate logout (close VaadinSession + invalidate
-   * HttpSession) targeting {@code "/login"}.
+   * HttpSession) targeting {@code "/" + JCustosServiceResolver.loginRouteName()}
+   * (JS-SEC-084; was a hard-coded {@code "/login"}).
    */
   public VaadinLogoutService(SubjectStore subjectStore, Class<U> subjectType) {
-    this(subjectStore, subjectType, new DefaultVaadinLogoutGateway(),
-        "/login", true, true);
+    this(subjectStore, subjectType, new DefaultVaadinLogoutGateway());
+  }
+
+  /**
+   * Convenience constructor with a custom gateway: closes the Vaadin session,
+   * invalidates the HTTP session and redirects to {@code "/" +
+   * JCustosServiceResolver.loginRouteName()}, resolved at logout time
+   * (JS-SEC-084, CWE-684) - an application that configured
+   * {@code .loginRoute("signin")} is sent there, not to a hard-coded
+   * {@code /login}.
+   *
+   * @param subjectStore subject store to clear
+   * @param subjectType  subject type
+   * @param gateway      Vaadin gateway (redirect / session handling)
+   * @since 00.84.00
+   */
+  public VaadinLogoutService(SubjectStore subjectStore, Class<U> subjectType,
+                             VaadinLogoutGateway gateway) {
+    this(subjectStore, subjectType, gateway,
+        () -> "/" + JCustosServiceResolver.loginRouteName(), true, true,
+        new InMemorySubjectSessionRegistry());
   }
 
   /**
@@ -129,6 +150,23 @@ public final class VaadinLogoutService<U> implements LogoutService {
       boolean closeVaadinSessionOnLogout,
       boolean invalidateHttpSessionOnLogout,
       SubjectSessionRegistry registry) {
+    this(subjectStore, subjectType, gateway, fixedRoute(targetRoute),
+        closeVaadinSessionOnLogout, invalidateHttpSessionOnLogout, registry);
+  }
+
+  private static Supplier<String> fixedRoute(String targetRoute) {
+    Objects.requireNonNull(targetRoute, "targetRoute");
+    return () -> targetRoute;
+  }
+
+  private VaadinLogoutService(
+      SubjectStore subjectStore,
+      Class<U> subjectType,
+      VaadinLogoutGateway gateway,
+      Supplier<String> targetRoute,
+      boolean closeVaadinSessionOnLogout,
+      boolean invalidateHttpSessionOnLogout,
+      SubjectSessionRegistry registry) {
     this.subjectStore = Objects.requireNonNull(subjectStore, "subjectStore");
     this.subjectType = Objects.requireNonNull(subjectType, "subjectType");
     this.gateway = Objects.requireNonNull(gateway, "gateway");
@@ -154,7 +192,7 @@ public final class VaadinLogoutService<U> implements LogoutService {
 
     if (scope == LogoutScope.CurrentSession) {
       clearBoundTokenCredential();
-      gateway.redirectTo(targetRoute);
+      gateway.redirectTo(targetRoute.get());
       if (invalidateHttpSessionOnLogout) {
         gateway.invalidateHttpSession();
       }
@@ -205,8 +243,9 @@ public final class VaadinLogoutService<U> implements LogoutService {
       Optional<U> currentSubject = subjectStore.currentSubject(subjectType);
       SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
       Instant now = Instant.now();
+      // JS-SEC-084: carry the HTTP session id so SessionInvalidated correlates with the login.
       SessionContext<Object> sessionContext = new SessionContext<>(
-          currentSubject.orElse(null), null, now, now, null, Map.of());
+          currentSubject.orElse(null), gateway.currentSessionId(), now, now, null, Map.of());
       policy.onLogout(sessionContext);
     } catch (RuntimeException notifyFailure) {
       // never block the logout flow

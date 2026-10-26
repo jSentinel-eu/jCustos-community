@@ -42,6 +42,14 @@ public final class DefaultVaadinLogoutGateway implements VaadinLogoutGateway {
   }
 
   @Override
+  public String currentSessionId() {
+    VaadinSession vaadin = VaadinSession.getCurrent();
+    if (vaadin == null) return null;
+    WrappedSession wrapped = vaadin.getSession();
+    return wrapped == null ? null : wrapped.getId();
+  }
+
+  @Override
   public void invalidateHttpSession() {
     VaadinSession vaadin = VaadinSession.getCurrent();
     if (vaadin == null) return;

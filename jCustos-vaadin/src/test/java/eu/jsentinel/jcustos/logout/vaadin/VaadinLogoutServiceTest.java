@@ -138,6 +138,35 @@ class VaadinLogoutServiceTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-084: SessionPolicy.onLogout receives the wrapped HTTP session id from the gateway")
+  void currentSession_passesWrappedSessionIdToPolicy() {
+    RecordingSessionPolicy<String> policy = new RecordingSessionPolicy<>();
+    JCustosServiceResolver.setSessionPolicy(policy);
+    RecordingGateway gateway = new RecordingGateway();
+    gateway.sessionId = "wrapped-42";
+
+    new VaadinLogoutService<>(new RecordingSubjectStore(), String.class, gateway, "/login", true, true)
+        .logout(alice, LogoutScope.CurrentSession);
+
+    assertEquals("wrapped-42", policy.lastContext.sessionId(),
+        "the logout audit must correlate with the login through the session id");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-084: the convenience constructor redirects to the resolver's login route, not a hard-coded /login")
+  void convenienceConstructor_redirectsToResolverLoginRoute() {
+    JCustosServiceResolver.setLoginRouteName("signin");
+    RecordingGateway gateway = new RecordingGateway();
+
+    new VaadinLogoutService<>(new RecordingSubjectStore(), String.class, gateway)
+        .logout(alice, LogoutScope.CurrentSession);
+
+    assertEquals("/signin", gateway.redirectTarget);
+    assertEquals(1, gateway.closedVaadin);
+    assertEquals(1, gateway.invalidatedHttp);
+  }
+
+  @Test
   @DisplayName("AllSessionsOfSubject does NOT notify SessionPolicy.onLogout (current-thread concern)")
   void allSessions_doesNotNotifySessionPolicy() {
     RecordingSessionPolicy<String> policy = new RecordingSessionPolicy<>();
@@ -244,6 +273,12 @@ class VaadinLogoutServiceTest {
       invalidatedHttp++;
       invalidatedHttpAt = ++counter;
     }
+
+    String sessionId;
+
+    @Override public String currentSessionId() {
+      return sessionId;
+    }
   }
 
   static final class RecordingListener implements LogoutListener {
@@ -257,6 +292,7 @@ class VaadinLogoutServiceTest {
   static final class RecordingSessionPolicy<U>
       implements eu.jsentinel.jcustos.session.SessionPolicy<U> {
     int onLogoutCalls;
+    eu.jsentinel.jcustos.session.SessionContext<U> lastContext;
 
     @Override
     public eu.jsentinel.jcustos.session.SessionDecision beforeNavigation(
@@ -267,6 +303,7 @@ class VaadinLogoutServiceTest {
     @Override
     public void onLogout(eu.jsentinel.jcustos.session.SessionContext<U> context) {
       onLogoutCalls++;
+      lastContext = context;
     }
   }
 }
