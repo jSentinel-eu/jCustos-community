@@ -386,6 +386,21 @@ Verified: `isAllowed(COMPROMISED, ACTIVE)` is `false`, `isAllowed(COMPROMISED, M
 credential yields `Created`, consuming it ends in `ACTIVE` with a different hash; a reset for
 `MUST_CHANGE` stays `Created`, for `DISABLED` stays `Blocked`.
 
+## Emergency status change survives a failing audit sink (ER10, JS-SEC-077, CWE-703)
+
+`MassCredentialStatusChange.forceAllToStatus` was the one place in the credential area where
+`audit.publish` was not shielded against a `RuntimeException`. If the sink failed during a
+pepper-compromise run, the loop ended after the first successful update, the remaining accounts
+stayed `ACTIVE`, and the operator received an exception instead of the report — fail-open on an
+incident path.
+
+The publish is now guarded: a failing sink is counted in the new `Report.auditFailures`, logged
+as a `WARN` through `HasLogger`, and the loop continues. `Report` gains the fifth component; the
+previous four-argument constructor remains, and `total()` still sums the four outcome buckets.
+Verified: with a sink that throws on every publish and three accounts, `forceAllToStatus`
+returns `changed == 3` without an exception, every account is at the target status and the
+report shows three audit failures.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

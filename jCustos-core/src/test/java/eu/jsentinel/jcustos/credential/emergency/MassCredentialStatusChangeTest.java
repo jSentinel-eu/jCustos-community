@@ -104,6 +104,37 @@ class MassCredentialStatusChangeTest {
         "audit reason carries incident id and reason category");
   }
 
+  /** Audit sink that fails on every publish — the incident run must survive it. */
+  private static final class FailingAudit implements JCustosAuditService {
+    int attempts;
+    @Override public void publish(AuditEvent event) { attempts++; throw new IllegalStateException("sink down"); }
+    @Override public List<AuditEvent> query(AuditQuery q) { return List.of(); }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-077: a failing audit sink does not abort the incident run (CWE-703)")
+  void auditFailureDoesNotAbortRun() {
+    InMemoryCredentialStore store = new InMemoryCredentialStore();
+    for (String name : List.of("alice", "bob", "carol")) {
+      store.register(new CredentialRecord(name, "$pwh$v=1$..." + name, CredentialStatus.ACTIVE, 1L, T0, T0));
+    }
+    FailingAudit audit = new FailingAudit();
+    MassCredentialStatusChange mass = new MassCredentialStatusChange(
+        store, audit, Clock.fixed(T0, ZoneOffset.UTC));
+
+    MassCredentialStatusChange.Report report = mass.forceAllToStatus(
+        List.of("alice", "bob", "carol"), CredentialStatus.MUST_CHANGE, override());
+
+    assertEquals(3, report.changed(), "every account must be processed despite the failing sink");
+    assertEquals(3, report.auditFailures(), "each failed publish is counted, none is hidden");
+    assertEquals(3, audit.attempts);
+    for (String name : List.of("alice", "bob", "carol")) {
+      assertEquals(CredentialStatus.MUST_CHANGE, store.findByUsername(name).orElseThrow().status(),
+          name + " must be at the target status");
+    }
+    assertEquals(3, report.total(), "audit failures are not a fifth outcome bucket");
+  }
+
   @Test
   @DisplayName("Blank / null usernames in the input are counted as not-found, not crashes")
   void blankUsernamesNotFound() {

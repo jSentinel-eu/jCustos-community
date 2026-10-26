@@ -22,6 +22,7 @@
  */
 package eu.jsentinel.jcustos.credential.emergency;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.CredentialStatusChanged;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.credential.store.CredentialRecord;
@@ -54,7 +55,7 @@ import java.util.Optional;
  * store are recorded as {@link Report#notFound()} so the operator
  * can investigate residue.</p>
  */
-public final class MassCredentialStatusChange {
+public final class MassCredentialStatusChange implements HasLogger {
 
   private final CredentialStore store;
   private final JCustosAuditService audit;
@@ -93,6 +94,7 @@ public final class MassCredentialStatusChange {
     int alreadyAtTarget = 0;
     int notFound = 0;
     int stale = 0;
+    int auditFailures = 0;
     Instant when = Instant.now(clock);
     String reason = override.incidentId()
         + "/" + override.reason().name();
@@ -117,14 +119,18 @@ public final class MassCredentialStatusChange {
       switch (result) {
         case CredentialUpdateResult.Updated u -> {
           changed++;
-          audit.publish(new CredentialStatusChanged(
-              when, username, from, targetStatus, reason));
+          // JS-SEC-077 (CWE-703): the status is already written. A failing audit
+          // sink must not abort the incident run and leave the remaining
+          // accounts untouched — count it, log it, continue.
+          if (!publish(new CredentialStatusChanged(when, username, from, targetStatus, reason))) {
+            auditFailures++;
+          }
         }
         case CredentialUpdateResult.Stale s -> stale++;
         case CredentialUpdateResult.NotFound nf -> notFound++;
       }
     }
-    return new Report(changed, alreadyAtTarget, notFound, stale);
+    return new Report(changed, alreadyAtTarget, notFound, stale, auditFailures);
   }
 
   /**
@@ -133,11 +139,34 @@ public final class MassCredentialStatusChange {
    * incident-response output stream stays small and free of any
    * subject-level identifiers.
    */
-  public record Report(int changed, int alreadyAtTarget, int notFound, int stale) {
+  private boolean publish(CredentialStatusChanged event) {
+    try {
+      audit.publish(event);
+      return true;
+    } catch (RuntimeException auditFailure) {
+      logger().warn("audit sink failed during emergency status change of {} ({} -> {}): {}",
+          event.username(), event.fromStatus(), event.toStatus(), auditFailure.toString());
+      return false;
+    }
+  }
+
+  public record Report(int changed, int alreadyAtTarget, int notFound, int stale, int auditFailures) {
     public Report {
-      if (changed < 0 || alreadyAtTarget < 0 || notFound < 0 || stale < 0) {
+      if (changed < 0 || alreadyAtTarget < 0 || notFound < 0 || stale < 0 || auditFailures < 0) {
         throw new IllegalArgumentException("counts must be >= 0");
       }
+    }
+
+    /**
+     * Report without audit failures — the shape before 00.84.00.
+     *
+     * @param changed         credentials moved to the target status
+     * @param alreadyAtTarget credentials already at the target status
+     * @param notFound        usernames without a credential (or blank)
+     * @param stale           credentials whose status changed concurrently
+     */
+    public Report(int changed, int alreadyAtTarget, int notFound, int stale) {
+      this(changed, alreadyAtTarget, notFound, stale, 0);
     }
 
     public int total() {
