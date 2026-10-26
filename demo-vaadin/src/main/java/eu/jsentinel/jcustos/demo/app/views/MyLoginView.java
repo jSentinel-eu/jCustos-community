@@ -163,10 +163,20 @@ public class MyLoginView
       DemoUserDirectoryProvider.directory().findByCredentials(credentials)
           .ifPresent(user -> {
             SubjectStores.subjectStore().setCurrentSubject(user, MyUser.class);
-            recordSession(user);
           });
     }
     return permitted;
+  }
+
+
+  /**
+   * JS-SEC-060 (CWE-384): the session is recorded only after the HTTP session
+   * id rotated, so the inventory row carries the id that lives on. Recording
+   * inside {@link #checkCredentials()} would persist the retired id.
+   */
+  @Override
+  protected void onSessionRotated(String previousSessionId, String currentSessionId) {
+    SubjectStores.subjectStore().currentSubject(MyUser.class).ifPresent(MyLoginView::recordSession);
   }
 
   /**

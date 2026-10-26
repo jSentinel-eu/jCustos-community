@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -92,6 +93,35 @@ public interface SessionStore {
    *
    * @return immutable list of records, possibly empty; never {@code null}
    */
+  /**
+   * Moves the record stored under {@code from} to {@code to} (JS-SEC-060,
+   * CWE-384). A record created during login must follow the HTTP session id
+   * once the adapter rotates it; otherwise revocation by id misses the live
+   * session. The default is find, save under the new id, delete the old id;
+   * stores with an atomic primitive may override it.
+   *
+   * @param from the id the record is currently stored under; non-null
+   * @param to   the surviving session id; non-null
+   * @return {@code true} when a record was moved (or already lives under
+   *         {@code to} because both ids are equal), {@code false} when no
+   *         record exists under {@code from}
+   * @since 00.84.00
+   */
+  default boolean rekey(SessionId from, SessionId to) {
+    Objects.requireNonNull(from, "from must not be null");
+    Objects.requireNonNull(to, "to must not be null");
+    Optional<SessionRecord> existing = findById(from);
+    if (existing.isEmpty()) {
+      return false;
+    }
+    if (from.equals(to)) {
+      return true;
+    }
+    save(existing.get().withSessionId(to));
+    delete(from);
+    return true;
+  }
+
   default List<SessionRecord> findAll() {
     return List.of();
   }

@@ -123,4 +123,20 @@ public record SessionRecord(
         createdAt, lastActivityAt,
         securityVersionAtLogin, newStatus);
   }
+
+  /**
+   * Returns a copy keyed by {@code newSessionId}. Used to re-key a record
+   * created during login once the HTTP session id has rotated
+   * (JS-SEC-060, CWE-384), so revocation by id still reaches the live session.
+   *
+   * @param newSessionId the surviving session id; non-null
+   * @return new {@code SessionRecord}; receiver unchanged
+   * @since 00.84.00
+   */
+  public SessionRecord withSessionId(SessionId newSessionId) {
+    return new SessionRecord(
+        newSessionId, subjectId, tenant,
+        createdAt, lastActivityAt,
+        securityVersionAtLogin, status);
+  }
 }

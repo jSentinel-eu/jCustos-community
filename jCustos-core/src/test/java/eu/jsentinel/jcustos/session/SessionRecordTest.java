@@ -45,6 +45,22 @@ class SessionRecordTest {
   }
 
   @Test
+  @DisplayName("withSessionId re-keys the record and keeps every other component (JS-SEC-060)")
+  void withSessionIdRekeys() {
+    SessionRecord base = baseRecord();
+    SessionRecord rekeyed = base.withSessionId(new SessionId("sid-2"));
+    assertEquals(new SessionId("sid-2"), rekeyed.sessionId());
+    assertEquals(base.subjectId(), rekeyed.subjectId());
+    assertEquals(base.tenant(), rekeyed.tenant());
+    assertEquals(base.createdAt(), rekeyed.createdAt());
+    assertEquals(base.lastActivityAt(), rekeyed.lastActivityAt());
+    assertSame(base.securityVersionAtLogin(), rekeyed.securityVersionAtLogin());
+    assertEquals(base.status(), rekeyed.status());
+    assertEquals(new SessionId("sid-1"), base.sessionId(), "receiver unchanged");
+    assertThrows(NullPointerException.class, () -> base.withSessionId(null));
+  }
+
+  @Test
   @DisplayName("constructor rejects null required components")
   void rejectsNulls() {
     assertThrows(NullPointerException.class,

@@ -61,11 +61,13 @@ public sealed interface SessionDecision
    *       the session is expired/destroyed; drop the subject, invalidate
    *       the session, forward to {@code loginRoute}.</li>
    *   <li>From {@link SessionPolicy#onLogin(SessionContext)} —
-   *       session-fixation rotation: rotate the session id (e.g. via
-   *       {@code VaadinService.reinitializeSession(...)}), preserve the
-   *       just-bound subject, and continue to the original post-login
-   *       navigation target. {@code loginRoute} is ignored in this
-   *       context.</li>
+   *       session-fixation rotation. Since 00.84.00 (JS-SEC-060) the Vaadin
+   *       adapter rotates the id through
+   *       {@code HttpServletRequest.changeSessionId()} <em>before</em> it
+   *       calls {@code onLogin}, so the decision only contributes the audit
+   *       reason; the just-bound subject survives and the flow continues to
+   *       the original post-login navigation target. {@code loginRoute} is
+   *       ignored in this context.</li>
    * </ul>
    *
    * @param reason     short, generic reason (safe for logs)

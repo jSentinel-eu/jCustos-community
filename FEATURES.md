@@ -322,9 +322,9 @@ Alle implementieren `AuditEvent` (sealed interface) und sind über
 | `AccessDenied` | `subjectId`, `route`, `reason` | dito |
 | `ActionDenied` | `subjectId`, `actionName` | `StaticActionAuthorizationService.requireAllowed` |
 | `BruteForceLimitReached` | `username`, `clientAddress`, `failedAttempts`, `lockoutDuration` | `InMemoryLoginAttemptPolicy` |
-| `SessionCreated` | `subjectId`, `sessionId` | `TimeoutSessionPolicy.onLogin` |
+| `SessionCreated` | `subjectId`, `sessionId` | `TimeoutSessionPolicy.onLogin` — seit **V00.84** (JS-SEC-060) mit der **post-Rotations-ID**, da `LoginView` vor `onLogin` rotiert |
 | `SessionExpired` | `subjectId`, `sessionId`, `reason` | `TimeoutSessionPolicy`, `SessionLifetimeListener`, REST-Filter |
-| `SessionInvalidated` | `subjectId`, `sessionId (alt)`, `reason` | `LoginView.notifyOnLogin` (B3-Rotation) |
+| `SessionInvalidated` | `subjectId`, `sessionId (alt)`, `reason` | `LoginView.notifyOnLogin` (B3-Rotation; seit V00.84 nach `SessionCreated` mit der neuen ID) |
 | `RoleAssigned` | `subjectId`, `role`, `assignedBy` | `InMemoryDemoUserDirectory.assignRole`, `DemoUserStore.setRole` |
 | `RoleRevoked` | `subjectId`, `role`, `revokedBy` | dito |
 | `UserCreated` | `username`, `role`, `createdBy` | `InMemoryDemoUserDirectory.addUser`, `DemoUserStore.create` |
@@ -392,7 +392,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 - Stabile Test-IDs: `loginview-tf-username`, `loginview-pf-password`, `loginview-btn-login`, `loginview-btn-cancel`, `loginview-cb-remember-me`
 - Custom-Element-Slot via `setCustomElements(Component)` / `clearCustomElements()`
 - LUMO-Theme-Variants vorverdrahtet
-- `notifyOnLogin()` konsultiert `SessionPolicy.onLogin` und führt B3-Rotation auf `Invalidate` aus
+- `notifyOnLogin()` rotiert die HTTP-Session-ID zuerst über `HttpServletRequest.changeSessionId()` (seit **V00.84**, JS-SEC-060, CWE-384; Fallback `VaadinService.reinitializeSession` nur für Nicht-Servlet-Requests), ruft dann `SessionPolicy.onLogin` mit der **neuen** ID (`SessionCreated` trägt die überlebende ID), auditiert `SessionInvalidated` für die alte ID und ruft den Hook `onSessionRotated(alt, neu)` — dort legen Anwendungen `SessionStore`-Einträge an oder schlüsseln sie um (`SessionStore.rekey`, `SessionRecord.withSessionId`)
 - `captureJCustosVersionSnapshot()` (Phase 4c-Followup): wenn sowohl `JCustosVersionStore` als auch `SubjectIdResolver` als SPI registriert sind, liest die View beim erfolgreichen Login die aktuelle `JCustosVersion` und schreibt sie in den `VaadinJCustosVersionContext`. Strict-no-op + exception-swallowing, blockiert den Login-Flow nie.
 
 ### Phase-4c JCustosVersion-Enforcement (⚠️)

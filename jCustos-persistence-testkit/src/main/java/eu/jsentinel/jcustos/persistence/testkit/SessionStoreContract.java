@@ -76,6 +76,29 @@ public interface SessionStoreContract {
   }
 
   @Test
+  @DisplayName("rekey moves the record to the surviving session id and drops the old one (JS-SEC-060)")
+  default void rekeyMovesRecord() {
+    SessionStore store = newStore();
+    SessionRecord record = sampleSession("sid-old", "alice", TenantId.DEFAULT);
+    store.save(record);
+
+    assertTrue(store.rekey(new SessionId("sid-old"), new SessionId("sid-new")));
+
+    assertEquals(Optional.empty(), store.findById(new SessionId("sid-old")), "old id must be gone");
+    SessionRecord moved = store.findById(new SessionId("sid-new")).orElseThrow();
+    assertEquals(record.subjectId(), moved.subjectId());
+    assertEquals(record.createdAt(), moved.createdAt());
+    assertEquals(record.status(), moved.status());
+    assertEquals(1, store.findBySubject(TenantId.DEFAULT, new SubjectId("alice")).size(),
+        "exactly one record must remain for the subject");
+
+    assertFalse(store.rekey(new SessionId("missing"), new SessionId("sid-x")), "nothing to move");
+    assertTrue(store.rekey(new SessionId("sid-new"), new SessionId("sid-new")), "same id is a no-op success");
+    assertThrows(NullPointerException.class, () -> store.rekey(null, new SessionId("x")));
+    assertThrows(NullPointerException.class, () -> store.rekey(new SessionId("x"), null));
+  }
+
+  @Test
   @DisplayName("save upserts on the SessionId")
   default void saveUpserts() {
     SessionStore store = newStore();

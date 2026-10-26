@@ -16,13 +16,16 @@
  */
 package eu.jsentinel.jcustos.authorization;
 
+import eu.jsentinel.jcustos.audit.SessionCreated;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.session.SessionContext;
 import eu.jsentinel.jcustos.session.SessionDecision;
 import eu.jsentinel.jcustos.session.SessionMetadata;
 import eu.jsentinel.jcustos.session.SessionPolicy;
 import eu.jsentinel.jcustos.session.SessionPolicyDecision;
+import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 import eu.jsentinel.jcustos.test.RecordingAuditSink;
 import com.vaadin.browserless.BrowserlessTest;
 import com.vaadin.flow.component.button.Button;
@@ -36,6 +39,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -81,6 +85,8 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
     JCustosServiceResolver.setJCustosAuditService(audit);
     JCustosServiceResolver.setSessionPolicy(new RotatingPolicy(capturedContext, "B3-Test-Rotation"));
     B3FixtureLoginView.lastNavigateToAppCalled = false;
+    B3FixtureLoginView.rotatedFrom = null;
+    B3FixtureLoginView.rotatedTo = null;
   }
 
   @AfterEach
@@ -106,8 +112,12 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
     // ── 1. Policy callback observed: contract honoured. ──
     assertNotNull(capturedContext.get(),
         "SessionPolicy.onLogin must be called after credentials succeed");
-    assertEquals(oldSessionId, capturedContext.get().sessionId(),
-        "the SessionContext given to onLogin must carry the original wrapped-session id");
+    // JS-SEC-060: the policy observes the login AFTER the rotation, so the
+    // context it receives names the surviving id, not the one that was retired.
+    assertFalse(oldSessionId.equals(capturedContext.get().sessionId()),
+        "the SessionContext given to onLogin must carry the post-rotation id; old=" + oldSessionId);
+    assertEquals(VaadinSession.getCurrent().getSession().getId(), capturedContext.get().sessionId(),
+        "the SessionContext given to onLogin must match the live wrapped-session id");
 
     // ── 2. SessionInvalidated audit emitted with the OLD session id. ──
     SessionInvalidated event = audit.events().stream()
@@ -128,7 +138,7 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
     WrappedSession afterWrapped = afterSession.getSession();
     assertNotNull(afterWrapped, "post-rotation wrapped session must still be present");
     assertFalse(oldSessionId.equals(afterWrapped.getId()),
-        "VaadinService.reinitializeSession must have produced a different wrapped-session id; "
+        "changeSessionId() must have produced a different wrapped-session id; "
             + "old=" + oldSessionId + " new=" + afterWrapped.getId());
 
     // ── 4. navigateToApp was called — login flow continues on the rotated session. ──
@@ -182,12 +192,66 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
 
   // ── Fixtures ──────────────────────────────────────────────────
 
+  @Test
+  @DisplayName("JS-SEC-060: SessionCreated names the post-rotation id, the subject survives, the hook sees both ids")
+  void sessionCreatedCarriesRotatedId() {
+    JCustosServiceResolver.setSessionPolicy(
+        new TimeoutSessionPolicy<>(TimeoutSessionPolicy.Config.defaults(), Clock.systemUTC(), audit));
+    navigate(B3FixtureLoginView.class);
+    String oldSessionId = VaadinSession.getCurrent().getSession().getId();
+
+    test($view(TextField.class).id(LoginView.TF_USERNAME_ID)).setValue("alice");
+    test($view(PasswordField.class).id(LoginView.PF_PASSWORD_ID)).setValue("alice");
+    test($view(Button.class).id(LoginView.BTN_LOGIN_ID)).click();
+
+    String newSessionId = VaadinSession.getCurrent().getSession().getId();
+    assertFalse(oldSessionId.equals(newSessionId), "the session id must rotate on login");
+
+    // ── the surviving id is the one recorded as created ──
+    SessionCreated created = audit.events().stream()
+        .filter(SessionCreated.class::isInstance)
+        .map(SessionCreated.class::cast)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("expected one SessionCreated event; got: " + audit.events()));
+    assertEquals(newSessionId, created.sessionId(),
+        "SessionCreated must carry the post-rotation id, not the retired one");
+
+    // ── the retired id is the one recorded as invalidated ──
+    SessionInvalidated invalidated = audit.events().stream()
+        .filter(SessionInvalidated.class::isInstance)
+        .map(SessionInvalidated.class::cast)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("expected one SessionInvalidated event; got: " + audit.events()));
+    assertEquals(oldSessionId, invalidated.sessionId(), "SessionInvalidated must carry the retired id");
+    assertEquals("Session rotated after login", invalidated.reason(),
+        "the reason comes from TimeoutSessionPolicy's Invalidate decision");
+
+    // ── the bound subject survives changeSessionId() ──
+    assertEquals(java.util.Optional.of("alice"),
+        SubjectStores.subjectStore().currentSubject(String.class),
+        "the subject bound before the rotation must still be bound afterwards");
+
+    // ── the hook saw both ids ──
+    assertEquals(oldSessionId, B3FixtureLoginView.rotatedFrom, "onSessionRotated must receive the retired id");
+    assertEquals(newSessionId, B3FixtureLoginView.rotatedTo, "onSessionRotated must receive the surviving id");
+  }
+
   /** Test-only LoginView whose checkCredentials always succeeds. */
   @Route("test/b3-fixture-login")
   public static class B3FixtureLoginView extends LoginView {
     static boolean lastNavigateToAppCalled;
+    static String rotatedFrom;
+    static String rotatedTo;
 
-    @Override public boolean checkCredentials() { return true; }
+    @Override public boolean checkCredentials() {
+      // bind the subject BEFORE the rotation, as real login views do
+      SubjectStores.subjectStore().setCurrentSubject("alice", String.class);
+      return true;
+    }
+    @Override protected void onSessionRotated(String previousSessionId, String currentSessionId) {
+      rotatedFrom = previousSessionId;
+      rotatedTo = currentSessionId;
+    }
     @Override public void navigateToApp() { lastNavigateToAppCalled = true; }
     @Override public void reactOnFailedLogin() { /* not used */ }
   }

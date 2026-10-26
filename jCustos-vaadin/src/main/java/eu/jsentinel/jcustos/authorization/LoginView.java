@@ -48,8 +48,10 @@ import com.vaadin.flow.component.textfield.PasswordField;
 import com.vaadin.flow.component.textfield.TextField;
 import com.vaadin.flow.server.VaadinRequest;
 import com.vaadin.flow.server.VaadinService;
+import com.vaadin.flow.server.VaadinServletRequest;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.WrappedSession;
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -274,18 +276,23 @@ public abstract class LoginView
    * Best-effort notification of {@link SessionPolicy#onLogin(SessionContext)}.
    * <p>
    * Fires after a successful {@link #checkCredentials()}. It <em>always</em>
-   * rotates the HTTP session id (session-fixation mitigation, secure-by-default
-   * — JS-SEC-003 / CWE-384) and lets the configured {@link SessionPolicy}
-   * contribute the audit reason and any extra {@code Invalidate} semantics.
-   * Failures, a missing Vaadin session, or a missing SPI are silently absorbed
-   * — the lifecycle hook must never block the login flow.
+   * rotates the HTTP session id first (session-fixation mitigation,
+   * secure-by-default — JS-SEC-003 / CWE-384) and only then lets the
+   * configured {@link SessionPolicy} observe the login, so every observer —
+   * the policy's {@code SessionCreated} event, the {@code JCustosVersion}
+   * snapshot and any {@code SessionStore} record created in
+   * {@link #onSessionRotated(String, String)} — sees the id that lives on
+   * (JS-SEC-060). Failures, a missing Vaadin session, or a missing SPI are
+   * silently absorbed — the lifecycle hook must never block the login flow.
    * <p>
-   * Rotation goes through
-   * {@link VaadinService#reinitializeSession(VaadinRequest)} (the HTTP
-   * session-id rotates, VaadinSession attributes — including the just-bound
-   * subject — survive) and emits a {@code SessionInvalidated} audit event for
-   * the <em>old</em> session id. When the policy returns
-   * {@link SessionDecision.Invalidate Invalidate} its {@code reason} is used;
+   * Rotation goes through {@code HttpServletRequest.changeSessionId()} on
+   * the current {@link VaadinServletRequest}: the servlet session object and
+   * with it the {@link VaadinSession}, the just-bound subject and every other
+   * attribute stay in place; only the id changes. Non-servlet transports fall
+   * back to {@link VaadinService#reinitializeSession(VaadinRequest)}. A
+   * {@code SessionInvalidated} audit event is emitted for the <em>old</em>
+   * session id after the policy ran; when the policy returns
+   * {@link SessionDecision.Invalidate Invalidate} its {@code reason} is used,
    * otherwise the default {@code "RotationAfterLogin"} reason is recorded. The
    * {@code loginRoute} of an {@code Invalidate} decision is deliberately
    * ignored in the post-login context: the user proceeds to
@@ -296,23 +303,26 @@ public abstract class LoginView
   private void notifyOnLogin() {
     try {
       SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
-      Optional<SessionContext<Object>> contextOpt = buildSessionContext();
-      if (contextOpt.isEmpty()) {
+      Optional<SessionContext<Object>> beforeRotation = buildSessionContext();
+      if (beforeRotation.isEmpty()) {
         return;
       }
-      SessionContext<Object> context = contextOpt.get();
-      // JS-SEC-003 (CWE-384): rotate the HTTP session id on every successful
-      // login, independently of the SessionPolicy decision. reinitializeSession
-      // preserves the just-bound subject, so unconditional rotation is safe and
-      // makes fixation mitigation secure-by-default — the resolver default,
-      // NoopSessionPolicy, returns Continue and would otherwise never rotate.
-      // The policy still supplies the audit reason and any extra Invalidate
-      // semantics.
+      String previousSessionId = beforeRotation.get().sessionId();
+      // JS-SEC-003 / JS-SEC-060 (CWE-384): rotate the HTTP session id on every
+      // successful login, independently of the SessionPolicy decision, and do
+      // it before the policy runs so SessionCreated names the surviving id.
+      boolean rotated = rotateSessionId();
+      SessionContext<Object> context = rotated
+          ? buildSessionContext().orElse(beforeRotation.get())
+          : beforeRotation.get();
       SessionDecision decision = policy.onLogin(context);
       String reason = decision instanceof SessionDecision.Invalidate invalidate
           ? invalidate.reason()
           : "RotationAfterLogin";
-      rotateSessionAfterLogin(context, reason);
+      if (rotated) {
+        auditRotation(context, previousSessionId, reason);
+        notifySessionRotated(previousSessionId, context.sessionId());
+      }
     } catch (RuntimeException notifyFailure) {
       logger().warn("SessionPolicy.onLogin notification failed: {}", notifyFailure.toString());
     }
@@ -324,23 +334,61 @@ public abstract class LoginView
    * session-fixation mitigation: callers that pass credentials over a
    * pre-existing session id cannot replay the post-login session because
    * the id changes here.
-   * <p>
-   * Audit emit is best-effort and never propagates exceptions.
+   *
+   * @return {@code true} when the id was rotated, {@code false} when no
+   *         request is bound or the container refused
    */
-  private void rotateSessionAfterLogin(SessionContext<Object> context, String reason) {
+  private boolean rotateSessionId() {
     VaadinRequest request = VaadinRequest.getCurrent();
     if (request == null) {
-      return;
+      return false;
     }
-    String oldSessionId = context.sessionId();
     try {
+      if (request instanceof VaadinServletRequest servletRequest) {
+        HttpServletRequest http = servletRequest.getHttpServletRequest();
+        http.changeSessionId();
+        return true;
+      }
+      // Non-servlet transport: the legacy path copies the attributes into a
+      // fresh session. Deprecated for removal from Flow 25.4, kept only here.
       VaadinService.reinitializeSession(request);
+      return true;
     } catch (RuntimeException rotationFailure) {
-      logger().warn("VaadinService.reinitializeSession failed: {}",
-          rotationFailure.toString());
-      return;
+      logger().warn("Session id rotation after login failed: {}", rotationFailure.toString());
+      return false;
     }
-    auditRotation(context, oldSessionId, reason);
+  }
+
+  private void notifySessionRotated(String previousSessionId, String currentSessionId) {
+    try {
+      onSessionRotated(previousSessionId, currentSessionId);
+    } catch (RuntimeException hookFailure) {
+      logger().warn("onSessionRotated hook failed: {}", hookFailure.toString());
+    }
+  }
+
+  /**
+   * Called once per successful login after the HTTP session id has rotated,
+   * with the id the session had before and the id it carries now
+   * (JS-SEC-060, CWE-384). Override it to create or re-key anything that is
+   * keyed by the session id — a {@code SessionStore} record for the session
+   * inventory, a {@code SubjectSessionRegistry} entry, an external
+   * correlation — so revocation by id reaches the live session. Records
+   * written inside {@link #checkCredentials()} carry the pre-rotation id and
+   * must be moved here, for example with {@code SessionStore.rekey(old, new)}.
+   * <p>
+   * Runs after the {@link SessionPolicy} observed the login and after the
+   * rotation was audited; it is not called when no rotation took place.
+   * Exceptions are logged and never block the login flow. The default does
+   * nothing.
+   *
+   * @param previousSessionId the id before rotation (may be {@code null} when
+   *                          the transport exposed none)
+   * @param currentSessionId  the surviving id
+   * @since 00.84.00
+   */
+  protected void onSessionRotated(String previousSessionId, String currentSessionId) {
+    // default: nothing to re-key
   }
 
   private void auditRotation(SessionContext<Object> context, String oldSessionId, String reason) {

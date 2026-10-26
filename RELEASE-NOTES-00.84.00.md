@@ -196,6 +196,40 @@ resolver programmatically) so throttling keys on the real client again. Verified
 peer; the same header from a trusted peer yields the appended client address, in core,
 REST and a browserless Vaadin request alike.
 
+## Session-id rotation without `reinitializeSession`, audited with the surviving id (R1, JS-SEC-060, CWE-384)
+
+`LoginView` rotated the HTTP session id after login through
+`VaadinService.reinitializeSession(VaadinRequest)`, which Flow deprecates for removal from
+25.4 in favour of `HttpServletRequest.changeSessionId()`. The audit trail also told the story
+backwards: the `SessionContext` was built before the rotation, so `TimeoutSessionPolicy.onLogin`
+published `SessionCreated` with the id that was about to be retired, and `SessionInvalidated`
+followed for the same id — the id that actually lived on was never recorded as created.
+Applications that wrote a `SessionStore` record inside `checkCredentials()` persisted that
+retired id too, so revocation by id missed the live session.
+
+`LoginView.notifyOnLogin` now rotates first, through `changeSessionId()` on the current
+`VaadinServletRequest` (the servlet session object and with it the `VaadinSession`, the bound
+subject and the `JCustosVersion` snapshot stay in place; only the id changes), falls back to
+`reinitializeSession` only for non-servlet transports, and only then calls
+`SessionPolicy.onLogin` with a context that names the new id. `SessionCreated` therefore
+carries the surviving id; `SessionInvalidated` follows for the retired id with the policy's
+reason. No new audit variant was added — `AuditEvent` stays sealed at 31 permits, so exhaustive
+switches in `LoggingAuditSink`, `AuditQuery` and external consumers keep compiling.
+
+New hook `LoginView.onSessionRotated(previousSessionId, currentSessionId)` (no-op by default)
+runs once per login after the rotation was audited; applications create or re-key
+session-keyed state there. `SessionRecord.withSessionId(...)` and the default method
+`SessionStore.rekey(from, to)` (find, save under the new id, delete the old; covered by the
+`SessionStoreContract` in `jCustos-persistence-testkit`) support the re-key. The four Vaadin
+demos record their inventory row from the hook instead of from `checkCredentials()`.
+
+Migration: nothing to change for applications that do not key state by session id. If a
+login view records sessions itself, move that call into `onSessionRotated(...)` or re-key with
+`SessionStore.rekey(previousSessionId, currentSessionId)`. Verified under browserless Vaadin
+with a real `MockRequest`: the wrapped-session id differs after login, the subject bound before
+the rotation is still bound afterwards, `SessionCreated.sessionId()` equals the new id and
+`SessionInvalidated.sessionId()` the old one.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

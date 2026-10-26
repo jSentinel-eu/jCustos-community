@@ -46,7 +46,10 @@ import java.util.Objects;
  *       reason; otherwise {@link SessionDecision.Continue#INSTANCE}. Since
  *       V00.79.30 (JS-SEC-003) the Vaadin adapter's {@code LoginView} rotates
  *       the session id on <em>every</em> login regardless of this flag — the
- *       flag now only selects the audit reason recorded for the rotation.</li>
+ *       flag now only selects the audit reason recorded for the rotation.
+ *       Since 00.84.00 (JS-SEC-060) the adapter rotates <em>before</em> it
+ *       calls {@code onLogin}, so {@link SessionCreated} carries the
+ *       surviving session id.</li>
  *   <li>{@link #beforeNavigation(SessionContext)} — checks absolute
  *       lifetime first, then idle timeout. Either trip emits
  *       {@link SessionExpired}
@@ -72,10 +75,10 @@ public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
    * When {@code rotateSessionAfterLogin} is {@code true},
    * {@link #onLogin(SessionContext)} returns
    * {@link SessionDecision.Invalidate} so the calling adapter rotates
-   * the underlying session id. The Vaadin {@code LoginView} honours this
-   * by calling {@code VaadinService.reinitializeSession(VaadinRequest)} —
-   * the {@code VaadinSession} (and therefore the just-bound subject)
-   * survives the rotation; only the HTTP session id changes. The
+   * the underlying session id. The Vaadin {@code LoginView} rotates through
+   * {@code HttpServletRequest.changeSessionId()} (JS-SEC-060) — the
+   * {@code VaadinSession} (and therefore the just-bound subject) survives
+   * the rotation; only the HTTP session id changes. The
    * REST adapter has no equivalent — tokens themselves are the session,
    * and there is no fixation surface to mitigate.
    *
