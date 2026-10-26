@@ -17,7 +17,9 @@
 package eu.jsentinel.jcustos.authentication;
 
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.credential.InternalAuditEventType;
 import eu.jsentinel.jcustos.audit.TokenRotated;
+import eu.jsentinel.jcustos.audit.CredentialVerificationFailed;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.credential.token.TokenHasher;
@@ -30,6 +32,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
@@ -47,14 +51,23 @@ import static java.util.Objects.requireNonNull;
  *       framework does <strong>not</strong> persist it (apps that
  *       want stateless access tokens hand back a JWT, apps with
  *       a session-store cache it themselves).</li>
- *   <li>{@link #rotate(String) rotate(refreshPlain)} — consumes
- *       the old refresh token, marks it
- *       {@link RefreshTokenStore#markReplaced replaced}, issues
- *       a fresh access + refresh pair, emits
- *       {@link TokenRotated}. Returns empty on every failure mode
+ *   <li>{@link #rotate(String) rotate(refreshPlain)} — claims the
+ *       old refresh token atomically through
+ *       {@link RefreshTokenStore#markReplaced markReplaced} and only
+ *       then persists the successor and issues the fresh access +
+ *       refresh pair, emitting {@link TokenRotated} (JS-SEC-071,
+ *       CWE-367: two concurrent rotations of the same token yield
+ *       exactly one pair). Returns empty on every failure mode
  *       (unknown, wrong tenant, revoked, replaced, expired) — the
  *       caller must <strong>not</strong> retry with a different
- *       reason.</li>
+ *       reason. A token that was already consumed is a
+ *       <em>replay</em> (CWE-294): the token family — every
+ *       successor reachable through {@code replacedByHash} — is
+ *       revoked and a {@link CredentialVerificationFailed} with
+ *       {@link InternalAuditEventType#REFRESH_TOKEN_REPLAY} is
+ *       emitted, so the legitimate holder is signed out and the
+ *       incident is visible. Operators who prefer the broader
+ *       response call {@link #revokeAll(SubjectId)}.</li>
  *   <li>{@link #revoke(String) revoke(refreshPlain)} — marks a
  *       still-active refresh token revoked. No-op when already
  *       revoked / replaced / unknown.</li>
@@ -189,7 +202,12 @@ public final class TokenService {
     Instant now = clock.instant();
     String accessPlain = nextToken();
     String refreshPlain = nextToken();
-    String refreshHash = hasher.hash(refreshPlain.toCharArray());
+    return persistPair(subjectId, accessPlain, refreshPlain,
+        hasher.hash(refreshPlain.toCharArray()), now);
+  }
+
+  private TokenPair persistPair(SubjectId subjectId, String accessPlain,
+                                String refreshPlain, String refreshHash, Instant now) {
     RefreshTokenRecord record = new RefreshTokenRecord(
         refreshHash, tenant, subjectId,
         now, now.plus(refreshTtl),
@@ -202,9 +220,16 @@ public final class TokenService {
   }
 
   /**
-   * Rotates the supplied refresh token. The old token is marked
-   * replaced; a fresh pair is issued. Returns empty on every
+   * Rotates the supplied refresh token. The old token is claimed
+   * atomically ({@link RefreshTokenStore#markReplaced}) <em>before</em>
+   * the successor is persisted, so of two concurrent rotations exactly
+   * one receives a pair (JS-SEC-071, CWE-367). Returns empty on every
    * failure (unknown, wrong tenant, revoked, replaced, expired).
+   * <p>
+   * Presenting a token that was already consumed — sequentially or by
+   * losing the race — is treated as a replay (CWE-294): every successor
+   * reachable from it is revoked and a {@link CredentialVerificationFailed}
+   * with {@link InternalAuditEventType#REFRESH_TOKEN_REPLAY} is emitted.
    *
    * @param refreshPlain plain refresh token; null/blank yields empty
    * @return fresh pair on the successful transition
@@ -223,21 +248,84 @@ public final class TokenService {
       return Optional.empty();
     }
     Instant now = clock.instant();
+    if (old.isReplaced()) {
+      // JS-SEC-071 (CWE-294): a consumed token presented again is a replay.
+      onReplay(old, now);
+      return Optional.empty();
+    }
     if (!old.isActive(now)) {
       return Optional.empty();
     }
-    TokenPair pair = issue(old.subjectId());
-    String newHash = hasher.hash(pair.refreshToken().toCharArray());
+    // JS-SEC-071 (CWE-367): claim the old token first. Nothing is persisted
+    // until the claim succeeded, so a lost race leaves no orphan successor.
+    String refreshPlainNew = nextToken();
+    String newHash = hasher.hash(refreshPlainNew.toCharArray());
     if (!store.markReplaced(oldHash, newHash, now)) {
-      // Concurrent rotation slipped in between findByHash and markReplaced.
-      // The new pair is already persisted — surface the rotation anyway
-      // (the caller can't usefully recover, and the chain link is the
-      // only thing missing).
-      publishRotated(now, old.subjectId().value(), oldHash, newHash);
-      return Optional.of(pair);
+      // A concurrent rotation consumed the token between findByHash and the
+      // claim: the second presentation of the same token is a replay.
+      onReplay(store.findByHash(oldHash).orElse(old), now);
+      return Optional.empty();
     }
+    TokenPair pair = persistPair(old.subjectId(), nextToken(), refreshPlainNew, newHash, now);
     publishRotated(now, old.subjectId().value(), oldHash, newHash);
     return Optional.of(pair);
+  }
+
+  /** Upper bound on the chain walk; protects against a corrupted, cyclic store. */
+  private static final int MAX_FAMILY_HOPS = 10_000;
+  /** How often the walk re-reads a successor the winning rotation has claimed but not yet persisted. */
+  private static final int SUCCESSOR_LOOKUP_ATTEMPTS = 20;
+
+  private void onReplay(RefreshTokenRecord replayed, Instant now) {
+    revokeFamily(replayed, now);
+    publishReplay(now, replayed.subjectId().value());
+  }
+
+  /**
+   * Revokes every still-active successor reachable from {@code start} through
+   * {@code replacedByHash}. A successor that was claimed by a concurrent
+   * rotation a moment ago may not be persisted yet; the lookup is retried a
+   * bounded number of times before the walk gives up on that hop.
+   *
+   * @return number of records revoked
+   */
+  private int revokeFamily(RefreshTokenRecord start, Instant now) {
+    int revoked = 0;
+    RefreshTokenRecord current = start;
+    for (int hop = 0; hop < MAX_FAMILY_HOPS && current.replacedByHash().isPresent(); hop++) {
+      Optional<RefreshTokenRecord> next = awaitSuccessor(current.replacedByHash().get());
+      if (next.isEmpty()) {
+        break;
+      }
+      current = next.get();
+      // The successor may have been persisted by a concurrent rotation whose clock
+      // reading is later than ours; a revocation instant must not predate createdAt.
+      Instant revokedAt = now.isBefore(current.createdAt()) ? current.createdAt() : now;
+      if (current.isActive(now) && store.markRevoked(current.tokenHash(), revokedAt)) {
+        revoked++;
+      }
+    }
+    return revoked;
+  }
+
+  private Optional<RefreshTokenRecord> awaitSuccessor(String successorHash) {
+    for (int attempt = 0; attempt < SUCCESSOR_LOOKUP_ATTEMPTS; attempt++) {
+      Optional<RefreshTokenRecord> found = store.findByHash(successorHash);
+      if (found.isPresent()) {
+        return found;
+      }
+      LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+    }
+    return Optional.empty();
+  }
+
+  private void publishReplay(Instant at, String subjectId) {
+    try {
+      auditService.publish(new CredentialVerificationFailed(
+          at, subjectId, null, InternalAuditEventType.REFRESH_TOKEN_REPLAY));
+    } catch (RuntimeException ignored) {
+      // sinks must not block the refusal
+    }
   }
 
   /**

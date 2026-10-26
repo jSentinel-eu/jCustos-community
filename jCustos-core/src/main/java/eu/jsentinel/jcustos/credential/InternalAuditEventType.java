@@ -47,5 +47,13 @@ public enum InternalAuditEventType {
   VERIFICATION_FAILED_INVALID_PARAMETERS,
   VERIFICATION_FAILED_PROVIDER_ERROR,
   VERIFICATION_REJECTED_KDF_LIMIT,
-  VERIFICATION_DUMMY_PATH
+  VERIFICATION_DUMMY_PATH,
+  /**
+   * A refresh token that had already been consumed by a rotation was presented
+   * again (JS-SEC-071, CWE-294). The token family is revoked when this is
+   * recorded; the perimeter sees only the generic refusal.
+   *
+   * @since 00.84.00
+   */
+  REFRESH_TOKEN_REPLAY
 }

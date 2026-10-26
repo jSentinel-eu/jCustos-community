@@ -927,7 +927,7 @@ expressed it. `demo-standalone` exercises both side by side
 | `StandaloneLoginFlow`, `LoginResult` | `jCustos-standalone` | CLI/Desktop login driver — consults policy, calls `AuthenticationService`, binds subject, audits. |
 | `RememberMeTokenStore` + `StoreBackedRememberMeService` | `jCustos-core/.../authentication` | Phase 2c + 4b. Hash-only persistent-login tokens, tenant-scoped issue/validate/revoke. |
 | `ApiKeyStore`, `ApiKeyRecord`, `ApiKeyAuthenticationService` | `jCustos-core/.../authentication` | Phase 2d + 7b. Hash-only API keys with scopes; `ApiKeyAuthenticationService.authenticate` returns the active record or empty with a `ApiKeyDenied` audit reason. |
-| `RefreshTokenStore`, `RefreshTokenRecord`, `TokenService` | `jCustos-core/.../authentication` | Phase 2d + 7b. Rotating refresh tokens with replay defense via `markReplaced`; access tokens are returned to the caller without server-side persistence. Emits `TokenRotated`. |
+| `RefreshTokenStore`, `RefreshTokenRecord`, `TokenService` | `jCustos-core/.../authentication` | Phase 2d + 7b. Rotating refresh tokens with replay defense via `markReplaced`; access tokens are returned to the caller without server-side persistence. Emits `TokenRotated`. 00.84.00 (JS-SEC-071): rotation claims the old token atomically before issuing; a replayed token revokes its family and is audited. |
 
 ### Account lifecycle + notifications
 

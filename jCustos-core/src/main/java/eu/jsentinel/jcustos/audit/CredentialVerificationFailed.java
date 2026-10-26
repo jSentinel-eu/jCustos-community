@@ -28,10 +28,12 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * Failed password verification, carrying the internal differentiated
+ * Failed credential verification, carrying the internal differentiated
  * classification so audit sinks can distinguish unknown user from
  * wrong password, broken envelope, missing provider or rejected pepper
- * key.
+ * key. Since 00.84.00 the same event records a replayed refresh token
+ * ({@link InternalAuditEventType#REFRESH_TOKEN_REPLAY}, JS-SEC-071); the
+ * {@code username} then carries the subject id of the token family.
  *
  * <p>The {@code internalAuditEventType} stays strictly inside audit
  * sinks; the perimeter still sees the generic

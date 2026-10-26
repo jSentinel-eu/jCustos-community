@@ -156,7 +156,7 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | Klasse | Modul | Zweck |
 |---|---|---|
 | `ApiKeyAuthenticationService` | core/authentication | Hash-only Lookup, Lifecycle-Verdict (`Unknown` / `ForeignTenant` / `Revoked` / `Expired`); markiert `lastUsedAt`; emittiert `ApiKeyUsed`/`ApiKeyDenied` |
-| `TokenService` | core/authentication | `issue(subject)` / `rotate(refresh)` / `revoke(refresh)` über `RefreshTokenStore`; chain-link via `markReplaced` mit Replay-Defense; emittiert `TokenRotated` auf erfolgreicher Rotation |
+| `TokenService` | core/authentication | `issue(subject)` / `rotate(refresh)` / `revoke(refresh)` über `RefreshTokenStore`; chain-link via `markReplaced` mit Replay-Defense; emittiert `TokenRotated` auf erfolgreicher Rotation; seit **V00.84** (JS-SEC-071, CWE-367/CWE-294) atomarer Claim über `markReplaced` **vor** dem Ausstellen (zwei nebenläufige Rotationen → genau ein Paar), Replay eines verbrauchten Tokens sperrt die Token-Familie und auditiert `CredentialVerificationFailed(REFRESH_TOKEN_REPLAY)` |
 
 ### Rate-Limiting (Phase 7c — ⚠️)
 

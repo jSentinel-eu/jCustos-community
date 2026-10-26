@@ -18,10 +18,12 @@ package eu.jsentinel.jcustos.authentication;
 
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
+import eu.jsentinel.jcustos.audit.CredentialVerificationFailed;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.TokenRotated;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.credential.token.TokenHasher;
+import eu.jsentinel.jcustos.credential.InternalAuditEventType;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -34,6 +36,14 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -174,10 +184,118 @@ class TokenServiceTest {
         Duration.ofMinutes(15), Duration.ofDays(30));
 
     TokenService.TokenPair initial = service.issue(ALICE);
-    assertTrue(service.rotate(initial.refreshToken()).isPresent());
-
+    Optional<TokenService.TokenPair> rotated = service.rotate(initial.refreshToken());
+    assertTrue(rotated.isPresent());
     Optional<TokenService.TokenPair> replay = service.rotate(initial.refreshToken());
     assertTrue(replay.isEmpty(), "replay must be refused");
+
+    // JS-SEC-071 (CWE-294): the replay is audited with the differentiated classification ...
+    List<CredentialVerificationFailed> replays = audit.published.stream()
+        .filter(CredentialVerificationFailed.class::isInstance)
+        .map(CredentialVerificationFailed.class::cast)
+        .toList();
+    assertEquals(1, replays.size(), "exactly one replay event; got: " + audit.published);
+    assertEquals(InternalAuditEventType.REFRESH_TOKEN_REPLAY, replays.get(0).internalAuditEventType());
+    assertEquals("alice", replays.get(0).username());
+
+    // ... and the token family is revoked: the legitimate successor no longer rotates.
+    String successorHash = hasher.hash(rotated.get().refreshToken().toCharArray());
+    assertTrue(store.findByHash(successorHash).orElseThrow().isRevoked(),
+        "the successor of a replayed token must be revoked");
+    assertTrue(service.rotate(rotated.get().refreshToken()).isEmpty(),
+        "the revoked successor must not rotate");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-071: two concurrent rotations of the same refresh token yield exactly one pair and one successor")
+  void concurrentRotateIssuesExactlyOnePair() throws Exception {
+    InMemoryRefreshTokenStore backing = new InMemoryRefreshTokenStore();
+    GatedStore store = new GatedStore(backing, 2);
+    ThreadSafeAuditService audit = new ThreadSafeAuditService();
+    FakeHasher hasher = new FakeHasher();
+    TokenService service = new TokenService(
+        store, hasher, audit, TenantId.DEFAULT,
+        steppingClock(T0, Duration.ofSeconds(1)), sequentialSource("t-"),
+        Duration.ofMinutes(15), Duration.ofDays(30));
+    TokenService.TokenPair initial = service.issue(ALICE);
+    store.arm();
+
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      CountDownLatch start = new CountDownLatch(1);
+      Callable<Optional<TokenService.TokenPair>> attempt = () -> {
+        start.await(5, TimeUnit.SECONDS);
+        return service.rotate(initial.refreshToken());
+      };
+      Future<Optional<TokenService.TokenPair>> first = pool.submit(attempt);
+      Future<Optional<TokenService.TokenPair>> second = pool.submit(attempt);
+      start.countDown();
+      Optional<TokenService.TokenPair> a = first.get(10, TimeUnit.SECONDS);
+      Optional<TokenService.TokenPair> b = second.get(10, TimeUnit.SECONDS);
+
+      assertTrue(store.bothRead(), "both rotations must have read the active token before either claimed it");
+      assertTrue(a.isPresent() ^ b.isPresent(), "exactly one rotation may succeed; got " + a + " / " + b);
+      assertEquals(2, store.saves(), "store holds the initial token and exactly one successor");
+
+      TokenService.TokenPair winner = a.isPresent() ? a.get() : b.get();
+      String winnerHash = hasher.hash(winner.refreshToken().toCharArray());
+      RefreshTokenRecord old = backing.findByHash(hasher.hash(initial.refreshToken().toCharArray())).orElseThrow();
+      assertEquals(Optional.of(winnerHash), old.replacedByHash(), "the chain link points at the only successor");
+
+      assertEquals(1, audit.published.stream().filter(TokenRotated.class::isInstance).count());
+      assertEquals(1, audit.published.stream().filter(CredentialVerificationFailed.class::isInstance).count(),
+          "the losing rotation is a replay and must be audited");
+      // RFC 9700 family revocation: the replay revokes the winner's successor as well
+      assertTrue(backing.findByHash(winnerHash).orElseThrow().isRevoked(),
+          "a replayed family must be revoked including the just-issued successor");
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * Real store decorated with a read barrier: once armed, {@code findByHash}
+   * lets the first {@code parties} callers proceed only after all of them have
+   * read, so both rotations observe the token as active before either claims it.
+   */
+  private static final class GatedStore implements RefreshTokenStore {
+    private final RefreshTokenStore delegate;
+    private final CountDownLatch readGate;
+    private final AtomicInteger saves = new AtomicInteger();
+    private volatile boolean armed;
+
+    GatedStore(RefreshTokenStore delegate, int parties) {
+      this.delegate = delegate;
+      this.readGate = new CountDownLatch(parties);
+    }
+
+    void arm() { armed = true; }
+    int saves() { return saves.get(); }
+    boolean bothRead() { return readGate.getCount() == 0; }
+
+    @Override public Optional<RefreshTokenRecord> findByHash(String tokenHash) {
+      Optional<RefreshTokenRecord> found = delegate.findByHash(tokenHash);
+      if (armed && readGate.getCount() > 0) {
+        readGate.countDown();
+        try {
+          readGate.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      return found;
+    }
+    @Override public void save(RefreshTokenRecord record) { saves.incrementAndGet(); delegate.save(record); }
+    @Override public boolean markReplaced(String oldHash, String newHash, Instant at) { return delegate.markReplaced(oldHash, newHash, at); }
+    @Override public boolean markRevoked(String tokenHash, Instant at) { return delegate.markRevoked(tokenHash, at); }
+    @Override public int deleteBySubject(TenantId tenant, SubjectId subjectId) { return delegate.deleteBySubject(tenant, subjectId); }
+    @Override public int purgeExpired(Instant now) { return delegate.purgeExpired(now); }
+  }
+
+  private static final class ThreadSafeAuditService implements JCustosAuditService {
+    final List<AuditEvent> published = new CopyOnWriteArrayList<>();
+    @Override public void publish(AuditEvent event) { published.add(event); }
+    @Override public List<AuditEvent> query(AuditQuery query) { return List.copyOf(published); }
   }
 
   @Test

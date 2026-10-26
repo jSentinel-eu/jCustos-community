@@ -230,6 +230,31 @@ with a real `MockRequest`: the wrapped-session id differs after login, the subje
 the rotation is still bound afterwards, `SessionCreated.sessionId()` equals the new id and
 `SessionInvalidated.sessionId()` the old one.
 
+## Refresh-token rotation claims before it issues; replays revoke the family (ER04, JS-SEC-071, CWE-367, CWE-294)
+
+`TokenService.rotate` persisted the successor pair through `issue(...)` and only then marked
+the old token replaced. When that compare-and-set lost against a concurrent rotation of the
+same refresh token, the already persisted pair was returned anyway, so two callers presenting
+one stolen token both received valid pairs, and a replay of a consumed token was refused
+without any audit trace.
+
+`rotate` now claims the old token first — `RefreshTokenStore.markReplaced` is the atomic
+step — and persists the successor only after the claim succeeded; nothing is written when the
+claim fails, so two concurrent rotations yield exactly one pair and exactly one successor
+record. A consumed token presented again, sequentially or by losing the race, is a replay:
+every still-active successor reachable through `replacedByHash` is revoked (RFC 9700 token
+family revocation, so the legitimate holder signs in again) and a `CredentialVerificationFailed`
+with the new classification `InternalAuditEventType.REFRESH_TOKEN_REPLAY` is emitted; the
+`username` carries the subject id of the family. No new `AuditEvent` variant. The revocation
+instant is clamped to the successor's `createdAt`, because the losing rotation's clock reading
+can predate the winner's, and the record invariant would otherwise reject it. Operators who
+prefer the broader response keep `revokeAll(subjectId)`.
+
+Verified with two threads on a real `InMemoryRefreshTokenStore` behind a read barrier, so both
+read the token as active before either claims it: exactly one `Optional` is present, the
+store holds the initial record and one successor, one `TokenRotated` and one replay event are
+published, and the successor is revoked.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
