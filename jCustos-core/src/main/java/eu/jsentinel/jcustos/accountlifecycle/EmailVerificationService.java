@@ -47,7 +47,8 @@ import static java.util.Objects.requireNonNull;
  * field). Three-step lifecycle:
  * <ol>
  *   <li>{@link #request(SubjectId, String, Duration) request(subject, email, ttl)}
- *       — generates a plain token, persists only its hash with
+ *       — retires every earlier token of the subject (JS-SEC-074,
+ *       CWE-640), generates a plain token, persists only its hash with
  *       the email it confirms, emits
  *       {@link EmailVerificationRequested}, hands the plain token
  *       to the {@link JCustosNotificationSender}.</li>
@@ -55,7 +56,8 @@ import static java.util.Objects.requireNonNull;
  *       token up; returns the record only when live, in this
  *       tenant, not consumed, not expired.</li>
  *   <li>{@link #consume(String) consume(plain)} — marks the token
- *       consumed exactly once and emits {@link EmailVerified}.</li>
+ *       consumed exactly once, retires every other token of the
+ *       subject and emits {@link EmailVerified}.</li>
  * </ol>
  *
  * <p>Bound to one {@link TenantId} at construction.
@@ -189,6 +191,9 @@ public final class EmailVerificationService implements HasLogger {
     String hash = hasher.hash(plain.toCharArray());
     EmailVerificationTokenRecord record = new EmailVerificationTokenRecord(
         hash, tenant, subjectId, email, now, now.plus(ttl), Optional.empty());
+    // JS-SEC-074 (CWE-640): only the newest link may work — an older
+    // intercepted link dies the moment the subject asks again.
+    store.deleteBySubject(tenant, subjectId);
     store.save(record);
     publishRequested(now, subjectId, email, hash);
     notify(JCustosNotification.Kind.EMAIL_VERIFICATION_REQUESTED,
@@ -247,6 +252,9 @@ public final class EmailVerificationService implements HasLogger {
     if (!store.markConsumed(record.tokenHash(), now)) {
       return Optional.empty();
     }
+    // JS-SEC-074 (CWE-640): verification is done; retire every other token of
+    // the subject but keep the consumed record as the single-use marker.
+    retireSiblings(record.withConsumedAt(now));
     publishVerified(now, record.subjectId(), record.email(), record.tokenHash());
     notify(JCustosNotification.Kind.EMAIL_VERIFIED,
         record.subjectId(), now,
@@ -264,6 +272,15 @@ public final class EmailVerificationService implements HasLogger {
   public int revokeAll(SubjectId subjectId) {
     requireNonNull(subjectId, "subjectId must not be null");
     return store.deleteBySubject(tenant, subjectId);
+  }
+
+  /**
+   * Removes every token of the consumed record's subject and re-saves the
+   * consumed record, so siblings are gone while the single-use marker stays.
+   */
+  private void retireSiblings(EmailVerificationTokenRecord consumed) {
+    store.deleteBySubject(tenant, consumed.subjectId());
+    store.save(consumed);
   }
 
   /**

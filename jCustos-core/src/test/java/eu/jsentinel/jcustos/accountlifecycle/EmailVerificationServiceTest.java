@@ -146,6 +146,42 @@ class EmailVerificationServiceTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-074: a second request retires the first token; only the newest link works")
+  void requestRetiresPredecessors() {
+    InMemoryEmailVerificationTokenStore store = new InMemoryEmailVerificationTokenStore();
+    EmailVerificationService service = new EmailVerificationService(
+        store, new FakeHasher(), new CollectingAuditService(), new RecordingNotificationSender(),
+        TenantId.DEFAULT, steppingClock(T0, Duration.ofSeconds(1)), sequentialSource("tok-"));
+    EmailVerificationService.IssuedToken first = service.request(ALICE, ALICE_EMAIL, Duration.ofHours(24));
+    EmailVerificationService.IssuedToken second = service.request(ALICE, ALICE_EMAIL, Duration.ofHours(24));
+
+    assertTrue(service.validate(first.plainToken()).isEmpty(), "the older link must be dead");
+    assertTrue(service.consume(second.plainToken()).isPresent());
+    assertEquals(1, store.size(), "only the consumed record remains");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-074: consume retires every other token of the subject but keeps the consumed marker")
+  void consumeRetiresSiblingsKeepsConsumed() {
+    InMemoryEmailVerificationTokenStore store = new InMemoryEmailVerificationTokenStore();
+    FakeHasher hasher = new FakeHasher();
+    EmailVerificationService service = new EmailVerificationService(
+        store, hasher, new CollectingAuditService(), new RecordingNotificationSender(),
+        TenantId.DEFAULT, steppingClock(T0, Duration.ofSeconds(1)), sequentialSource("tok-"));
+    EmailVerificationService.IssuedToken issued = service.request(ALICE, ALICE_EMAIL, Duration.ofHours(24));
+    String strayHash = hasher.hash("stray".toCharArray());
+    store.save(new EmailVerificationTokenRecord(strayHash, TenantId.DEFAULT, ALICE, ALICE_EMAIL,
+        T0, T0.plus(Duration.ofHours(24)), Optional.empty()));
+
+    assertTrue(service.consume(issued.plainToken()).isPresent());
+
+    assertTrue(store.findByHash(strayHash).isEmpty(), "siblings are retired");
+    assertTrue(store.findByHash(hasher.hash(issued.plainToken().toCharArray())).orElseThrow().isConsumed(),
+        "the consumed record stays as the single-use marker");
+    assertTrue(service.consume(issued.plainToken()).isEmpty(), "still single-use");
+  }
+
+  @Test
   @DisplayName("validate rejects unknown / wrong tenant / expired tokens")
   void validateNegativeCases() {
     InMemoryEmailVerificationTokenStore store = new InMemoryEmailVerificationTokenStore();
@@ -221,7 +257,8 @@ class EmailVerificationServiceTest {
     String b1 = service.request(BOB, BOB_EMAIL, Duration.ofMinutes(15)).plainToken();
     assertNotEquals(a1, a2);
 
-    assertEquals(2, service.revokeAll(ALICE));
+    // JS-SEC-074: the second request already retired a1, so one record remains
+    assertEquals(1, service.revokeAll(ALICE));
     assertTrue(service.validate(a1).isEmpty());
     assertTrue(service.validate(a2).isEmpty());
     assertTrue(service.validate(b1).isPresent());

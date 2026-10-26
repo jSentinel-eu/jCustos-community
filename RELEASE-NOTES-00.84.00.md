@@ -309,6 +309,46 @@ or removed. Verified: `.credentials(c -> c.modern()).mode(STRICT).install()` wir
 whose fresh hash reports algorithm `Argon2id` and provider `argon2id-bc`; with the wiring
 removed that test and the `.hashing(...)` / `.pbkdf2Defaults()` tests fail.
 
+## Single-use tokens: siblings retire, stores are bounded, every reset is audited (ER07, JS-SEC-074, CWE-640, CWE-770, CWE-778)
+
+Three single-use-token services — the account-lifecycle `PasswordResetService` and
+`EmailVerificationService`, and the credential-pipeline `credential.reset.PasswordResetService`
+— wrote a new record on every request and never retired the earlier ones; `consume` marked only
+the token presented. An older link intercepted before the user asked again therefore reset the
+password a second time after the newer link had already been used. Their in-memory stores grew
+without limit over the unauthenticated forgot-password path, and the credential-pipeline
+service published no audit event at all.
+
+- **Only the newest link works.** `request`/`issue` retires every open token of the subject
+  before the new one is persisted; `consume` retires the remaining siblings after the single-use
+  marker is set (the consumed record itself stays as the marker). The account-lifecycle
+  services use `deleteBySubject`; the credential-pipeline service uses the new
+  `ResetTokenStore.findByUsername(...)` and marks siblings `EXPIRED`. Implementers of
+  `ResetTokenStore` must add `findByUsername`; the in-memory store is the only one shipped.
+- **Bounded in-memory stores.** `InMemoryPasswordResetTokenStore`,
+  `InMemoryEmailVerificationTokenStore` and `InMemoryResetTokenStore` take a capacity
+  (default `CapacityBound.DEFAULT_MAX_ENTRIES`, 100 000). A full store purges consumed and
+  expired records and otherwise refuses with
+  `<namespace>-capacity-exceeded`, the pattern the nonce and login-attempt stores already
+  follow. The stores index tokens by subject and track the earliest expiry, so sibling
+  retirement is proportional to the subject's own tokens and a full store refuses in constant
+  time — the first version of this change scanned 100 000 records per request and turned the
+  forgot-password path into an O(n) CPU cost, which the mass-request test exposed.
+- **Audit for the credential pipeline.** `credential.reset.PasswordResetService` now publishes
+  `PasswordResetRequested` and `PasswordResetCompleted`, carrying the public selector, never the
+  verifier; a constructor overload takes an explicit `JCustosAuditService`, the existing one
+  resolves the sink per event.
+
+Not done here: the structural consolidation into a shared `SingleUseTokenService` /
+`SingleUseTokenStore` core is a design decision recorded as a question subtask under the
+V00.84.00 plan; the three services keep their shapes until Sven decides.
+
+Behaviour change to note: `revokeAll(subject)` after two requests now removes one record, not
+two, because the second request already retired the first. Verified: two requests for the same
+subject, consume of the second succeeds and the first validates empty; 150 000 requests keep
+the in-memory store at its bound and refuse the surplus in under a second; the audit sink sees
+one `PasswordResetRequested` per issue and one `PasswordResetCompleted` per consume.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

@@ -153,6 +153,75 @@ class PasswordResetServiceTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-074: a second request retires the first token; only the newest link works")
+  void requestRetiresPredecessors() {
+    InMemoryPasswordResetTokenStore store = new InMemoryPasswordResetTokenStore();
+    PasswordResetService service = new PasswordResetService(
+        store, new FakeHasher(), new CollectingAuditService(), new RecordingNotificationSender(),
+        TenantId.DEFAULT, steppingClock(T0, Duration.ofSeconds(1)), sequentialSource("tok-"));
+    PasswordResetService.IssuedToken first = service.request(ALICE, Duration.ofMinutes(15));
+    PasswordResetService.IssuedToken second = service.request(ALICE, Duration.ofMinutes(15));
+
+    assertTrue(service.validate(first.plainToken()).isEmpty(), "the older link must be dead");
+    assertTrue(service.validate(second.plainToken()).isPresent());
+    assertTrue(service.consume(second.plainToken()).isPresent());
+    assertEquals(1, store.size(), "only the consumed record remains");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-074: consume retires every other token of the subject but keeps the consumed marker")
+  void consumeRetiresSiblingsKeepsConsumed() {
+    InMemoryPasswordResetTokenStore store = new InMemoryPasswordResetTokenStore();
+    FakeHasher hasher = new FakeHasher();
+    PasswordResetService service = new PasswordResetService(
+        store, hasher, new CollectingAuditService(), new RecordingNotificationSender(),
+        TenantId.DEFAULT, steppingClock(T0, Duration.ofSeconds(1)), sequentialSource("tok-"));
+    PasswordResetService.IssuedToken issued = service.request(ALICE, Duration.ofMinutes(15));
+    // a sibling that bypassed request(), e.g. written by another node
+    String strayHash = hasher.hash("stray".toCharArray());
+    store.save(new PasswordResetTokenRecord(strayHash, TenantId.DEFAULT, ALICE,
+        T0, T0.plus(Duration.ofMinutes(15)), Optional.empty()));
+    // an unrelated subject's token must survive
+    PasswordResetService.IssuedToken bobs = service.request(BOB, Duration.ofMinutes(15));
+
+    assertTrue(service.consume(issued.plainToken()).isPresent());
+
+    assertTrue(store.findByHash(strayHash).isEmpty(), "siblings are retired");
+    assertTrue(store.findByHash(hasher.hash(issued.plainToken().toCharArray())).orElseThrow().isConsumed(),
+        "the consumed record stays as the single-use marker");
+    assertTrue(service.consume(issued.plainToken()).isEmpty(), "still single-use");
+    assertTrue(service.validate(bobs.plainToken()).isPresent(), "other subjects are untouched");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-074: 150 000 requests keep the in-memory store under its bound (CWE-770)")
+  void storeStaysBoundedUnderMassRequests() {
+    // the store judges expiry with the same frozen clock the service issues against
+    InMemoryPasswordResetTokenStore store = new InMemoryPasswordResetTokenStore(
+        eu.jsentinel.jcustos.util.CapacityBound.DEFAULT_MAX_ENTRIES, fixed(T0));
+    PasswordResetService service = new PasswordResetService(
+        store, new FakeHasher(), new CollectingAuditService(), new RecordingNotificationSender(),
+        TenantId.DEFAULT, steppingClock(T0, Duration.ofMillis(1)), sequentialSource("tok-"));
+    long started = System.nanoTime();
+    int refused = 0;
+    for (int i = 0; i < 150_000; i++) {
+      try {
+        service.request(new SubjectId("user-" + i), Duration.ofHours(1));
+      } catch (IllegalStateException full) {
+        refused++;
+        assertTrue(full.getMessage().startsWith(
+            InMemoryPasswordResetTokenStore.CAPACITY_NAMESPACE + "-capacity-exceeded"));
+      }
+    }
+    assertTrue(store.size() <= eu.jsentinel.jcustos.util.CapacityBound.DEFAULT_MAX_ENTRIES,
+        "store size " + store.size() + " must stay within the bound");
+    assertEquals(150_000 - eu.jsentinel.jcustos.util.CapacityBound.DEFAULT_MAX_ENTRIES, refused,
+        "every request beyond the bound is refused, none is silently dropped");
+    long elapsedSeconds = (System.nanoTime() - started) / 1_000_000_000L;
+    assertTrue(elapsedSeconds < 30, "sibling retirement must stay indexed, not a full scan; took " + elapsedSeconds + " s");
+  }
+
+  @Test
   @DisplayName("validate accepts a live token and rejects unknown / wrong-tenant / consumed / expired")
   void validateNegativeCases() {
     InMemoryPasswordResetTokenStore store = new InMemoryPasswordResetTokenStore();
@@ -235,8 +304,9 @@ class PasswordResetServiceTest {
     String b1 = service.request(BOB, Duration.ofMinutes(15)).plainToken();
     assertNotEquals(a1, a2);
 
+    // JS-SEC-074: the second request already retired a1, so one record remains
     int removed = service.revokeAll(ALICE);
-    assertEquals(2, removed);
+    assertEquals(1, removed);
     assertTrue(service.validate(a1).isEmpty());
     assertTrue(service.validate(a2).isEmpty());
     assertTrue(service.validate(b1).isPresent());

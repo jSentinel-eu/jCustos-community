@@ -22,6 +22,7 @@
  */
 package eu.jsentinel.jcustos.credential.reset;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -46,6 +47,18 @@ public interface ResetTokenStore {
    * here; that is the reset service's job.
    */
   Optional<ResetTokenRecord> findBySelector(String selector);
+
+  /**
+   * Lists every token issued for {@code username}, regardless of status.
+   * The reset service uses it to retire open siblings when a new token is
+   * issued and when one is consumed (JS-SEC-074, CWE-640): an intercepted
+   * older link must not reset the password a second time.
+   *
+   * @param username the credential's username; non-blank
+   * @return the records in no particular order, empty when none exist
+   * @since 00.84.00
+   */
+  List<ResetTokenRecord> findByUsername(String username);
 
   /**
    * Atomically marks the token CONSUMED if its current status still

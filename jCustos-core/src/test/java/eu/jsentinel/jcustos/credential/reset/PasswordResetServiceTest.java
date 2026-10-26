@@ -23,6 +23,8 @@
 package eu.jsentinel.jcustos.credential.reset;
 
 import eu.jsentinel.jcustos.audit.AuditEvent;
+import eu.jsentinel.jcustos.audit.PasswordResetRequested;
+import eu.jsentinel.jcustos.audit.PasswordResetCompleted;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
@@ -119,7 +121,7 @@ class PasswordResetServiceTest {
     final TokenDigestService digestService = new TokenDigestService();
     final PasswordResetService service = new PasswordResetService(
         credentials, tokens, digestService, hashingService,
-        validator, inputPolicy, lifecycle, clock);
+        validator, inputPolicy, lifecycle, clock, audit);
 
     String register(String username, String password, CredentialStatus status) {
       String encoded = hashingService.hash(password.toCharArray()).encodedHash();
@@ -127,6 +129,57 @@ class PasswordResetServiceTest {
           username, encoded, status, 1L, T0, T0));
       return encoded;
     }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-074: a second issue retires the first link; issue and consume are audited")
+  void issueRetiresOpenSiblingsAndAudits() {
+    Fixture f = new Fixture();
+    f.register("alice", "Old-Password-1", CredentialStatus.ACTIVE);
+    ResetTokenCreationResult first = f.service.issue("alice", TTL);
+    f.clock.advance(Duration.ofSeconds(1));
+    ResetTokenCreationResult second = f.service.issue("alice", TTL);
+    String firstWire = ((ResetTokenCreationResult.Created) first).token().encode();
+    String secondWire = ((ResetTokenCreationResult.Created) second).token().encode();
+
+    f.clock.advance(Duration.ofSeconds(1));
+    assertInstanceOf(PasswordResetConsumeResult.Failed.class,
+        f.service.consume(firstWire, SecretValue.ofChars("New-Password-1".toCharArray())),
+        "the older link must be dead once a newer one was issued");
+    assertInstanceOf(PasswordResetConsumeResult.Succeeded.class,
+        f.service.consume(secondWire, SecretValue.ofChars("New-Password-1".toCharArray())));
+
+    assertEquals(2, f.audit.events.stream().filter(PasswordResetRequested.class::isInstance).count(),
+        "every issue is audited");
+    assertEquals(1, f.audit.events.stream().filter(PasswordResetCompleted.class::isInstance).count(),
+        "the completed reset is audited");
+    PasswordResetCompleted completed = f.audit.events.stream()
+        .filter(PasswordResetCompleted.class::isInstance).map(PasswordResetCompleted.class::cast).findFirst().orElseThrow();
+    assertEquals("alice", completed.subjectId());
+    assertEquals(((ResetTokenCreationResult.Created) second).token().selector(), completed.tokenHash(),
+        "the audit carries the public selector, never the verifier");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-074: consume retires every other open token of the credential")
+  void consumeRetiresRemainingSibling() {
+    Fixture f = new Fixture();
+    f.register("alice", "Old-Password-1", CredentialStatus.ACTIVE);
+    ResetTokenCreationResult issued = f.service.issue("alice", TTL);
+    // a second open token that bypassed issue(), e.g. written by another node
+    SelectorVerifierToken stray = f.digestService.generate();
+    f.tokens.save(new ResetTokenRecord(f.digestService.digest(stray), "alice",
+        T0, T0.plus(TTL), ResetTokenStatus.ISSUED, 1L));
+    f.clock.advance(Duration.ofSeconds(1));
+
+    assertInstanceOf(PasswordResetConsumeResult.Succeeded.class,
+        f.service.consume(((ResetTokenCreationResult.Created) issued).token().encode(),
+            SecretValue.ofChars("New-Password-1".toCharArray())));
+
+    assertEquals(ResetTokenStatus.EXPIRED, f.tokens.findBySelector(stray.selector()).orElseThrow().status(),
+        "the sibling must be retired after a successful reset");
+    assertInstanceOf(PasswordResetConsumeResult.Failed.class,
+        f.service.consume(stray.encode(), SecretValue.ofChars("Another-Password-1".toCharArray())));
   }
 
   @Test

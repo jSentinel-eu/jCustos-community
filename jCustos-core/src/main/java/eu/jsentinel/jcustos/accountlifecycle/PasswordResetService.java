@@ -43,7 +43,9 @@ import static java.util.Objects.requireNonNull;
  * Three-step lifecycle:
  * <ol>
  *   <li>{@link #request(SubjectId, Duration) request(subject, ttl)} —
- *       generates a fresh plain token, persists only its hash,
+ *       retires every earlier token of the subject (JS-SEC-074,
+ *       CWE-640: only the newest link works), generates a fresh plain
+ *       token, persists only its hash,
  *       publishes a {@link PasswordResetRequested} audit event, and
  *       hands the plain token to the {@link JCustosNotificationSender}
  *       so the application can deliver it (mail, SMS, log).</li>
@@ -52,9 +54,9 @@ import static java.util.Objects.requireNonNull;
  *       is in the configured tenant, has not expired, and has not
  *       been consumed.</li>
  *   <li>{@link #consume(String) consume(plain)} — marks the record
- *       consumed exactly once and publishes a
- *       {@link PasswordResetCompleted} audit event. Subsequent
- *       attempts on the same token return empty.</li>
+ *       consumed exactly once, retires every other token of the
+ *       subject and publishes a {@link PasswordResetCompleted} audit
+ *       event. Subsequent attempts on the same token return empty.</li>
  * </ol>
  *
  * <p>The plain token is generated server-side, returned exactly
@@ -193,6 +195,9 @@ public final class PasswordResetService implements HasLogger {
     String hash = hasher.hash(plain.toCharArray());
     PasswordResetTokenRecord record = new PasswordResetTokenRecord(
         hash, tenant, subjectId, now, now.plus(ttl), Optional.empty());
+    // JS-SEC-074 (CWE-640): only the newest link may work — an older
+    // intercepted link dies the moment the subject asks again.
+    store.deleteBySubject(tenant, subjectId);
     store.save(record);
     publishRequested(now, subjectId, hash);
     notify(JCustosNotification.Kind.PASSWORD_RESET_REQUESTED,
@@ -260,6 +265,9 @@ public final class PasswordResetService implements HasLogger {
       // Concurrent caller already consumed it.
       return Optional.empty();
     }
+    // JS-SEC-074 (CWE-640): the reset is done; retire every other token of the
+    // subject but keep the consumed record as the single-use marker.
+    retireSiblings(record.withConsumedAt(now));
     publishCompleted(now, record.subjectId(), record.tokenHash());
     notify(JCustosNotification.Kind.PASSWORD_RESET_COMPLETED,
         record.subjectId(), now, java.util.Map.of());
@@ -276,6 +284,15 @@ public final class PasswordResetService implements HasLogger {
   public int revokeAll(SubjectId subjectId) {
     requireNonNull(subjectId, "subjectId must not be null");
     return store.deleteBySubject(tenant, subjectId);
+  }
+
+  /**
+   * Removes every token of the consumed record's subject and re-saves the
+   * consumed record, so siblings are gone while the single-use marker stays.
+   */
+  private void retireSiblings(PasswordResetTokenRecord consumed) {
+    store.deleteBySubject(tenant, consumed.subjectId());
+    store.save(consumed);
   }
 
   /**

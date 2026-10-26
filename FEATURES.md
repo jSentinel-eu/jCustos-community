@@ -128,8 +128,8 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | `RoleAssignmentStore` | core/authorization/api/roles | `RoleAssignmentKey(tenant, subjectId)` → `Set<RoleName>` | Persistente Rollen-Zuordnungen |
 | `BootstrapStateStore` | core/bootstrap | `BootstrapState` per Tenant | "Ist das System bootstrapped?" — idempotent |
 | `RememberMeTokenStore` | core/authentication | `RememberMeTokenRecord` (hash-only) | Persistent-Login-Tokens |
-| `PasswordResetTokenStore` | core/accountlifecycle | `PasswordResetTokenRecord` (hash-only, single-use) | Passwort-Reset-Flow |
-| `EmailVerificationTokenStore` | core/accountlifecycle | `EmailVerificationTokenRecord` (hash-only, single-use) | Email-Verifikations-Flow |
+| `PasswordResetTokenStore` | core/accountlifecycle | `PasswordResetTokenRecord` (hash-only, single-use); `InMemoryPasswordResetTokenStore` seit **V00.84** kapazitätsbegrenzt (`CapacityBound`, Subjekt-Index, JS-SEC-074) | Passwort-Reset-Flow |
+| `EmailVerificationTokenStore` | core/accountlifecycle | `EmailVerificationTokenRecord` (hash-only, single-use); `InMemoryEmailVerificationTokenStore` seit **V00.84** kapazitätsbegrenzt (JS-SEC-074) | Email-Verifikations-Flow |
 | `ApiKeyStore` | core/authentication | `ApiKeyRecord` (hash-only, mit Scopes) | Long-Lived API-Keys |
 | `RefreshTokenStore` | core/authentication | `RefreshTokenRecord` (hash-only, rotating mit `markReplaced`) | Rotating Refresh-Tokens mit Replay-Defense |
 | `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter |
@@ -148,8 +148,8 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 |---|---|---|---|
 | `JCustosNotificationSender` | core/accountlifecycle | `LoggingNotificationSender` | Dispatcher für Reset/Verify-Benachrichtigungen; Apps verdrahten Mail/SMS-Transports |
 | `JCustosNotification` (record) + `Kind` (enum, 4 Werte) | core/accountlifecycle | — | `PASSWORD_RESET_REQUESTED` / `PASSWORD_RESET_COMPLETED` / `EMAIL_VERIFICATION_REQUESTED` / `EMAIL_VERIFIED` |
-| `PasswordResetService` | core/accountlifecycle | — | `request(SubjectId, ttl)` / `validate(plain)` / `consume(plain)` (single-use, hash-only) |
-| `EmailVerificationService` | core/accountlifecycle | — | Wie PasswordReset, plus Email-Adresse am Record |
+| `PasswordResetService` | core/accountlifecycle | — | `request(SubjectId, ttl)` / `validate(plain)` / `consume(plain)` (single-use, hash-only); seit **V00.84** entwertet `request` alle Vorgänger und `consume` alle Geschwister des Subjekts — nur der neueste Link gilt (JS-SEC-074, CWE-640) |
+| `EmailVerificationService` | core/accountlifecycle | — | Wie PasswordReset, plus Email-Adresse am Record; Geschwister-Entwertung seit **V00.84** (JS-SEC-074) |
 
 ### API-Keys / Tokens (Phase 7b — ⚠️)
 

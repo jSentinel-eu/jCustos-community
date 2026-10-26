@@ -22,6 +22,11 @@
  */
 package eu.jsentinel.jcustos.credential.reset;
 
+import eu.jsentinel.jcustos.audit.AuditEvent;
+import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.PasswordResetCompleted;
+import eu.jsentinel.jcustos.audit.PasswordResetRequested;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidationResult;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidator;
@@ -49,8 +54,11 @@ import java.util.Optional;
  *
  * <h2>Issue</h2>
  * <p>{@link #issue(String, Duration)} mints a {@link SelectorVerifierToken}
- * through {@link TokenDigestService}, persists the digest with the
- * supplied TTL, and transitions the credential to
+ * through {@link TokenDigestService}, retires every still-open token of
+ * the same credential (JS-SEC-074, CWE-640: only the newest link works),
+ * persists the digest with the supplied TTL, emits
+ * {@link PasswordResetRequested} and — for credentials in a state that
+ * allows it — transitions the credential to
  * {@link CredentialStatus#RESET_PENDING}. The verifier is returned to
  * the caller exactly once; the store retains only the digest
  * (CWE-522 / CWE-209 / CWE-640).</p>
@@ -62,7 +70,9 @@ import java.util.Optional;
  * ({@link TokenDigestService#verifyVerifier}), validates the new
  * password against the input policy, hashes it, performs a
  * compare-and-swap on the credential's encoded hash and finally CAS-marks
- * the reset token CONSUMED — all single-use (CWE-362 / CWE-640).</p>
+ * the reset token CONSUMED — all single-use (CWE-362 / CWE-640). Open
+ * siblings are retired and {@link PasswordResetCompleted} is emitted
+ * (JS-SEC-074).</p>
  *
  * <p>Every failure variant collapses to the same generic public
  * response at the adapter boundary; the differentiated reason stays
@@ -78,6 +88,7 @@ public final class PasswordResetService {
   private final PasswordInputPolicy inputPolicy;
   private final CredentialLifecycleService lifecycleService;
   private final Clock clock;
+  private final JCustosAuditService auditService;
 
   public PasswordResetService(
       CredentialStore credentialStore,
@@ -88,6 +99,29 @@ public final class PasswordResetService {
       PasswordInputPolicy inputPolicy,
       CredentialLifecycleService lifecycleService,
       Clock clock) {
+    this(credentialStore, resetStore, tokens, hashingService, inputValidator,
+        inputPolicy, lifecycleService, clock, null);
+  }
+
+  /**
+   * Full constructor with an explicit audit sink.
+   *
+   * @param auditService sink for {@link PasswordResetRequested} /
+   *                     {@link PasswordResetCompleted}, or {@code null} to resolve
+   *                     {@link JCustosServiceResolver#securityAuditService()} per event
+   * @since 00.84.00
+   */
+  public PasswordResetService(
+      CredentialStore credentialStore,
+      ResetTokenStore resetStore,
+      TokenDigestService tokens,
+      PasswordHashingService hashingService,
+      PasswordInputValidator inputValidator,
+      PasswordInputPolicy inputPolicy,
+      CredentialLifecycleService lifecycleService,
+      Clock clock,
+      JCustosAuditService auditService) {
+    this.auditService = auditService;
     this.credentialStore = Objects.requireNonNull(credentialStore, "credentialStore");
     this.resetStore = Objects.requireNonNull(resetStore, "resetStore");
     this.tokens = Objects.requireNonNull(tokens, "tokens");
@@ -127,7 +161,12 @@ public final class PasswordResetService {
     ResetTokenRecord record = new ResetTokenRecord(
         digest, username, now, expiresAt,
         ResetTokenStatus.ISSUED, 1L);
+    // JS-SEC-074 (CWE-640): only the newest link may work. Retire every open
+    // sibling before the new token exists, so an older intercepted link dies
+    // the moment the user asks again.
+    retireOpenSiblings(username, null);
     resetStore.save(record);
+    publish(new PasswordResetRequested(now, username, token.selector()));
 
     // Mark the credential RESET_PENDING so concurrent password logins
     // surface ResetInProgress in the lifecycle layer. Failure to
@@ -223,6 +262,10 @@ public final class PasswordResetService {
     if (!(tokenUpdate instanceof ResetTokenUpdateResult.Updated)) {
       return PasswordResetConsumeResult.Failed.INSTANCE;
     }
+    // JS-SEC-074 (CWE-640): the reset is done; no other link issued for this
+    // credential may reset the password a second time.
+    retireOpenSiblings(record.username(), token.selector());
+    publish(new PasswordResetCompleted(now, record.username(), token.selector()));
 
     // Move the credential back to ACTIVE.
     if (credentialRecord.status() == CredentialStatus.RESET_PENDING
@@ -233,5 +276,39 @@ public final class PasswordResetService {
           "reset-consumed");
     }
     return PasswordResetConsumeResult.Succeeded.INSTANCE;
+  }
+
+  /**
+   * Marks every still-ISSUED token of {@code username} EXPIRED, except the
+   * token whose selector is {@code keepSelector}. Best-effort: a CAS that
+   * loses against a concurrent consume leaves that record alone.
+   *
+   * @return number of siblings retired
+   */
+  private int retireOpenSiblings(String username, String keepSelector) {
+    int retired = 0;
+    for (ResetTokenRecord sibling : resetStore.findByUsername(username)) {
+      if (sibling.status() != ResetTokenStatus.ISSUED
+          || sibling.selector().equals(keepSelector)) {
+        continue;
+      }
+      ResetTokenUpdateResult result = resetStore.markExpiredIfCurrent(
+          sibling.selector(), ResetTokenStatus.ISSUED);
+      if (result instanceof ResetTokenUpdateResult.Updated) {
+        retired++;
+      }
+    }
+    return retired;
+  }
+
+  private void publish(AuditEvent event) {
+    JCustosAuditService sink = auditService != null
+        ? auditService
+        : JCustosServiceResolver.securityAuditService();
+    try {
+      sink.publish(event);
+    } catch (RuntimeException auditFailure) {
+      // never block a reset because the audit sink failed
+    }
   }
 }
