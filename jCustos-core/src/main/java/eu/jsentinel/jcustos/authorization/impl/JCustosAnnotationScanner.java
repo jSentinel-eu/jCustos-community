@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.authorization.impl;
 
 import eu.jsentinel.jcustos.authorization.annotations.JCustosAnnotation;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
@@ -94,7 +95,20 @@ public final class JCustosAnnotationScanner {
     // shipped restriction annotations) already surfaces via getAnnotations() above, but it does
     // NOT cover consumer-defined restriction annotations; walking the superclass chain here
     // generalizes inheritance to any @JCustosAnnotation-meta-annotated annotation. Methods do
-    // not inherit annotations, so only Class elements are walked.
+    // not inherit annotations, so only Class elements are walked up the superclass chain.
+    //
+    // JS-SEC-070 (CWE-862): a method without a restriction of its own takes the restriction
+    // declared on (or inherited by) its class. The REST filter, the start-up discovery check and
+    // the OpenAPI metadata all treat a class-level restriction as applying to every method, so
+    // the scanner has to agree — otherwise a handler wired by Method ran unguarded under
+    // allow-by-omission while the start-up check reported it as protected. An explicit
+    // @PublicRoute on the method is the opt-out and wins over the class default.
+    if (element instanceof Method method) {
+      if (method.isAnnotationPresent(PublicRoute.class)) {
+        return Optional.empty();
+      }
+      return doScan(method.getDeclaringClass());
+    }
     if (element instanceof Class<?> clazz) {
       Class<?> superClass = clazz.getSuperclass();
       if (superClass != null && superClass != Object.class) {

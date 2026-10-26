@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.annotation.Annotation;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import java.lang.reflect.Method;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -69,6 +70,23 @@ class JCustosAnnotationScannerTest {
     assertTrue(result.isPresent());
     assertEquals(StubEvaluator.class, result.get().evaluatorClass());
     assertInstanceOf(StubRestriction.class, result.get().annotation());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-070: a method without its own restriction takes the class-level restriction")
+  void methodInheritsClassRestriction() throws NoSuchMethodException {
+    Method method = ClassProtectedHandler.class.getDeclaredMethod("anyMethod");
+    var result = scanner.scan(method);
+    assertTrue(result.isPresent(), "class-level restriction must apply to the un-annotated method");
+    assertInstanceOf(StubRestriction.class, result.get().annotation());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-070: @PublicRoute on the method opts out of the class-level restriction")
+  void publicRouteMethodOptsOut() throws NoSuchMethodException {
+    Method method = ClassProtectedHandler.class.getDeclaredMethod("open");
+    assertTrue(scanner.scan(method).isEmpty(),
+        "an explicit @PublicRoute on the method is the opt-out and wins over the class default");
   }
 
   @Test
@@ -175,5 +193,16 @@ class JCustosAnnotationScannerTest {
 
   // JS-SEC-040: subclass of a plain (unannotated) base stays empty.
   static class PlainSubclass extends PlainView {
+  }
+
+  /** JS-SEC-070 fixture: restriction on the class, methods carry none or an explicit opt-out. */
+  @StubRestriction
+  static final class ClassProtectedHandler {
+    void anyMethod() {
+    }
+
+    @PublicRoute
+    void open() {
+    }
   }
 }

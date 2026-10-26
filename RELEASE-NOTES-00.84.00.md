@@ -107,3 +107,23 @@ The policy now compares two genuinely different sources:
 `TenantId` or `String`. This changes what the one-argument variant admits — from
 everything to only matching tenants — which is the point.
 
+## A class-level restriction did not reach a Method-wired REST handler (ER03, JS-SEC-070, CWE-862)
+
+`RestAuthorizationFilter` receives the secured element as a `Method` in the usual wiring
+(the demo router and every test fixture), and `JCustosAnnotationScanner` looked only at the
+method's own annotations: a `@RequiresRole` or `@RequiresPermission` on the handler *class*
+yielded an empty scan. Under allow-by-omission the handler then ran unguarded; under
+deny-by-default every caller was refused. Meanwhile `isPublicRoute`, the start-up check in
+`ClassScanningRestHandlerDiscovery` and the OpenAPI metadata all treated the class level
+as applying to every method — so the start-up check reported such a handler as protected
+while the filter did not protect it. The JS-SEC-040 superclass walk covered classes, not
+the method-to-class step.
+
+The scanner now falls back from a method without a restriction of its own to the
+restriction declared on (or inherited by) its declaring class; an explicit `@PublicRoute`
+on the method remains the opt-out and wins over the class default. Every caller of the
+scanner — the REST filter, `JCustosEnforcer`, the discovery check, the OpenAPI generator —
+sees the same answer. Scanner tests cover the fallback and the opt-out; the REST filter
+tests wire a class-annotated handler by `Method` and show 403 without the permission, the
+handler running with it, and a `@PublicRoute` method of the protected class staying public.
+

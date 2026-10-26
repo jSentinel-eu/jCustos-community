@@ -239,6 +239,61 @@ class RestAuthorizationFilterTest {
     return new SimpleRestRequest("DELETE", "/api/documents/42", Map.of(), Map.of());
   }
 
+  // ── JS-SEC-070 (CWE-862): class-level restriction with Method wiring ────────
+
+  @Test
+  @DisplayName("JS-SEC-070: class-level @RequiresPermission guards a Method-wired handler (403 without permission)")
+  void classLevelAnnotation_methodWiring_forbiddenWithoutPermission() throws NoSuchMethodException {
+    RecordingResponse response = new RecordingResponse();
+    AtomicBoolean executed = new AtomicBoolean();
+    RestAuthorizationFilter filter = new RestAuthorizationFilter(
+        request -> Optional.of(subject(Set.of(new PermissionName("document:read")))));
+
+    filter.authorizeAndHandle(request(), response,
+        (request, restResponse) -> executed.set(true),
+        ClassProtectedFixture.class.getDeclaredMethod("delete"));
+
+    assertEquals(403, response.status);
+    assertFalse(executed.get(), "the class-level restriction must reach enforcement");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-070: class-level @RequiresPermission admits a subject holding it")
+  void classLevelAnnotation_methodWiring_executesWithPermission() throws NoSuchMethodException {
+    RecordingResponse response = new RecordingResponse();
+    AtomicBoolean executed = new AtomicBoolean();
+    RestAuthorizationFilter filter = new RestAuthorizationFilter(
+        request -> Optional.of(subject(Set.of(new PermissionName("document:delete")))));
+
+    filter.authorizeAndHandle(request(), response,
+        (request, restResponse) -> {
+          executed.set(true);
+          restResponse.status(204);
+        },
+        ClassProtectedFixture.class.getDeclaredMethod("delete"));
+
+    assertEquals(204, response.status);
+    assertTrue(executed.get());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-070: @PublicRoute on a method of a protected class stays public")
+  void classLevelAnnotation_publicRouteMethod_staysPublic() throws NoSuchMethodException {
+    RecordingResponse response = new RecordingResponse();
+    AtomicBoolean executed = new AtomicBoolean();
+    RestAuthorizationFilter filter = new RestAuthorizationFilter(request -> Optional.empty());
+
+    filter.authorizeAndHandle(request(), response,
+        (request, restResponse) -> {
+          executed.set(true);
+          restResponse.status(200);
+        },
+        ClassProtectedFixture.class.getDeclaredMethod("health"));
+
+    assertEquals(200, response.status);
+    assertTrue(executed.get(), "an explicit @PublicRoute on the method is the opt-out");
+  }
+
   private static JCustosSubject subject(Set<PermissionName> permissions) {
     return new JCustosSubject("u1", "User", Set.of(), permissions);
   }
@@ -283,6 +338,17 @@ class RestAuthorizationFilterTest {
     @Override
     public void body(String body) {
       this.body = body;
+    }
+  }
+
+  /** JS-SEC-070 fixture: the restriction sits on the class, the handler methods carry none. */
+  @RequiresPermission("document:delete")
+  static final class ClassProtectedFixture {
+    void delete() {
+    }
+
+    @PublicRoute
+    void health() {
     }
   }
 }
