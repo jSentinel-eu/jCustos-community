@@ -255,6 +255,31 @@ read the token as active before either claims it: exactly one `Optional` is pres
 store holds the initial record and one successor, one `TokenRotated` and one replay event are
 published, and the successor is revoked.
 
+## Legacy PBKDF2 hasher: 600 000 iterations by default, stored parameters validated (ER05, JS-SEC-072, CWE-916, CWE-400, CWE-248)
+
+Two PBKDF2 implementations ship with two wire formats. The modern pipeline
+(`Pbkdf2PasswordHashProvider`, `Pbkdf2Defaults`) uses 600 000 iterations and validates its
+parameters; the legacy `Pbkdf2PasswordHasher` — still the resolver fallback behind
+`JCustosServiceResolver.passwordHashingService()` and the DX `.pbkdf2Defaults()` — hashed with
+120 000 iterations and took iteration count and salt from the stored hash unchecked. A stored
+`pbkdf2$0$…` or an empty salt made `PBEKeySpec` throw out of `verify`, and a stored
+`pbkdf2$2000000000$…` pinned a CPU core per login attempt.
+
+`Pbkdf2PasswordHasher` now defaults to `Pbkdf2Defaults.DEFAULT_ITERATIONS` (600 000), so hashes
+written with the historical default report `needsRehash` and are upgraded on the next successful
+login. `verify` refuses an iteration count outside `1..Pbkdf2Defaults.MAX_ITERATIONS`, a salt
+outside `MIN_SALT_LENGTH..MAX_SALT_LENGTH` bytes and an empty hash segment before any derivation
+runs, and a failing derivation yields `false` rather than an exception. The constructor rejects
+an iteration count outside the same range and a `null` salt source. Hashes written by the old
+default (16-byte salt, 120 000 iterations) still verify.
+
+Not changed here: the resolver fallback is still this class. Switching the default to the
+modern `PasswordHashingServices.defaults()` and deprecating the legacy hasher for removal is
+the follow-up the review proposed for a later release; ER06 covers the DX pipeline wiring.
+Verified: `verify(x, "pbkdf2$0$<salt>$<hash>")` and `verify(x, "pbkdf2$1000$$AAAA")` return
+`false` without an exception, an excessive iteration count is refused in under 50 ms, and
+`new Pbkdf2PasswordHasher().hash(…)` carries 600 000 iterations.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

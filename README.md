@@ -917,7 +917,7 @@ expressed it. `demo-standalone` exercises both side by side
 | Type | Module / package | Purpose |
 |---|---|---|
 | `AuthenticationService<T,U>` | `jCustos-core/.../authentication` | SPI: credential validation + subject loading. |
-| `PasswordHasher`, `PasswordHash`, `Pbkdf2PasswordHasher` | `jCustos-core/.../authentication` | Hash + verify + `needsRehash` (drift detection). |
+| `PasswordHasher`, `PasswordHash`, `Pbkdf2PasswordHasher` | `jCustos-core/.../authentication` | Hash + verify + `needsRehash` (drift detection). 00.84.00 (JS-SEC-072): default 600 000 iterations, stored parameters validated before derivation. |
 | `LoginAttemptPolicy` + `InMemoryLoginAttemptPolicy` + `StoreBackedLoginAttemptPolicy` | `jCustos-core/.../bruteforce` | Login throttling. `LoginAttemptDecision = Allowed \| LockedOut(Duration, int)`. Store-backed variant uses `LoginAttemptStore` (Phase 4b). |
 | `ClientAddressResolver` + `DefaultClientAddressResolver` + `TrustedProxyClientAddressResolver` | `jCustos-core/.../net` | 00.84.00 (JS-SEC-061, CWE-348). Decides which address keys throttling and audit lines. Default: the connection peer, no header. `trustedProxies(...)` honours `X-Forwarded-For` from configured proxies only. Adapters `VaadinClientAddress`, `RestClientAddress`; DX `.clientAddress(...)`. See `docs/security/deployment/reverse-proxy.md`. |
 | `SessionPolicy<U>` + `TimeoutSessionPolicy` | `jCustos-core/.../session` | Idle/absolute lifetime checks. |

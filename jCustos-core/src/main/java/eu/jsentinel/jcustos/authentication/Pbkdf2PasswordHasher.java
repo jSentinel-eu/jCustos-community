@@ -16,6 +16,8 @@
  */
 package eu.jsentinel.jcustos.authentication;
 
+import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2Defaults;
+
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 import java.security.MessageDigest;
@@ -26,15 +28,33 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * PBKDF2-HMAC-SHA256 hasher using only JDK APIs. Encoded format:
  * {@code pbkdf2$<iterations>$<base64-salt>$<base64-hash>}.
+ * <p>
+ * Since 00.84.00 (JS-SEC-072) the default iteration count follows
+ * {@link Pbkdf2Defaults#DEFAULT_ITERATIONS} (600 000, the OWASP 2023
+ * figure for HMAC-SHA256) instead of the historical 120 000, so hashes
+ * written with the old default report {@link #needsRehash(PasswordHash)}
+ * and are upgraded on the next successful login. {@link #verify} no longer
+ * trusts the parameters inside a stored hash: an iteration count outside
+ * {@code 1..}{@link Pbkdf2Defaults#MAX_ITERATIONS} or a salt outside
+ * {@link Pbkdf2Defaults#MIN_SALT_LENGTH}{@code ..}{@link Pbkdf2Defaults#MAX_SALT_LENGTH}
+ * bytes is refused before any key derivation runs (CWE-400: a stored
+ * {@code pbkdf2$2000000000$…} would otherwise pin a CPU core per attempt;
+ * CWE-248: an empty salt made {@code PBEKeySpec} throw out of
+ * {@code verify}). New applications should prefer the modern pipeline
+ * ({@code PasswordHashingServices.defaults()}, Argon2id when
+ * {@code jCustos-crypto-bc} is present); this class remains for the
+ * {@code pbkdf2$…} wire format already in production.
  */
 public final class Pbkdf2PasswordHasher implements PasswordHasher {
 
   private static final String ALGORITHM = "PBKDF2WithHmacSHA256";
-  private static final int DEFAULT_ITERATIONS = 120_000;
+  /** JS-SEC-072: aligned with the modern pipeline's {@link Pbkdf2Defaults#DEFAULT_ITERATIONS}. */
+  private static final int DEFAULT_ITERATIONS = Pbkdf2Defaults.DEFAULT_ITERATIONS;
   private static final int SALT_BYTES = 16;
   private static final int HASH_BITS = 256;
 
@@ -52,9 +72,22 @@ public final class Pbkdf2PasswordHasher implements PasswordHasher {
     this(DEFAULT_ITERATIONS, new SecureRandom());
   }
 
+  /**
+   * @param iterations PBKDF2 iteration count for new hashes; {@code 1..}
+   *                   {@link Pbkdf2Defaults#MAX_ITERATIONS}. Production
+   *                   deployments should not go below
+   *                   {@link Pbkdf2Defaults#MIN_ITERATIONS}; smaller values
+   *                   are accepted for tests only.
+   * @param random     salt source; non-null
+   * @throws IllegalArgumentException when {@code iterations} is outside the range
+   */
   public Pbkdf2PasswordHasher(int iterations, SecureRandom random) {
+    if (iterations < 1 || iterations > Pbkdf2Defaults.MAX_ITERATIONS) {
+      throw new IllegalArgumentException(
+          "iterations must be within 1.." + Pbkdf2Defaults.MAX_ITERATIONS + ", got " + iterations);
+    }
     this.iterations = iterations;
-    this.random = random;
+    this.random = Objects.requireNonNull(random, "random must not be null");
   }
 
   @Override
@@ -84,8 +117,24 @@ public final class Pbkdf2PasswordHasher implements PasswordHasher {
     } catch (RuntimeException e) {
       return false;
     }
-    byte[] candidate = derive(rawPassword, salt, storedIterations);
-    return MessageDigest.isEqual(candidate, expected);
+    // JS-SEC-072 (CWE-400 / CWE-248): the stored parameters are data, not
+    // policy. Refuse before deriving anything the record could not have
+    // been written with, instead of letting PBEKeySpec throw or spin.
+    if (storedIterations < 1 || storedIterations > Pbkdf2Defaults.MAX_ITERATIONS) {
+      return false;
+    }
+    if (salt.length < Pbkdf2Defaults.MIN_SALT_LENGTH || salt.length > Pbkdf2Defaults.MAX_SALT_LENGTH) {
+      return false;
+    }
+    if (expected.length == 0) {
+      return false;
+    }
+    try {
+      byte[] candidate = derive(rawPassword, salt, storedIterations);
+      return MessageDigest.isEqual(candidate, expected);
+    } catch (RuntimeException derivationFailure) {
+      return false;
+    }
   }
 
   @Override

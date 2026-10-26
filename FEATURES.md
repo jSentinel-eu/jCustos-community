@@ -93,7 +93,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
-| `PasswordHasher` | core | `Pbkdf2PasswordHasher` | Hashing + Drift-Detection (`needsRehash`) |
+| `PasswordHasher` | core | `Pbkdf2PasswordHasher` (seit **V00.84** 600 000 Iterationen aus `Pbkdf2Defaults`, JS-SEC-072; `verify` prüft Iterationszahl und Salt-Länge gegen die Grenzwerte, bevor abgeleitet wird) | Hashing + Drift-Detection (`needsRehash`); Legacy-Drahtformat `pbkdf2$…`, neue Anwendungen nutzen `PasswordHashingServices.defaults()` |
 | `PasswordPolicy` | core | `MinimumLengthPasswordPolicy(8)` | Passwort-Mindestlängen-Validierung |
 | `AdministratorAccountStore` | core | anwendungsdefiniert | Persistierung des Bootstrap-Admins |
 | `BootstrapTokenStore` | core | `InMemoryBootstrapTokenStore` / `FileBootstrapTokenStore` | Token-Persistenz für First-Run-Bootstrap |

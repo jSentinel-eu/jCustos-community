@@ -591,8 +591,9 @@ public final class JCustosContext {
    * {@link Pbkdf2PasswordHasher} when none is configured. Like the
    * audit / login-attempt / session accessors, this method
    * <strong>never</strong> throws — every application needs *some*
-   * hasher; falling back to PBKDF2 with default iterations is the
-   * least-surprising default.
+   * hasher; falling back to PBKDF2 with the
+   * {@code Pbkdf2Defaults.DEFAULT_ITERATIONS} iteration count (600 000
+   * since 00.84.00, JS-SEC-072) is the least-surprising default.
    *
    * @return the resolved hasher, never {@code null}
    */

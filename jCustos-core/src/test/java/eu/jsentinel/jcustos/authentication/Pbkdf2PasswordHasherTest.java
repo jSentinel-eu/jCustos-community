@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authentication;
 
+import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2Defaults;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -35,6 +36,79 @@ class Pbkdf2PasswordHasherTest {
 
   private static Pbkdf2PasswordHasher hasher() {
     return new Pbkdf2PasswordHasher(FAST_ITERATIONS, new SecureRandom());
+  }
+
+  // ── JS-SEC-072: defaults and parameter validation ────────────────
+
+  @Test
+  @DisplayName("JS-SEC-072: the default hasher writes Pbkdf2Defaults.DEFAULT_ITERATIONS (600 000)")
+  void defaultIterationsFollowPbkdf2Defaults() {
+    Pbkdf2PasswordHasher hasher = new Pbkdf2PasswordHasher();
+    String stored = hasher.hash("x".toCharArray());
+    int iterations = hasher.parse(stored).intParameter(Pbkdf2PasswordHasher.PARAM_ITERATIONS, -1);
+    assertEquals(Pbkdf2Defaults.DEFAULT_ITERATIONS, iterations);
+    assertTrue(iterations >= 600_000);
+    assertTrue(hasher.verify("x".toCharArray(), stored));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-072: a hash written with the historical 120 000 iterations needs a rehash")
+  void legacyDefaultNeedsRehash() {
+    Pbkdf2PasswordHasher legacy = new Pbkdf2PasswordHasher(120_000, new SecureRandom());
+    Pbkdf2PasswordHasher current = new Pbkdf2PasswordHasher();
+    String stored = legacy.hash("pw".toCharArray());
+    assertTrue(current.verify("pw".toCharArray(), stored), "old hashes must still verify");
+    assertTrue(current.needsRehash(current.parse(stored)), "old hashes must be upgraded on next login");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-072: zero iterations in a stored hash yield false, not an exception (CWE-248)")
+  void verifyRejectsZeroIterationsWithoutException() {
+    String salt = Base64.getEncoder().withoutPadding().encodeToString(new byte[16]);
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$0$" + salt + "$AAAA"));
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$-5$" + salt + "$AAAA"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-072: an empty or too short salt yields false, not an exception (CWE-248)")
+  void verifyRejectsEmptyOrShortSaltWithoutException() {
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$1000$$AAAA"));
+    String shortSalt = Base64.getEncoder().withoutPadding().encodeToString(new byte[4]);
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$1000$" + shortSalt + "$AAAA"));
+    String longSalt = Base64.getEncoder().withoutPadding().encodeToString(new byte[65]);
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$1000$" + longSalt + "$AAAA"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-072: an iteration count above MAX_ITERATIONS is refused before deriving (CWE-400)")
+  void verifyRejectsExcessiveIterationsFast() {
+    String salt = Base64.getEncoder().withoutPadding().encodeToString(new byte[16]);
+    String hostile = "pbkdf2$" + (Pbkdf2Defaults.MAX_ITERATIONS + 1) + "$" + salt + "$AAAA";
+    long start = System.nanoTime();
+    assertFalse(hasher().verify("x".toCharArray(), hostile));
+    long elapsedMillis = (System.nanoTime() - start) / 1_000_000;
+    assertTrue(elapsedMillis < 50, "refusal must not derive; took " + elapsedMillis + " ms");
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$2000000000$" + salt + "$AAAA"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-072: an empty hash segment yields false")
+  void verifyRejectsEmptyHashSegment() {
+    String salt = Base64.getEncoder().withoutPadding().encodeToString(new byte[16]);
+    assertFalse(hasher().verify("x".toCharArray(), "pbkdf2$1000$" + salt + "$"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-072: the constructor validates its parameters")
+  void constructorValidation() {
+    assertThrows(IllegalArgumentException.class, () -> new Pbkdf2PasswordHasher(0, new SecureRandom()));
+    assertThrows(IllegalArgumentException.class, () -> new Pbkdf2PasswordHasher(-1, new SecureRandom()));
+    assertThrows(IllegalArgumentException.class,
+        () -> new Pbkdf2PasswordHasher(Pbkdf2Defaults.MAX_ITERATIONS + 1, new SecureRandom()));
+    assertThrows(NullPointerException.class, () -> new Pbkdf2PasswordHasher(1_000, null));
+    assertEquals(Pbkdf2Defaults.MAX_ITERATIONS, new Pbkdf2PasswordHasher(Pbkdf2Defaults.MAX_ITERATIONS,
+        new SecureRandom()).parse("pbkdf2$" + Pbkdf2Defaults.MAX_ITERATIONS + "$AAAA$BBBB")
+        .intParameter(Pbkdf2PasswordHasher.PARAM_ITERATIONS, -1));
   }
 
   @Test
