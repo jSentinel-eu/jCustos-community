@@ -31,6 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("VaadinSessionTokenCredentialStore")
 class VaadinSessionTokenCredentialStoreTest {
 
+  /**
+   * Strong reference to the session bound by {@link #bindSession()} —
+   * {@code CurrentInstance} only holds a {@code WeakReference}, so without it
+   * a GC pause can make {@code VaadinSession.getCurrent()} return {@code null}.
+   */
+  private InMemoryVaadinSession boundSession;
+
   private final TokenCredentialStore store = new VaadinSessionTokenCredentialStore();
 
   @BeforeEach
@@ -81,8 +88,9 @@ class VaadinSessionTokenCredentialStoreTest {
     store.clear();
   }
 
-  private static InMemoryVaadinSession bindSession() {
+  private InMemoryVaadinSession bindSession() {
     InMemoryVaadinSession session = new InMemoryVaadinSession();
+    boundSession = session;
     VaadinSession.setCurrent(session);
     assertSame(session, VaadinSession.getCurrent());
     return session;

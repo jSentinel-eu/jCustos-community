@@ -152,3 +152,11 @@ or register a policy to choose other limits, or register `NoopSessionPolicy` to 
 Verified: with no registered policy, a navigation 31 minutes after the last activity
 clears the subject, forwards to the login view and audits `SessionExpired(IdleTimeout)`.
 
+
+## Test hygiene: Vaadin sessions in unit tests are strongly referenced
+
+`CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
+test classes bound an in-memory session and dropped their own reference to it, so a GC pause
+between binding and the assertion made `VaadinSession.getCurrent()` return `null` and the
+test fail intermittently. The test classes now keep the bound session in a field. No
+production code changed.

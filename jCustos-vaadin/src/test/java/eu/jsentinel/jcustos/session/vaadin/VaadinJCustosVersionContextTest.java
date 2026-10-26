@@ -38,6 +38,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("VaadinJCustosVersionContext")
 class VaadinJCustosVersionContextTest {
 
+  /**
+   * Strong reference to the session bound by {@link #bindSession()} —
+   * {@code CurrentInstance} only holds a {@code WeakReference}, so without it
+   * a GC pause can make {@code VaadinSession.getCurrent()} return {@code null}.
+   */
+  private InMemoryVaadinSession boundSession;
+
   private static final SubjectId ALICE = new SubjectId("alice");
 
   @BeforeEach
@@ -139,8 +146,9 @@ class VaadinJCustosVersionContextTest {
             JCustosVersion.INITIAL, "sid"));
   }
 
-  private static InMemoryVaadinSession bindSession() {
+  private InMemoryVaadinSession bindSession() {
     InMemoryVaadinSession session = new InMemoryVaadinSession();
+    boundSession = session;
     VaadinSession.setCurrent(session);
     assertSame(session, VaadinSession.getCurrent());
     return session;

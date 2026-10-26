@@ -35,6 +35,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("VaadinSessionSubjectStore")
 class VaadinSessionSubjectStoreTest {
 
+  /**
+   * Strong reference to the session bound by {@link #bindSession()} —
+   * {@code CurrentInstance} only holds a {@code WeakReference}, so without it
+   * a GC pause can make {@code VaadinSession.getCurrent()} return {@code null}.
+   */
+  private InMemoryVaadinSession boundSession;
+
   private final VaadinSessionSubjectStore store = new VaadinSessionSubjectStore();
 
   @BeforeEach
@@ -134,8 +141,9 @@ class VaadinSessionSubjectStoreTest {
 
   // ── Helpers ───────────────────────────────────────────────────
 
-  private static InMemoryVaadinSession bindSession() {
+  private InMemoryVaadinSession bindSession() {
     InMemoryVaadinSession session = new InMemoryVaadinSession();
+    boundSession = session;
     VaadinSession.setCurrent(session);
     assertSame(session, VaadinSession.getCurrent(),
         "precondition: stub session should be bound to the current thread");
