@@ -68,14 +68,17 @@ class CredentialBootstrapTest {
   }
 
   @Test
-  @DisplayName(".hashing(...) appears in runtime but is NOT passed to the legacy setter")
-  void hashingServiceNotWiredThroughLegacy() {
+  @DisplayName(".hashing(...) is wired through the credential-pipeline resolver slot, never the legacy setter (JS-SEC-073)")
+  void hashingServiceWiredThroughPipelineSlot() {
     PasswordHashingService pipeline = PasswordHashingServices.defaults();
     JCustosRuntime runtime = new TestBootstrap()
         .credentials(c -> c.hashing(pipeline))
         .install();
     assertTrue(runtime.services().stream()
         .anyMatch(s -> PasswordHashingService.class.equals(s.spi())));
+    assertSame(pipeline, JCustosServiceResolver.findCredentialHashingService().orElseThrow(),
+        ".hashing(...) must be what credentialHashingService() resolves");
+    assertSame(pipeline, JCustosServiceResolver.credentialHashingService());
     assertFalse(JCustosServiceResolver.findPasswordHashingService().isPresent(),
         "V00.71 PasswordHashingService must never be stuffed into the legacy PasswordHasher setter");
   }
@@ -94,24 +97,33 @@ class CredentialBootstrapTest {
             && Pbkdf2PasswordHasher.class.equals(s.impl())));
     assertTrue(runtime.services().stream()
         .anyMatch(s -> PasswordHashingService.class.equals(s.spi())));
+    assertTrue(JCustosServiceResolver.findCredentialHashingService().isPresent(),
+        ".pbkdf2Defaults() must wire the pipeline slot as well (JS-SEC-073)");
   }
 
   @Test
-  @DisplayName(".modern() with security-crypto-bc on classpath wires the BC pipeline")
-  void modernUsesBouncyCastleWhenAvailable() {
-    // security-crypto-bc IS on the test classpath via the security-dx
-    // test dependency tree, so this verifies the happy path.
+  @DisplayName("JS-SEC-073 acceptance: .modern() in STRICT wires an Argon2id pipeline — a fresh hash carries argon2id")
+  void modernInStrictWiresArgon2id() {
     JCustosRuntime runtime = new TestBootstrap()
         .credentials(c -> c.modern())
+        .mode(JCustosBootstrapMode.STRICT)
         .install();
-    boolean pipelinePresent = runtime.services().stream()
-        .anyMatch(s -> PasswordHashingService.class.equals(s.spi()));
-    assertTrue(pipelinePresent, "modern() should register a PasswordHashingService");
+    assertTrue(runtime.services().stream()
+        .anyMatch(s -> PasswordHashingService.class.equals(s.spi())),
+        "modern() should register a PasswordHashingService");
+    PasswordHashingService wired = JCustosServiceResolver.findCredentialHashingService().orElseThrow(
+        () -> new AssertionError(".modern() must be wired into credentialHashingService()"));
+    var result = wired.hash("correct horse battery staple".toCharArray());
+    assertEquals("Argon2id", result.algorithm(), "the wired pipeline must hash with Argon2id");
+    assertEquals("argon2id-bc", result.providerId());
+    assertTrue(result.encodedHash().toLowerCase().contains("argon2id"),
+        "the encoded hash must name argon2id; got: " + result.encodedHash());
+    assertSame(wired, JCustosServiceResolver.credentialHashingService());
   }
 
   @Test
-  @DisplayName(".credentialStore(...) without .hashing(...) is fine; only change/reset trigger missing-hashing")
-  void credentialStoreAloneIsOk() {
+  @DisplayName(".credentialStore(...) without .hashing(...) does not trigger missing-hashing; it is recorded-not-wired (JS-SEC-073)")
+  void credentialStoreAloneIsRecordedNotWired() {
     JCustosRuntime runtime = new TestBootstrap()
         .credentials(c -> c.credentialStore(
             new eu.jsentinel.jcustos.credential.store.InMemoryCredentialStore()))
@@ -119,8 +131,34 @@ class CredentialBootstrapTest {
     assertFalse(runtime.warnings().stream()
         .anyMatch(w -> "credentials/missing-hashing".equals(w.code())),
         ".credentialStore() alone must not trigger missing-hashing");
-    assertTrue(runtime.services().stream()
-        .anyMatch(s -> eu.jsentinel.jcustos.credential.store.CredentialStore.class.equals(s.spi())));
+    assertFalse(runtime.services().stream()
+        .anyMatch(s -> eu.jsentinel.jcustos.credential.store.CredentialStore.class.equals(s.spi())),
+        "an unwired entry must not masquerade as a registered service");
+    assertTrue(runtime.warnings().stream()
+        .anyMatch(w -> "dx/credential-store-recorded-not-wired".equals(w.code())
+            && w.severity() == Severity.WARNING),
+        "an unwired entry must surface as an explicit WARNING");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-073: recorded-not-wired pipeline entries are a boot failure in STRICT")
+  void recordedNotWiredEntriesFailStrict() {
+    PasswordHashingService pipeline = PasswordHashingServices.defaults();
+    assertThrows(JCustosBootstrapException.class, () -> new TestBootstrap()
+        .credentials(c -> c.hashing(pipeline)
+            .pepper(eu.jsentinel.jcustos.credential.password.pepper.NoOpPepperService.INSTANCE))
+        .mode(JCustosBootstrapMode.STRICT)
+        .install());
+    JCustosServiceResolver.resetAll();
+    JCustosRuntime lenient = new TestBootstrap()
+        .credentials(c -> c.hashing(pipeline)
+            .pepper(eu.jsentinel.jcustos.credential.password.pepper.NoOpPepperService.INSTANCE))
+        .install();
+    assertTrue(lenient.warnings().stream()
+        .anyMatch(w -> "dx/credential-pepper-recorded-not-wired".equals(w.code())
+            && w.severity() == Severity.WARNING));
+    assertFalse(lenient.services().stream()
+        .anyMatch(s -> eu.jsentinel.jcustos.credential.password.pepper.PepperService.class.equals(s.spi())));
   }
 
   @Test

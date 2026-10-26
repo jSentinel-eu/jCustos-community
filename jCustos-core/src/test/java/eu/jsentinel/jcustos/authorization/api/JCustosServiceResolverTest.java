@@ -463,6 +463,35 @@ class JCustosServiceResolverTest {
     }
   }
 
+  // ── PasswordHashingService / credential pipeline (JS-SEC-073) ──
+
+  @Test
+  @DisplayName("credentialHashingService falls back to PasswordHashingServices.defaults() when nothing is registered")
+  void credentialHashingService_defaultsToPipeline() {
+    eu.jsentinel.jcustos.credential.password.PasswordHashingService pipeline =
+        JCustosServiceResolver.credentialHashingService();
+    assertNotNull(pipeline);
+    assertSame(pipeline, JCustosServiceResolver.credentialHashingService(), "the default is cached");
+    assertTrue(JCustosServiceResolver.findCredentialHashingService().isEmpty(),
+        "the default pipeline must not be reported as a registration");
+  }
+
+  @Test
+  @DisplayName("setCredentialHashingService overrides both accessors; resetAll restores the default")
+  void setCredentialHashingService_overridesAndResets() {
+    eu.jsentinel.jcustos.credential.password.PasswordHashingService explicit =
+        eu.jsentinel.jcustos.credential.password.PasswordHashingServices.defaults();
+    JCustosServiceResolver.setCredentialHashingService(explicit);
+
+    assertSame(explicit, JCustosServiceResolver.credentialHashingService());
+    assertSame(explicit, JCustosServiceResolver.findCredentialHashingService().orElseThrow());
+
+    JCustosServiceResolver.resetAll();
+
+    assertTrue(JCustosServiceResolver.findCredentialHashingService().isEmpty());
+    assertNotSame(explicit, JCustosServiceResolver.credentialHashingService());
+  }
+
   // ── PasswordHasher ────────────────────────────────────────────
 
   @Test

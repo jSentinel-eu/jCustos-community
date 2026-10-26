@@ -53,7 +53,13 @@
 - Don't put `PasswordHashingService` through
   `JCustosServiceResolver.setPasswordHashingService(...)` — that
   setter is for the legacy `PasswordHasher`. Use
-  `.credentials(c -> c.hashing(svc))` instead.
+  `.credentials(c -> c.hashing(svc))` instead; since 00.84.00 it lands in
+  `JCustosServiceResolver.credentialHashingService()` (JS-SEC-073).
+- Don't expect `.pepper(...)`, `.credentialStore(...)`,
+  `.passwordChange(...)` or `.passwordReset(...)` to activate anything —
+  the bootstrap records them and reports
+  `dx/credential-<entry>-recorded-not-wired` (WARNING; STRICT → ERROR).
+  Compose the pepper into the hashing service and wire the rest yourself.
 - Don't call `.roles(r -> r.mapping(...))` — `RolePermissionMapping` is
   deliberately not part of the V00.73 fluent surface (Konzept §9).
   Register it directly through `JCustosServiceResolver` if needed.

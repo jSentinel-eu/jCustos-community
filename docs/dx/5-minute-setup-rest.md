@@ -72,7 +72,7 @@ to `HttpStatusDecisionMapper` and a generic-strings error body strategy.
 | `.audit(...)` | Full — composes `LoggingAuditSink`, `RingBufferAuditSink`, `StoreBackedJCustosAuditService` as in Vaadin |
 | `.policies(...)` | Full — registers policies and resource resolvers into `PolicyRegistry` |
 | `.roles(...)` | `.hierarchy(...)` only (V00.73 deliberately keeps `RolePermissionMapping` out) |
-| `.credentials(...)` | Full — `.passwordHasher(...)` (legacy resolver), `.hashing(...)` / `.pepper(...)` / `.credentialStore(...)` (V00.71 pipeline). `.modern()` requires `jCustos-crypto-bc` |
+| `.credentials(...)` | `.passwordHasher(...)` wires the legacy `PasswordHasher` slot; `.hashing(...)`, `.modern()` and `.pbkdf2Defaults()` wire the V00.71 pipeline into `JCustosServiceResolver.credentialHashingService()` (00.84.00, JS-SEC-073). `.pepper(...)`, `.credentialStore(...)`, `.passwordChange(...)` and `.passwordReset(...)` are recorded only and reported as `dx/credential-<entry>-recorded-not-wired` (WARNING; STRICT → ERROR) — compose the pepper into `.hashing(PasswordHashingServices.defaults(policy, limiter, pepper))` and hand the rest to your own wiring. `.modern()` requires `jCustos-crypto-bc` |
 | `.sessions(...)` | `SessionPolicy` / `JCustosVersionStore` / `SubjectIdResolver` only. `.storeBacked(...)` records `rest/session-store-unused` INFO — REST has no concept of a session store |
 
 ## STRICT mode

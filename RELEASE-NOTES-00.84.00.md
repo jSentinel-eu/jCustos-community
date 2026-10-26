@@ -280,6 +280,35 @@ Verified: `verify(x, "pbkdf2$0$<salt>$<hash>")` and `verify(x, "pbkdf2$1000$$AAA
 `false` without an exception, an excessive iteration count is refused in under 50 ms, and
 `new Pbkdf2PasswordHasher().hash(…)` carries 600 000 iterations.
 
+## DX credential pipeline: `.hashing(...)` and `.modern()` are wired, inert entries are reported (ER06, JS-SEC-073, CWE-684)
+
+The `.credentials(...)` sub-builder recorded the V00.71 pipeline — `.hashing(...)`, `.modern()`,
+`.pepper(...)`, `.credentialStore(...)`, `.passwordChange(...)`, `.passwordReset(...)` — in the
+bootstrap state and listed every entry in `JCustosRuntime.services()` as `bootstrap-explicit`,
+the same position JS-SEC-055 corrected for `.rateLimit(...)`: no module read the state, so after
+`.modern()` the application still resolved the PBKDF2 fallback while the diagnostics claimed an
+active Argon2id pipeline.
+
+`JCustosServiceResolver` gains a slot for the pipeline: `credentialHashingService()` (falls back
+to `PasswordHashingServices.defaults()`), `findCredentialHashingService()` (empty for the
+fallback) and `setCredentialHashingService(...)`, cleared by `resetAll()`. It is distinct from
+the legacy `passwordHashingService()` accessor, which keeps returning the `PasswordHasher`. The
+DX bootstrap wires `.hashing(...)`, `.modern()` and `.pbkdf2Defaults()` through that slot, so
+`.modern()` really activates Argon2id for everything that resolves the pipeline. The four
+entries without a consumer — pepper, credential store, password change, password reset — are
+no longer listed as services; they surface as `dx/credential-<entry>-recorded-not-wired`
+(WARNING, a boot failure in STRICT), each with the remedy: compose the pepper into
+`.hashing(PasswordHashingServices.defaults(policy, limiter, pepper))`, hand the rest to the
+application's own wiring or drop the call.
+
+Migration: applications that read their pipeline from their own wiring keep working; those
+that want the configured pipeline call `JCustosServiceResolver.credentialHashingService()`.
+A STRICT application that passes `.pepper(...)`, `.credentialStore(...)`,
+`.passwordChange(...)` or `.passwordReset(...)` fails to boot until the inert call is composed
+or removed. Verified: `.credentials(c -> c.modern()).mode(STRICT).install()` wires a pipeline
+whose fresh hash reports algorithm `Argon2id` and provider `argon2id-bc`; with the wiring
+removed that test and the `.hashing(...)` / `.pbkdf2Defaults()` tests fail.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

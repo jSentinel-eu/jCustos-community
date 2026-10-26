@@ -29,6 +29,8 @@ import eu.jsentinel.jcustos.authorization.api.roles.NoopRoleHierarchy;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
 import eu.jsentinel.jcustos.credential.propagation.OutboundTokenStrategy;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
@@ -97,6 +99,11 @@ public final class JCustosContext {
       new AtomicReference<>();
   private final AtomicReference<PasswordHasher> passwordHasherRef =
       new AtomicReference<>();
+  // V00.84 (JS-SEC-073, CWE-684): the V00.71 credential pipeline, so the DX
+  // .credentials(...) sub-builder has a resolver to wire into.
+  private final AtomicReference<PasswordHashingService> credentialHashingServiceRef =
+      new AtomicReference<>();
+  private volatile PasswordHashingService defaultedCredentialHashingService;
   private final AtomicReference<LogoutService> logoutServiceRef =
       new AtomicReference<>();
   private final AtomicReference<PolicyRegistry> policyRegistryRef =
@@ -646,6 +653,77 @@ public final class JCustosContext {
     passwordHasherRef.set(hasher);
   }
 
+  // ── PasswordHashingService (credential pipeline) ───────────────
+
+  /**
+   * Returns the registered V00.71 {@link PasswordHashingService} — the
+   * credential pipeline behind {@code .credentials(c -> c.hashing(...))},
+   * {@code .modern()} and {@code .pbkdf2Defaults()} — or
+   * {@link PasswordHashingServices#defaults()} when none is configured
+   * (JS-SEC-073, CWE-684). Not to be confused with
+   * {@link #passwordHashingService()}, which returns the legacy
+   * {@link PasswordHasher}. Never throws.
+   *
+   * @return the pipeline, never {@code null}
+   * @since 00.84.00
+   */
+  public PasswordHashingService credentialHashingService() {
+    PasswordHashingService cached = credentialHashingServiceRef.get();
+    if (cached != null) {
+      return cached;
+    }
+    PasswordHashingService loaded = findSingleService(
+        PasswordHashingService.class,
+        ServiceLoader.load(PasswordHashingService.class))
+        .orElse(null);
+    if (loaded == null) {
+      loaded = defaultCredentialHashingService();
+    }
+    credentialHashingServiceRef.compareAndSet(null, loaded);
+    return credentialHashingServiceRef.get();
+  }
+
+  private PasswordHashingService defaultCredentialHashingService() {
+    PasswordHashingService defaulted = defaultedCredentialHashingService;
+    if (defaulted == null) {
+      defaulted = PasswordHashingServices.defaults();
+      defaultedCredentialHashingService = defaulted;
+    }
+    return defaulted;
+  }
+
+  /**
+   * Returns the SPI-registered or explicitly set {@link PasswordHashingService},
+   * or empty when only the default pipeline applies. Diagnostics use this to
+   * tell a configured pipeline from the fallback.
+   *
+   * @return the configured pipeline, or empty
+   * @since 00.84.00
+   */
+  public Optional<PasswordHashingService> findCredentialHashingService() {
+    PasswordHashingService cached = credentialHashingServiceRef.get();
+    if (cached != null) {
+      return cached == defaultedCredentialHashingService ? Optional.empty() : Optional.of(cached);
+    }
+    Optional<PasswordHashingService> loaded = findSingleService(
+        PasswordHashingService.class,
+        ServiceLoader.load(PasswordHashingService.class));
+    loaded.ifPresent(service -> credentialHashingServiceRef.compareAndSet(null, service));
+    return loaded;
+  }
+
+  /**
+   * Replaces the cached {@link PasswordHashingService}. The DX bootstrap
+   * wires {@code .credentials(...)} through this; tests and programmatic
+   * wiring use it as well.
+   *
+   * @param service the pipeline, or {@code null} to clear
+   * @since 00.84.00
+   */
+  public void setCredentialHashingService(PasswordHashingService service) {
+    credentialHashingServiceRef.set(service);
+  }
+
   // ── LogoutService ──────────────────────────────────────────────
 
   /**
@@ -1183,6 +1261,8 @@ public final class JCustosContext {
     sessionPolicyRef.set(null);
     defaultedSessionPolicy = null;
     passwordHasherRef.set(null);
+    credentialHashingServiceRef.set(null);
+    defaultedCredentialHashingService = null;
     logoutServiceRef.set(null);
     policyRegistryRef.set(null);
     resourceResolverRegistryRef.set(null);

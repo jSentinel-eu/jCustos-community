@@ -27,14 +27,10 @@ import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
-import eu.jsentinel.jcustos.credential.change.PasswordChangeService;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
-import eu.jsentinel.jcustos.credential.password.pepper.PepperService;
-import eu.jsentinel.jcustos.credential.reset.PasswordResetService;
-import eu.jsentinel.jcustos.credential.store.CredentialStore;
 import eu.jsentinel.jcustos.policy.api.Policy;
 import eu.jsentinel.jcustos.policy.spi.PolicyRegistry;
 import eu.jsentinel.jcustos.policy.spi.ResourceResolver;
@@ -984,9 +980,17 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    * {@code .credentials(...)} calls and applies it per Konzept §10.
    * The legacy {@code PasswordHasher} path is wired through
    * {@link JCustosServiceResolver#setPasswordHashingService(PasswordHasher)};
-   * the V00.71 pipeline services are reported in
-   * {@link JCustosRuntime#services()} but never stuffed into the
-   * legacy setter.
+   * the V00.71 {@link PasswordHashingService} — from {@code .hashing(...)},
+   * {@code .modern()} or {@code .pbkdf2Defaults()} — is wired through
+   * {@link JCustosServiceResolver#setCredentialHashingService(PasswordHashingService)}
+   * since 00.84.00 (JS-SEC-073, CWE-684) and is never stuffed into the
+   * legacy setter. {@code .pepper(...)}, {@code .credentialStore(...)},
+   * {@code .passwordChange(...)} and {@code .passwordReset(...)} have no
+   * resolver and no consumer inside the bootstrap: they are recorded for the
+   * application's own wiring and reported as
+   * {@code dx/credential-<entry>-recorded-not-wired} (WARNING; STRICT → ERROR),
+   * exactly like {@code .rateLimit(...)} since JS-SEC-055 — never as an
+   * active service.
    */
   protected final void applyCredentialConfiguration(List<RegisteredJCustosService> services,
                                                     List<JCustosBootstrapWarning> warnings) {
@@ -1036,32 +1040,45 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
           "bootstrap-explicit", false));
     }
 
-    // V00.71 pipeline — every service is reported but never wired
-    // through the legacy resolver setter
+    // V00.71 pipeline. JS-SEC-073 (CWE-684): the hashing service IS wired —
+    // through its own resolver slot, never the legacy PasswordHasher setter —
+    // so .modern() really activates Argon2id for everything that resolves
+    // JCustosServiceResolver.credentialHashingService().
     if (cred.hashingService() != null) {
+      JCustosServiceResolver.setCredentialHashingService(cred.hashingService());
       services.add(new RegisteredJCustosService(
           PasswordHashingService.class, cred.hashingService().getClass(),
           "bootstrap-explicit", false));
     }
+    // The remaining pipeline entries have no resolver and no consumer inside
+    // the bootstrap. Before 00.84.00 they appeared in services() as
+    // "bootstrap-explicit", indistinguishable from the wired entries above and
+    // falsely reading as "configured and active" — the JS-SEC-055 pattern.
+    // Report them as recorded-not-wired instead: WARNING, and in STRICT a hard
+    // boot failure, so nobody ships an inert pepper or credential store.
+    Severity credentialRecordedNotWired = switch (state.mode()) {
+      case STRICT -> Severity.ERROR;
+      default -> Severity.WARNING;
+    };
     if (cred.pepperService() != null) {
-      services.add(new RegisteredJCustosService(
-          PepperService.class, cred.pepperService().getClass(),
-          "bootstrap-explicit", false));
+      warnings.add(recordedNotWired(credentialRecordedNotWired, "pepper", ".pepper(...)",
+          cred.pepperService().getClass(),
+          "Compose it into the pipeline instead: .hashing(PasswordHashingServices.defaults(policy, limiter, pepper))."));
     }
     if (cred.credentialStore() != null) {
-      services.add(new RegisteredJCustosService(
-          CredentialStore.class, cred.credentialStore().getClass(),
-          "bootstrap-explicit", false));
+      warnings.add(recordedNotWired(credentialRecordedNotWired, "store", ".credentialStore(...)",
+          cred.credentialStore().getClass(),
+          "Hand the store to your application's credential wiring; drop the call if nothing reads it."));
     }
     if (cred.passwordChangeService() != null) {
-      services.add(new RegisteredJCustosService(
-          PasswordChangeService.class, cred.passwordChangeService().getClass(),
-          "bootstrap-explicit", false));
+      warnings.add(recordedNotWired(credentialRecordedNotWired, "change", ".passwordChange(...)",
+          cred.passwordChangeService().getClass(),
+          "Expose the service through your application's wiring; drop the call if nothing reads it."));
     }
     if (cred.passwordResetService() != null) {
-      services.add(new RegisteredJCustosService(
-          PasswordResetService.class, cred.passwordResetService().getClass(),
-          "bootstrap-explicit", false));
+      warnings.add(recordedNotWired(credentialRecordedNotWired, "reset", ".passwordReset(...)",
+          cred.passwordResetService().getClass(),
+          "Expose the service through your application's wiring; drop the call if nothing reads it."));
     }
 
     // STRICT-ERROR validation: change/reset need a hashing service
@@ -1081,6 +1098,16 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    * Returns the loaded {@link PasswordHashingService} or {@code null}
    * when {@code security-crypto-bc} is not on the classpath.
    */
+  private static JCustosBootstrapWarning recordedNotWired(Severity severity, String entry,
+                                                        String call, Class<?> impl, String remedy) {
+    return new JCustosBootstrapWarning(
+        severity,
+        "dx/credential-" + entry + "-recorded-not-wired",
+        call + " recorded " + impl.getName() + " but NO shipped jCustos module consumes it from the "
+            + "bootstrap; the entry is inert unless your application wires it itself (JS-SEC-073).",
+        remedy);
+  }
+
   private static Object loadModernHashingService() {
     try {
       Class<?> bc = Class.forName(

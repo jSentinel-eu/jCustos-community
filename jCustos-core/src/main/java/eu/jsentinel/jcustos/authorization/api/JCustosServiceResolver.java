@@ -25,6 +25,7 @@ import eu.jsentinel.jcustos.authentication.PasswordHasher;
 import eu.jsentinel.jcustos.authentication.Pbkdf2PasswordHasher;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.propagation.OutboundTokenStrategy;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
@@ -390,6 +391,42 @@ public final class JCustosServiceResolver {
    */
   public static void setPasswordHashingService(PasswordHasher hasher) {
     DEFAULT.setPasswordHashingService(hasher);
+  }
+
+  // ── PasswordHashingService (credential pipeline) ───────────────
+
+  /**
+   * Returns the registered V00.71 {@link PasswordHashingService} or the
+   * default pipeline ({@code PasswordHashingServices.defaults()}) — see
+   * {@link JCustosContext#credentialHashingService()} (JS-SEC-073). Never throws.
+   *
+   * @return the pipeline, never {@code null}
+   * @since 00.84.00
+   */
+  public static PasswordHashingService credentialHashingService() {
+    return DEFAULT.credentialHashingService();
+  }
+
+  /**
+   * Returns the configured {@link PasswordHashingService}, or empty when only
+   * the default pipeline applies.
+   *
+   * @return the configured pipeline, or empty
+   * @since 00.84.00
+   */
+  public static Optional<PasswordHashingService> findCredentialHashingService() {
+    return DEFAULT.findCredentialHashingService();
+  }
+
+  /**
+   * Replaces the cached {@link PasswordHashingService}; the DX bootstrap wires
+   * {@code .credentials(...)} through this.
+   *
+   * @param service the pipeline, or {@code null} to clear
+   * @since 00.84.00
+   */
+  public static void setCredentialHashingService(PasswordHashingService service) {
+    DEFAULT.setCredentialHashingService(service);
   }
 
   // ── LogoutService ──────────────────────────────────────────────
