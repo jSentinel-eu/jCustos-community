@@ -62,6 +62,24 @@ class LoggingAuditSinkTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-079: the live session id never reaches the line; sessionRef is deterministic (CWE-532)")
+  void sessionIdIsReplacedByStableReference() {
+    RecordingSlf4jLogger logger = new RecordingSlf4jLogger();
+    LoggingAuditSink sink = new LoggingAuditSink(logger);
+    sink.accept(new SessionCreated(T0, "alice", "ABCDEF0123456789"));
+    sink.accept(new SessionInvalidated(T0, "alice", "ABCDEF0123456789", "RotationAfterLogin"));
+    String first = logger.messages.get(0);
+    String second = logger.messages.get(1);
+    assertFalse(first.contains("ABCDEF0123456789"), first);
+    assertFalse(second.contains("ABCDEF0123456789"), second);
+    String ref = LoggingAuditSink.sessionRef("ABCDEF0123456789");
+    assertEquals(16, ref.length());
+    assertTrue(first.contains("sessionRef=" + ref), first);
+    assertTrue(second.contains("sessionRef=" + ref), "two events with the same id share the reference: " + second);
+    assertFalse(LoggingAuditSink.sessionRef("other").equals(ref), "different ids give different references");
+  }
+
+  @Test
   @DisplayName("LoginSucceeded is logged with user/client/session fields")
   void logsLoginSucceeded() {
     RecordingSlf4jLogger logger = new RecordingSlf4jLogger();
@@ -72,7 +90,8 @@ class LoggingAuditSinkTest {
     assertTrue(line.contains("type=LoginSucceeded"), line);
     assertTrue(line.contains("user=alice"), line);
     assertTrue(line.contains("client=127.0.0.1"), line);
-    assertTrue(line.contains("session=S-1"), line);
+    assertFalse(line.contains("S-1"), "the live session id must not be logged: " + line);
+    assertTrue(line.contains("sessionRef=" + LoggingAuditSink.sessionRef("S-1")), line);
   }
 
   @Test
@@ -85,7 +104,8 @@ class LoggingAuditSinkTest {
     String line = logger.firstMessage();
     assertTrue(line.contains("type=LogoutPerformed"));
     assertTrue(line.contains("subject=alice"));
-    assertTrue(line.contains("session=tok-7"));
+    assertFalse(line.contains("tok-7"), "the live session id must not be logged: " + line);
+    assertTrue(line.contains("sessionRef=" + LoggingAuditSink.sessionRef("tok-7")));
     assertTrue(line.contains("scope=AllSessionsOfSubject"));
   }
 

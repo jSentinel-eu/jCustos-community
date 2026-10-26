@@ -20,6 +20,10 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Objects;
 
 /**
@@ -78,7 +82,7 @@ public final class LoggingAuditSink implements AuditSink {
       }
       case LogoutPerformed e -> {
         appendField(sb, "subject", e.subjectId());
-        appendField(sb, "session", e.sessionId());
+        appendSessionRef(sb, e.sessionId());
         appendField(sb, "scope", e.scope().name());
       }
       case AccessGranted e -> {
@@ -102,16 +106,16 @@ public final class LoggingAuditSink implements AuditSink {
       }
       case SessionCreated e -> {
         appendField(sb, "subject", e.subjectId());
-        appendField(sb, "session", e.sessionId());
+        appendSessionRef(sb, e.sessionId());
       }
       case SessionExpired e -> {
         appendField(sb, "subject", e.subjectId());
-        appendField(sb, "session", e.sessionId());
+        appendSessionRef(sb, e.sessionId());
         appendField(sb, "reason", e.reason());
       }
       case SessionInvalidated e -> {
         appendField(sb, "subject", e.subjectId());
-        appendField(sb, "session", e.sessionId());
+        appendSessionRef(sb, e.sessionId());
         appendField(sb, "reason", e.reason());
       }
       case RoleAssigned e -> {
@@ -155,7 +159,7 @@ public final class LoggingAuditSink implements AuditSink {
       }
       case SessionStale e -> {
         appendField(sb, "subject", e.subjectId());
-        appendField(sb, "session", e.sessionId());
+        appendSessionRef(sb, e.sessionId());
         appendField(sb, "route", e.route());
         appendField(sb, "snapshot", String.valueOf(e.snapshotVersion()));
         appendField(sb, "current", String.valueOf(e.currentVersion()));
@@ -236,7 +240,38 @@ public final class LoggingAuditSink implements AuditSink {
       StringBuilder sb, String username, String clientAddress, String sessionId) {
     appendField(sb, "user", username);
     appendField(sb, "client", clientAddress);
-    appendField(sb, "session", sessionId);
+    appendSessionRef(sb, sessionId);
+  }
+
+  /**
+   * JS-SEC-079 (CWE-532): the session id in these events is the live servlet
+   * session cookie value. Written as-is, anyone who reads the audit log — log
+   * shipping, SIEM, support — can take over a running session. The line
+   * therefore carries {@code sessionRef=}, the first 16 hex characters of the
+   * SHA-256 of the id: stable for correlation across events, useless for
+   * hijacking. Tokens and API keys already follow the same hash convention.
+   */
+  private static void appendSessionRef(StringBuilder sb, String sessionId) {
+    if (sessionId == null) return;
+    appendField(sb, "sessionRef", sessionRef(sessionId));
+  }
+
+  /**
+   * Correlation reference for a session id: 16 hex characters of its SHA-256.
+   *
+   * @param sessionId the raw session id; non-null
+   * @return the reference, never the id itself
+   * @since 00.84.00
+   */
+  public static String sessionRef(String sessionId) {
+    Objects.requireNonNull(sessionId, "sessionId");
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256")
+          .digest(sessionId.getBytes(StandardCharsets.UTF_8));
+      return HexFormat.of().formatHex(digest, 0, 8);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 unavailable", e);
+    }
   }
 
   private static void appendField(StringBuilder sb, String key, String value) {

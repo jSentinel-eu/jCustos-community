@@ -364,7 +364,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `CompositeAuditService` | core | RingBuffer + zusätzliche Sinks; query gegen den RingBuffer |
 | `DefaultCompositeAuditService` | core | No-arg, SPI-registrierbar; RingBuffer + LoggingAuditSink |
 | `RingBufferAuditSink` | core | Default-Cap 256 Events, älteste fliegen raus, thread-safe |
-| `LoggingAuditSink` | core | JUL-basierter Sink, kompaktes `AUDIT type=… field=value …`-Format |
+| `LoggingAuditSink` | core | JUL-basierter Sink, kompaktes `AUDIT type=… field=value …`-Format; seit **V00.84** `sessionRef=` (16 Hex-Zeichen SHA-256) statt der Live-Session-ID (JS-SEC-079, CWE-532) |
 
 ---
 

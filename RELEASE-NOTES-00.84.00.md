@@ -440,6 +440,23 @@ Verified: 200 000 distinct keys keep each store within its bound; 50 threads aga
 10 admit exactly 10; the registry is empty after every session is unregistered; with the atomic
 admission and the bound removed, the new tests fail.
 
+## Audit lines carry a session reference, not the live session id (ER12, JS-SEC-079, CWE-532)
+
+The Vaadin adapter fills `SessionContext.sessionId` with the value of the servlet session cookie,
+`TimeoutSessionPolicy` passes it into `SessionCreated`, and `LoggingAuditSink` wrote it as
+`session=…` into the INFO line — likewise for `LoginSucceeded`, `LogoutPerformed`,
+`SessionExpired`, `SessionInvalidated` and `SessionStale`. Anyone who reads the audit log — log
+shipping, SIEM, support — could take over a running session. Tokens and API keys already
+followed the hash convention.
+
+`LoggingAuditSink` now writes `sessionRef=`, the first 16 hex characters of the SHA-256 of the
+session id: stable for correlating events of one session, useless for hijacking. The change is
+confined to the sink; the audit events still carry the id for stores and consumers that need
+it, and `LoggingAuditSink.sessionRef(String)` is public so dashboards and tests can compute the
+same reference. Verified with a real recording SLF4J logger: a `SessionCreated` with session id
+`ABCDEF0123456789` produces a line without that substring but with a deterministic `sessionRef=`,
+and two events with the same id share the reference.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

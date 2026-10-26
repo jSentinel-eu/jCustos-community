@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.Instant;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -86,7 +87,8 @@ class LoggingAuditSinkAllVariantsTest {
     String line = log(new SessionCreated(T0, "alice", "sid-1"));
     assertTrue(line.contains("type=SessionCreated"));
     assertTrue(line.contains("subject=alice"));
-    assertTrue(line.contains("session=sid-1"));
+    assertTrue(line.contains("sessionRef=" + LoggingAuditSink.sessionRef("sid-1")));
+    assertFalse(line.contains("sid-1"), line);
   }
 
   @Test
@@ -111,7 +113,8 @@ class LoggingAuditSinkAllVariantsTest {
     String line = log(new SessionStale(T0, "alice", "sid-7", "/admin", 0L, 2L));
     assertTrue(line.contains("type=SessionStale"));
     assertTrue(line.contains("subject=alice"));
-    assertTrue(line.contains("session=sid-7"));
+    assertTrue(line.contains("sessionRef=" + LoggingAuditSink.sessionRef("sid-7")));
+    assertFalse(line.contains("sid-7"), line);
     assertTrue(line.contains("route=/admin"));
     assertTrue(line.contains("snapshot=0"));
     assertTrue(line.contains("current=2"));
