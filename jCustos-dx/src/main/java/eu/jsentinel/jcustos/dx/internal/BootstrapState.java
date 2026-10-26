@@ -118,6 +118,17 @@ public final class BootstrapState {
     }
   }
 
+  /** JS-SEC-085: {@code null} until {@code denyByDefault(boolean)} was called. */
+  private Boolean denyByDefault;
+
+  public Boolean denyByDefault() {
+    return denyByDefault;
+  }
+
+  public void denyByDefault(boolean enabled) {
+    this.denyByDefault = enabled;
+  }
+
   public boolean auditConfigured() {
     return auditConfigured;
   }

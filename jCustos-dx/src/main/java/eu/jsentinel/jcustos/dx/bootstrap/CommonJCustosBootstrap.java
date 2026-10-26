@@ -175,5 +175,21 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
 
   B mode(JCustosBootstrapMode mode);
 
+  /**
+   * Switches deny-by-default on or off for the whole application (JS-SEC-085,
+   * CWE-1188): with {@code true} an element without a security annotation is
+   * denied unless it carries {@code @PublicRoute}; with {@code false} it is
+   * served to everyone (allow-by-omission). {@code install()} publishes the
+   * value through {@code JCustosServiceResolver.setDenyByDefault}. When the
+   * flag is off at install time, STRICT reports
+   * {@code authorization/allow-by-omission} as an ERROR and refuses to boot,
+   * PRODUCTION as a WARNING.
+   *
+   * @param enabled {@code true} for deny-by-default
+   * @return this builder
+   * @since 00.84.00
+   */
+  B denyByDefault(boolean enabled);
+
   JCustosRuntime install();
 }

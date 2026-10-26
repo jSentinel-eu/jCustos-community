@@ -15,6 +15,7 @@ import eu.jsentinel.jcustos.dx.rest.handlers.ClassScanningRestHandlerDiscovery;
 import eu.jsentinel.jcustos.dx.rest.handlers.RestHandlerDiscovery;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
+import eu.jsentinel.jcustos.dx.runtime.Severity;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
 import eu.jsentinel.jcustos.test.FakeAuthenticationService;
 import eu.jsentinel.jcustos.test.FakeAuthorizationService;
@@ -49,6 +50,60 @@ class RestDenyByDefaultDiscoveryTest {
         .authentication(FakeAuthenticationService.forType(String.class))
         .authorization(new FakeAuthorizationService<String>())
         .subjectResolver((RestSubjectResolver) request -> Optional.empty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-085: STRICT without deny-by-default refuses to boot with authorization/allow-by-omission")
+  void strictWithoutDenyByDefault_refusesToBoot() {
+    JCustosBootstrapException ex = assertThrows(JCustosBootstrapException.class, () ->
+        bootstrapWithServices()
+            .audit(a -> a.logging())
+            .mode(JCustosBootstrapMode.STRICT)
+            .install());
+
+    assertTrue(ex.warnings().stream()
+            .anyMatch(w -> "authorization/allow-by-omission".equals(w.code())
+                && w.severity() == Severity.ERROR),
+        "STRICT must not boot green while every unannotated handler is public, got: " + ex.warnings());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-085: STRICT with .denyByDefault(true) and fully annotated handlers boots")
+  void strictWithDenyByDefaultBuilder_boots() {
+    JCustosRuntime runtime = bootstrapWithServices()
+        .denyByDefault(true)
+        .audit(a -> a.logging())
+        .discoverHandlers(new ClassScanningRestHandlerDiscovery(ProtectedHandlers.class))
+        .mode(JCustosBootstrapMode.STRICT)
+        .install();
+
+    assertTrue(JCustosServiceResolver.isDenyByDefault(), "the builder value must reach the resolver");
+    assertTrue(runtime.services().stream()
+            .anyMatch(s -> s.source().contains("bootstrap-deny-by-default=true")),
+        "the flag is listed among the registered services, got: " + runtime.services());
+    assertFalse(runtime.warnings().stream()
+        .anyMatch(w -> "authorization/allow-by-omission".equals(w.code())));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-085: PRODUCTION without deny-by-default records a WARNING and boots; DEVELOPMENT stays silent")
+  void productionWithoutDenyByDefault_warns() {
+    JCustosRuntime production = bootstrapWithServices()
+        .audit(a -> a.logging())
+        .mode(JCustosBootstrapMode.PRODUCTION)
+        .install();
+    assertTrue(production.warnings().stream()
+        .anyMatch(w -> "authorization/allow-by-omission".equals(w.code())
+            && w.severity() == Severity.WARNING));
+
+    JCustosServiceResolver.setAuthenticationService((AuthenticationService<?, ?>) null);
+    JCustosServiceResolver.setAuthorizationService((AuthorizationService<?>) null);
+    JCustosRuntime development = bootstrapWithServices()
+        .audit(a -> a.logging())
+        .mode(JCustosBootstrapMode.DEVELOPMENT)
+        .install();
+    assertFalse(development.warnings().stream()
+        .anyMatch(w -> "authorization/allow-by-omission".equals(w.code())));
   }
 
   @Test

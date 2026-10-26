@@ -575,6 +575,23 @@ ends on the signin view; logout through the new constructor calls `gateway.redir
 the `SessionContext.sessionId()` handed to the policy equals the gateway's session id, which for the
 default gateway is the wrapped session id.
 
+## `denyByDefault(boolean)` on every bootstrap; STRICT and PRODUCTION report allow-by-omission (ER18, JS-SEC-085, CWE-1188)
+
+No bootstrap builder offered a deny-by-default switch, although the resolver's Javadoc asked
+production applications to turn it on at bootstrap. With the flag off the adapters' startup
+cross-checks returned without a finding — in STRICT too — so a `.mode(STRICT)` application with
+handler discovery booted green while every unannotated handler was public.
+
+`CommonJCustosBootstrap` gained `denyByDefault(boolean)`; `install()` publishes the value through
+`JCustosServiceResolver.setDenyByDefault` before the adapter cross-checks run and lists it as
+`bootstrap-deny-by-default=…` among the registered services. When the flag is off at install time,
+the bootstrap reports `authorization/allow-by-omission` — an ERROR in STRICT (the install fails), a
+WARNING in PRODUCTION, nothing in the development modes. **STRICT consumers:** a STRICT bootstrap
+now has to call `.denyByDefault(true)` (and mark public entry points with `@PublicRoute`) to boot.
+Verified with the real REST adapter: STRICT without the switch throws with the finding, STRICT with
+`.denyByDefault(true)` and fully annotated handlers boots, PRODUCTION records the warning and boots,
+DEVELOPMENT stays silent.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

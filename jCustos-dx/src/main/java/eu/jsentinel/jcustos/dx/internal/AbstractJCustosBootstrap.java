@@ -207,6 +207,12 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
     return self();
   }
 
+  @Override
+  public B denyByDefault(boolean enabled) {
+    state.denyByDefault(enabled);
+    return self();
+  }
+
   /**
    * Default skeleton implementation: throws {@link UnsupportedOperationException}.
    * Adapter subclasses (Prompts 004-006) override this to perform the
@@ -237,6 +243,8 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
   protected final void applyCommonConfiguration(AdapterKind adapter,
       List<RegisteredJCustosService> services,
       List<JCustosBootstrapWarning> warnings) {
+    // JS-SEC-085: first, so the adapters' deny-by-default cross-checks see the flag
+    applyDenyByDefaultConfiguration(services, warnings);
     // direct-set services from CommonJCustosBootstrap
     // (logout / bruteForce / rateLimit / apiKeys / refreshTokens)
     applyDirectServiceConfiguration(services, warnings);
@@ -613,6 +621,39 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    * authn/authz wiring so the audit service is in place before any
    * other dependent setup.
    */
+  /**
+   * JS-SEC-085 (CWE-1188): publishes {@code .denyByDefault(...)} to the resolver and
+   * reports allow-by-omission. No builder offered the switch before, yet the resolver's
+   * Javadoc asked production applications to turn it on at bootstrap; with the flag off
+   * the adapters' cross-checks returned without a finding - a {@code .mode(STRICT)}
+   * application booted green although every unannotated handler was public.
+   */
+  protected final void applyDenyByDefaultConfiguration(List<RegisteredJCustosService> services,
+                                                       List<JCustosBootstrapWarning> warnings) {
+    Boolean configured = state.denyByDefault();
+    if (configured != null) {
+      JCustosServiceResolver.setDenyByDefault(configured);
+      services.add(new RegisteredJCustosService(
+          JCustosServiceResolver.class, Boolean.class,
+          "bootstrap-deny-by-default=" + configured, false));
+    }
+    if (JCustosServiceResolver.isDenyByDefault()) {
+      return;
+    }
+    Severity severity = switch (state.mode()) {
+      case STRICT -> Severity.ERROR;
+      case PRODUCTION -> Severity.WARNING;
+      default -> null;
+    };
+    if (severity != null) {
+      warnings.add(new JCustosBootstrapWarning(
+          severity,
+          "authorization/allow-by-omission",
+          "Deny-by-default is off: an element without a security annotation is served to everyone.",
+          "Call .denyByDefault(true) and mark public entry points with @PublicRoute."));
+    }
+  }
+
   protected final void applyAuditConfiguration(List<RegisteredJCustosService> services,
                                                List<JCustosBootstrapWarning> warnings) {
     if (!state.auditConfigured()) {
