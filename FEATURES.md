@@ -672,7 +672,7 @@ Alle Module grün.
 ## 17. Versions- & Plattform-Eckdaten
 
 - **Java 26** (Sealed Types, Records, Pattern Matching durchgängig)
-- **Vaadin 25.1.1** (vaadin-core, kein Hilla)
+- **Vaadin 25.3.3** (vaadin-core, kein Hilla)
 - **Jetty 12.1.8 EE11** als Dev-Server für die Vaadin-Demos
 - **Maven 4** (pinned via `./mvnw`; Minimum `4.0.0-rc-5`)
 - **Eclipse Store 4.1.0** (`org.eclipse.store:storage-embedded`) für

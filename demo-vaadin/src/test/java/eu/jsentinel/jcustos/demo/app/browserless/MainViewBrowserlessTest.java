@@ -325,7 +325,12 @@ class MainViewBrowserlessTest extends BrowserlessTest {
         .orElseThrow(() -> new AssertionError(
             "no button labelled 'Sign out' rendered; got: "
                 + $view(Button.class).all().stream().map(Button::getText).toList()));
-    test(signOut).click();
+    // Browserless 25.3 flushes server-initiated focus after a tester click and reaches
+    // into the UI's session for it. The sign-out handler invalidates the HTTP session,
+    // so there is no session left to flush against (a real browser never notices).
+    // Assert usability the browserless way, then fire the click server-side.
+    test(signOut).ensureComponentIsUsable();
+    signOut.click();
 
     assertFalse(SubjectStores.subjectStore().currentSubject(MyUser.class).isPresent(),
         "Sign-out must remove the current subject from the store");

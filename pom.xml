@@ -159,7 +159,7 @@
 
         <!--        Vaadin Flow Properties-->
         <failOnMissingWebXml>false</failOnMissingWebXml>
-        <vaadin.version>25.1.1</vaadin.version>
+        <vaadin.version>25.3.3</vaadin.version>
         <drivers.downloader.phase>pre-integration-test</drivers.downloader.phase>
         <jetty.version>12.1.8</jetty.version>
         <slf4j-api.version>2.0.17</slf4j-api.version>

@@ -78,29 +78,6 @@
       <artifactId>demo-rest-shared</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <!--
-      Vaadin 25.1.1 mixes Jackson 3 (runtime, tools.jackson.core) and
-      Jackson 2 annotations: vaadin-maven-plugin:prepare-frontend still
-      references com.fasterxml.jackson.annotation.JsonSerializeAs and
-      fails with a NoClassDefFoundError if jackson-annotations:2.x is
-      absent. Keep both coordinate families on the classpath until
-      Vaadin drops the Jackson 2 reference.
-    -->
-    <dependency>
-      <groupId>tools.jackson.core</groupId>
-      <artifactId>jackson-core</artifactId>
-      <version>3.1.4</version>
-    </dependency>
-    <dependency>
-      <groupId>tools.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-      <version>3.1.4</version>
-    </dependency>
-    <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-annotations</artifactId>
-      <version>2.21</version>
-    </dependency>
     <dependency>
       <groupId>jakarta.servlet</groupId>
       <artifactId>jakarta.servlet-api</artifactId>

@@ -74,7 +74,7 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
-      <version>2.21</version>
+      <version>2.22</version>
       <scope>test</scope>
     </dependency>
     <!-- Vaadin browserless testing (previously "UI Unit Testing").
