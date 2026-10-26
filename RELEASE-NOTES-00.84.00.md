@@ -83,3 +83,27 @@ the refusal is audited; a subject without the permission is refused with
 `session-management:requirement-not-met`; an administrator reaches the view and revokes
 exactly one session through the grid's Revoke button. The evaluator and the bootstrap
 finding have their own tests.
+
+## `sameTenant` compared a request attribute with itself (ER02, JS-SEC-069, CWE-863)
+
+`JCustosPolicies.sameTenant(name, subjectKey, resourceKey)` read both tenants from the
+same attribute map of the `AccessContext`, and the one-argument variant passed the key
+`tenantId` for both sides. Any request carrying *some* `tenantId` attribute was admitted;
+neither `ResourceRef.tenant()` nor the `ResourceResolver` was consulted, although the
+Javadoc promised exactly that. The existing test cemented the behaviour as the success
+case. An application relying on this policy for tenant isolation had none.
+
+The policy now compares two genuinely different sources:
+
+- the resource tenant is `ResourceRef.tenant()` when the context carries a `ResourceRef`,
+  otherwise the `resourceTenantKey` attribute (resolved resource attributes first, then
+  access attributes);
+- the subject tenant is the `subjectTenantKey` access attribute when the adapter or
+  application set one, otherwise the tenant of the current subject through the registered
+  `SubjectIdResolver.tenantFor(...)`;
+- the policy denies when either side is unknown, and the constructor rejects equal keys.
+
+`sameTenant(name)` uses `subjectTenantId` and `resourceTenantId`. Attribute values may be
+`TenantId` or `String`. This changes what the one-argument variant admits — from
+everything to only matching tenants — which is the point.
+

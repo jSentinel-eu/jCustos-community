@@ -10,11 +10,19 @@
  */
 package eu.jsentinel.jcustos.policy.api;
 
+import eu.jsentinel.jcustos.authentication.AuthenticationService;
+import eu.jsentinel.jcustos.authorization.api.InMemorySubjectStore;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.policy.spi.ResourceResolver;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -106,12 +114,19 @@ class JCustosPoliciesTest {
 
   // ── sameTenant ──────────────────────────────────────────────────
 
+  private static PolicyContext ctxWithResource(String subjectId, Map<String, Object> attributes,
+                                               ResourceRef resourceRef) {
+    PolicyContext base = ctxWithSubject(subjectId, Set.of(), Set.of(), attributes);
+    return new PolicyContext(base.accessContext(), base.policyName(), resourceRef);
+  }
+
   @Test
-  @DisplayName("sameTenant grants when both sides share the tenant attribute")
+  @DisplayName("sameTenant grants when the explicit subject tenant equals the ResourceRef tenant")
   void sameTenantMatching() {
     Policy p = JCustosPolicies.sameTenant("docs.same-tenant");
-    PolicyDecision d = p.evaluate(ctxWithSubject("alice", Set.of(), Set.of(),
-        Map.of("tenantId", "acme")));
+    PolicyDecision d = p.evaluate(ctxWithResource("alice",
+        Map.of(JCustosPolicies.SUBJECT_TENANT_KEY, "acme"),
+        new ResourceRef("document", "42", TenantId.of("acme"))));
     assertInstanceOf(PolicyDecision.Allowed.class, d);
   }
 
@@ -122,6 +137,76 @@ class JCustosPoliciesTest {
         "subjectTenantId", "resourceTenantId");
     PolicyDecision d = p.evaluate(ctxWithSubject("alice", Set.of(), Set.of(),
         Map.of("subjectTenantId", "acme", "resourceTenantId", "globex")));
+    assertInstanceOf(PolicyDecision.Denied.class, d);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-069: a single tenantId attribute no longer admits the request")
+  void sameTenantIsNoTautology() {
+    Policy p = JCustosPolicies.sameTenant("docs.same-tenant");
+    PolicyDecision d = p.evaluate(ctxWithSubject("alice", Set.of(), Set.of(),
+        Map.of("tenantId", "acme")));
+    assertInstanceOf(PolicyDecision.Denied.class, d,
+        "neither side is known — the old behaviour compared the attribute with itself");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-069: equal keys on both sides are rejected at construction")
+  void sameTenantEqualKeysRejected() {
+    assertThrows(IllegalArgumentException.class,
+        () -> JCustosPolicies.sameTenant("docs.same-tenant", "tenantId", "tenantId"));
+  }
+
+  @Test
+  @DisplayName("sameTenant: the ResourceRef tenant is authoritative over a resource attribute")
+  void sameTenantResourceRefWins() {
+    Policy p = JCustosPolicies.sameTenant("docs.same-tenant");
+    PolicyDecision d = p.evaluate(ctxWithResource("alice",
+        Map.of(JCustosPolicies.SUBJECT_TENANT_KEY, "acme",
+            JCustosPolicies.RESOURCE_TENANT_KEY, "acme"),
+        new ResourceRef("document", "42", TenantId.of("globex"))));
+    assertInstanceOf(PolicyDecision.Denied.class, d);
+  }
+
+  @AfterEach
+  void resetResolver() {
+    JCustosServiceResolver.resetAll();
+    SubjectStores.reset();
+  }
+
+  /** Binds {@code subject} as the current subject and lets the resolver answer {@code tenant} for it. */
+  private static void bindSubjectWithTenant(String subject, TenantId tenant) {
+    JCustosServiceResolver.setAuthenticationService(new AuthenticationService<String, String>() {
+      @Override public boolean checkCredentials(String credentials) { return false; }
+      @Override public String loadSubject(String credentials) { return credentials; }
+      @Override public Class<String> subjectType() { return String.class; }
+    });
+    JCustosServiceResolver.setSubjectIdResolver(new SubjectIdResolver<String>() {
+      @Override public SubjectId resolve(String s) { return new SubjectId(s); }
+      @Override public TenantId tenantFor(String s) { return tenant; }
+    });
+    InMemorySubjectStore store = new InMemorySubjectStore();
+    store.setCurrentSubject(subject, String.class);
+    SubjectStores.setSubjectStore(store);
+  }
+
+  @Test
+  @DisplayName("sameTenant resolves the subject tenant through SubjectIdResolver when no attribute is set")
+  void sameTenantResolverPathGrants() {
+    bindSubjectWithTenant("alice", TenantId.of("acme"));
+    Policy p = JCustosPolicies.sameTenant("docs.same-tenant");
+    assertInstanceOf(PolicyDecision.Allowed.class, p.evaluate(ctxWithResource("alice", Map.of(),
+        new ResourceRef("document", "42", TenantId.of("acme")))));
+    assertInstanceOf(PolicyDecision.Denied.class, p.evaluate(ctxWithResource("alice", Map.of(),
+        new ResourceRef("document", "43", TenantId.of("globex")))));
+  }
+
+  @Test
+  @DisplayName("sameTenant denies when the subject tenant is unknown and no resolver is registered")
+  void sameTenantUnknownSubjectDenies() {
+    Policy p = JCustosPolicies.sameTenant("docs.same-tenant");
+    PolicyDecision d = p.evaluate(ctxWithResource("alice", Map.of(),
+        new ResourceRef("document", "42", TenantId.of("acme"))));
     assertInstanceOf(PolicyDecision.Denied.class, d);
   }
 

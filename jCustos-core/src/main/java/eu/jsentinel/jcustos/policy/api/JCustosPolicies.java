@@ -10,12 +10,19 @@
  */
 package eu.jsentinel.jcustos.policy.api;
 
+import eu.jsentinel.jcustos.authentication.AuthenticationService;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+
 import java.time.Clock;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -106,20 +113,39 @@ public final class JCustosPolicies {
         .build();
   }
 
+  /** Default attribute key for the subject's tenant (see {@link #sameTenant(String)}). */
+  public static final String SUBJECT_TENANT_KEY = "subjectTenantId";
+  /** Default attribute key for the resource's tenant when no {@link ResourceRef} is present. */
+  public static final String RESOURCE_TENANT_KEY = "resourceTenantId";
+
   /**
-   * Tenant-isolation pattern: subject and resource must carry the
-   * same {@code tenantId} attribute. Both context attributes are
-   * looked up — the policy denies when either is missing.
+   * Tenant-isolation pattern: the subject's tenant and the resource's
+   * tenant must be equal; the policy denies when either side is unknown.
    *
-   * <p>For multi-tenant applications, register one instance per
-   * resource type so the {@code ResourceResolver} can hydrate the
-   * resource side.
+   * <p><strong>Where the two tenants come from (JS-SEC-069, CWE-863).</strong>
+   * Until 00.84.00 both sides were read from the same attribute map of the
+   * {@code AccessContext}, so a request only had to carry <em>some</em>
+   * value under the key — and the one-argument variant compared the key
+   * {@code tenantId} with itself, admitting everything. Now:
+   * <ul>
+   *   <li><em>Resource side:</em> {@link ResourceRef#tenant()} when the
+   *   context carries a {@link ResourceRef}; otherwise the
+   *   {@code resourceTenantKey} attribute, first among the resolved
+   *   {@link PolicyContext#resourceAttributes()}, then among the access
+   *   attributes.</li>
+   *   <li><em>Subject side:</em> the {@code subjectTenantKey} access
+   *   attribute when the adapter or application set one; otherwise the
+   *   tenant of the current subject through the registered
+   *   {@link SubjectIdResolver#tenantFor(Object)}.</li>
+   * </ul>
+   * Attribute values may be {@link TenantId} or {@code String}. The two
+   * keys must differ — equal keys would compare an attribute with itself.
    *
-   * @param policyName       non-blank policy name
-   * @param subjectTenantKey context attribute key on the subject side
-   *                         (usually {@code "tenantId"})
-   * @param resourceTenantKey context attribute key on the resource
-   *                         side
+   * @param policyName        non-blank policy name
+   * @param subjectTenantKey  access-attribute key for the subject's tenant
+   * @param resourceTenantKey attribute key for the resource's tenant when no
+   *                          {@link ResourceRef} is present
+   * @throws IllegalArgumentException when both keys are equal
    */
   public static Policy sameTenant(String policyName,
                                   String subjectTenantKey,
@@ -127,10 +153,16 @@ public final class JCustosPolicies {
     Objects.requireNonNull(policyName, "policyName");
     Objects.requireNonNull(subjectTenantKey, "subjectTenantKey");
     Objects.requireNonNull(resourceTenantKey, "resourceTenantKey");
+    if (subjectTenantKey.equals(resourceTenantKey)) {
+      // JS-SEC-069 (CWE-863): the same key on both sides is a tautology, never a check.
+      throw new IllegalArgumentException(
+          "sameTenant: subjectTenantKey and resourceTenantKey must differ — comparing the "
+              + "attribute '" + subjectTenantKey + "' with itself would admit every request");
+    }
     Predicate<PolicyContext> sameTenant = ctx -> {
-      Object subjectTenant = ctx.accessContext().attributes().get(subjectTenantKey);
-      Object resourceTenant = ctx.accessContext().attributes().get(resourceTenantKey);
-      return subjectTenant != null && subjectTenant.equals(resourceTenant);
+      Optional<TenantId> subjectTenant = subjectTenantOf(ctx, subjectTenantKey);
+      Optional<TenantId> resourceTenant = resourceTenantOf(ctx, resourceTenantKey);
+      return subjectTenant.isPresent() && subjectTenant.equals(resourceTenant);
     };
     return Policy.named(policyName)
         .allowIf(sameTenant)
@@ -140,10 +172,61 @@ public final class JCustosPolicies {
 
   /**
    * Convenience variant of {@link #sameTenant(String, String, String)}
-   * using the conventional key {@code "tenantId"} on both sides.
+   * with the keys {@link #SUBJECT_TENANT_KEY} and
+   * {@link #RESOURCE_TENANT_KEY}: the resource tenant comes from the
+   * {@link ResourceRef}, the subject tenant from the registered
+   * {@link SubjectIdResolver} unless an explicit attribute overrides it.
    */
   public static Policy sameTenant(String policyName) {
-    return sameTenant(policyName, "tenantId", "tenantId");
+    return sameTenant(policyName, SUBJECT_TENANT_KEY, RESOURCE_TENANT_KEY);
+  }
+
+  static Optional<TenantId> subjectTenantOf(PolicyContext ctx, String subjectTenantKey) {
+    Optional<TenantId> explicit = tenantAttribute(ctx.accessContext().attributes().get(subjectTenantKey));
+    return explicit.isPresent() ? explicit : currentSubjectTenant();
+  }
+
+  static Optional<TenantId> resourceTenantOf(PolicyContext ctx, String resourceTenantKey) {
+    if (ctx.resourceRef().isPresent()) {
+      return Optional.of(ctx.resourceRef().get().tenant());
+    }
+    Optional<TenantId> resolved = tenantAttribute(ctx.resourceAttributes().get(resourceTenantKey));
+    return resolved.isPresent()
+        ? resolved
+        : tenantAttribute(ctx.accessContext().attributes().get(resourceTenantKey));
+  }
+
+  private static Optional<TenantId> tenantAttribute(Object value) {
+    if (value instanceof TenantId tenant) {
+      return Optional.of(tenant);
+    }
+    if (value instanceof String s && !s.isBlank()) {
+      return Optional.of(TenantId.of(s));
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * Tenant of the subject currently bound in the {@code SubjectStore}, via the
+   * registered {@link SubjectIdResolver}; empty when any link is missing, so the
+   * policy denies rather than guesses.
+   */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static Optional<TenantId> currentSubjectTenant() {
+    try {
+      Optional<AuthenticationService<Object, Object>> authn =
+          JCustosServiceResolver.findAuthenticationService();
+      Optional<SubjectIdResolver<Object>> resolver = JCustosServiceResolver.findSubjectIdResolver();
+      if (authn.isEmpty() || resolver.isEmpty()) {
+        return Optional.empty();
+      }
+      Class subjectType = authn.get().subjectType();
+      return SubjectStores.findSubjectStore()
+          .flatMap(store -> store.currentSubject(subjectType))
+          .map(subject -> resolver.get().tenantFor(subject));
+    } catch (RuntimeException unresolvable) {
+      return Optional.empty();
+    }
   }
 
   /**
