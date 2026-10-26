@@ -109,6 +109,16 @@ public final class SecuredVisibility {
       return new Requirement(Set.of(), Set.of(permission));
     }
 
+    /**
+     * The empty requirement: no role and no permission constraint.
+     *
+     * @return a requirement that {@link #isEmpty()} reports as empty
+     * @since 00.84.00
+     */
+    public static Requirement none() {
+      return new Requirement(Set.of(), Set.of());
+    }
+
     /** @return true when the requirement carries no constraints */
     public boolean isEmpty() {
       return requiredRoles.isEmpty() && requiredPermissions.isEmpty();

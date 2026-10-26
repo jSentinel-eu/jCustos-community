@@ -16,8 +16,13 @@
  */
 package eu.jsentinel.jcustos.components;
 
+import eu.jsentinel.jcustos.audit.AccessDenied;
+import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.components.SecuredVisibility.Requirement;
 import eu.jsentinel.jcustos.session.SessionRecord;
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.session.SessionStatus;
 import eu.jsentinel.jcustos.session.SessionStore;
 import com.vaadin.flow.component.Composite;
@@ -28,7 +33,10 @@ import com.vaadin.flow.component.html.H1;
 import com.vaadin.flow.component.html.Paragraph;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 import static java.util.Objects.requireNonNull;
@@ -61,17 +69,36 @@ import static java.util.Objects.requireNonNull;
  * {@link #refresh()} call. Apps that want auto-refresh can wire a
  * polling timer via {@code UI.setPollInterval(...)} and call
  * {@code refresh()} from a {@code PollEvent} listener.
+ *
+ * <p><strong>Who may revoke (JS-SEC-068, CWE-306).</strong> A hidden
+ * or disabled button is not a security boundary: the Revoke handler
+ * runs on the server for whoever reached the view. The three-argument
+ * constructor therefore takes a {@link Requirement}; when it is
+ * non-empty the handler re-checks the current subject against it
+ * before touching the store and audits a refused attempt as
+ * {@code AccessDenied}. The two-argument constructor keeps the
+ * requirement empty — use it only from a route that carries its own
+ * security annotation, as in the example above.
  */
 @ExperimentalJCustosApi
-public class SessionManagementView extends Composite<VerticalLayout> {
+public class SessionManagementView extends Composite<VerticalLayout> implements HasLogger {
 
   private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ISO_INSTANT;
 
+  /** Resource name the revoke guard audits under. */
+  static final String AUDIT_ROUTE = "session-management";
+  /** Audit reason when the revoke guard refuses. */
+  static final String REASON_REQUIREMENT_NOT_MET = "session-management:requirement-not-met";
+
   private final SessionStore sessionStore;
   private final Consumer<SessionRecord> revoke;
+  private final Requirement requirement;
   private final Grid<SessionRecord> grid;
 
   /**
+   * Creates a view without a view-level revoke guard. Protect the
+   * route with a security annotation.
+   *
    * @param sessionStore source of session records; non-null
    * @param revoke       callback invoked when an admin clicks
    *                     Revoke on a row; non-null. Implementations
@@ -81,8 +108,27 @@ public class SessionManagementView extends Composite<VerticalLayout> {
    */
   public SessionManagementView(SessionStore sessionStore,
                                Consumer<SessionRecord> revoke) {
+    this(sessionStore, revoke, Requirement.none());
+  }
+
+  /**
+   * Creates a view whose Revoke handler re-checks {@code requirement}
+   * against the current subject before it revokes (JS-SEC-068).
+   *
+   * @param sessionStore source of session records; non-null
+   * @param revoke       callback invoked when an admitted admin clicks
+   *                     Revoke on a row; non-null
+   * @param requirement  roles and permissions a subject must hold to
+   *                     revoke; non-null, {@link Requirement#none()}
+   *                     disables the guard
+   * @since 00.84.00
+   */
+  public SessionManagementView(SessionStore sessionStore,
+                               Consumer<SessionRecord> revoke,
+                               Requirement requirement) {
     this.sessionStore = requireNonNull(sessionStore, "sessionStore must not be null");
     this.revoke = requireNonNull(revoke, "revoke must not be null");
+    this.requirement = requireNonNull(requirement, "requirement must not be null");
     this.grid = buildGrid();
 
     VerticalLayout root = getContent();
@@ -112,7 +158,7 @@ public class SessionManagementView extends Composite<VerticalLayout> {
         .setHeader("Version").setWidth("6em").setFlexGrow(0);
     g.addComponentColumn(record -> {
       Button revokeBtn = new Button("Revoke", e -> {
-        revoke.accept(record);
+        revokeIfAllowed(record);
         refresh();
       });
       revokeBtn.addThemeVariants(ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_SMALL);
@@ -123,8 +169,50 @@ public class SessionManagementView extends Composite<VerticalLayout> {
         revokeBtn.setEnabled(false);
       }
       return revokeBtn;
-    }).setHeader("Action").setWidth("9em").setFlexGrow(0);
+    }).setKey("action").setHeader("Action").setWidth("9em").setFlexGrow(0);
     return g;
+  }
+
+  /**
+   * Revokes {@code record} if the current subject satisfies the
+   * requirement this view was constructed with. An empty requirement
+   * admits every caller — the route's own security annotation is then
+   * the boundary. A refused attempt is audited as {@code AccessDenied}
+   * and leaves the store untouched (JS-SEC-068, CWE-306).
+   *
+   * @param record the session to revoke
+   * @return {@code true} when the revoke callback ran
+   */
+  final boolean revokeIfAllowed(SessionRecord record) {
+    requireNonNull(record, "record must not be null");
+    if (!requirement.isEmpty()) {
+      Optional<SecuredVisibility.JCustosView> view = SecuredVisibility.currentJCustosView();
+      boolean allowed = view
+          .map(v -> SecuredVisibility.isAllowed(requirement, v.roles(), v.permissions()))
+          .orElse(false);
+      if (!allowed) {
+        auditRefusedRevoke();
+        return false;
+      }
+    }
+    revoke.accept(record);
+    return true;
+  }
+
+  private void auditRefusedRevoke() {
+    try {
+      JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
+      sink.publish(new AccessDenied(
+          Instant.now(Clock.systemUTC()), null, AUDIT_ROUTE, REASON_REQUIREMENT_NOT_MET));
+    } catch (RuntimeException auditFailure) {
+      logger().warn("session-management: AccessDenied audit for a refused revoke failed: {}",
+          auditFailure.toString());
+    }
+  }
+
+  /** @return the requirement the Revoke guard enforces; empty when none */
+  public final Requirement requirement() {
+    return requirement;
   }
 
   /**

@@ -119,6 +119,14 @@ three V00.72-to-V00.73 promoted codes
 `security-version-without-subject-id-resolver`) — clean those up before
 flipping the mode.
 
+Since 00.84.00 the session-management route also needs an access
+requirement: call `.sessionManagementView(SecuredVisibility.Requirement
+.permission(new PermissionName("admin:sessions")))` (or `.role(...)`).
+The parameterless `.sessionManagementView()` is deprecated; it leaves the
+route closed to everyone and reports
+`session-management-view-without-requirement` (an error in PRODUCTION and
+STRICT, JS-SEC-068).
+
 ## 6. Programmatic health (V00.74.10)
 
 For `/health` endpoints, monitoring dashboards or boot banners use the

@@ -46,10 +46,11 @@ class DenyByDefaultExemptionTest {
   }
 
   @Test
-  @DisplayName("The framework's SessionManagementView is exempt")
-  void sessionManagementViewExempt() {
-    assertTrue(AuthorizationListener.isDenyByDefaultExempt(SessionManagementView.class),
-        "the framework's own session-management view carries no consumer annotation");
+  @DisplayName("The framework's SessionManagementView is no longer exempt (JS-SEC-068)")
+  void sessionManagementViewNotExempt() {
+    assertFalse(AuthorizationListener.isDenyByDefaultExempt(SessionManagementView.class),
+        "JS-SEC-068 (CWE-306): the shipped route carries @ProtectedBy and consumer subclasses "
+            + "carry their own annotation, so nothing justifies an exemption any more");
   }
 
   @Test

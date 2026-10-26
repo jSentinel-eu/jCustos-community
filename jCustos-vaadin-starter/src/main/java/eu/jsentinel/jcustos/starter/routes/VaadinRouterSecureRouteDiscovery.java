@@ -12,7 +12,6 @@ package eu.jsentinel.jcustos.starter.routes;
 
 import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.impl.JCustosAnnotationScanner;
-import eu.jsentinel.jcustos.components.SessionManagementView;
 import eu.jsentinel.jcustos.dx.vaadin.routes.SecureRouteDiscovery;
 import com.vaadin.flow.router.RouteConfiguration;
 import com.vaadin.flow.router.RouteData;
@@ -101,13 +100,16 @@ public final class VaadinRouterSecureRouteDiscovery implements SecureRouteDiscov
 
   /**
    * RF (exit-review, RF02): the deny-by-default diagnostic is about the <em>consumer's</em>
-   * routes. jCustos ships its own {@code SessionManagementRoute} (a {@link SessionManagementView})
-   * that carries no consumer annotation and that the consumer cannot annotate — flagging it would
-   * break a STRICT boot on a class the consumer does not own. It is therefore excluded here by
-   * type, symmetrically with the runtime exemption in {@code AuthorizationListener}.
+   * routes. Until 00.84.00 the framework's own {@code SessionManagementRoute} was excluded here
+   * by type because it carried no annotation; it now carries {@code @ProtectedBy} and scans as
+   * protected, so no route needs a type-based exclusion any more (JS-SEC-068, CWE-306).
    */
   private static boolean isConsumerRoute(Class<?> target) {
-    return !SessionManagementView.class.isAssignableFrom(target);
+    // JS-SEC-068 (CWE-306): the framework's SessionManagementRoute now carries
+    // @ProtectedBy, so it scans as protected like any consumer route and needs no
+    // type-based exclusion. The method stays as the single place such an
+    // exclusion would live.
+    return target != null;
   }
 
   /**

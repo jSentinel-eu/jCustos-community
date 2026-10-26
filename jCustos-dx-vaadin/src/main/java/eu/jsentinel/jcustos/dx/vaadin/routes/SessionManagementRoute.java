@@ -13,6 +13,8 @@ package eu.jsentinel.jcustos.dx.vaadin.routes;
 import eu.jsentinel.jcustos.components.SessionManagementView;
 import eu.jsentinel.jcustos.session.SessionStore;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;
+import eu.jsentinel.jcustos.components.SecuredVisibility.Requirement;
 
 /**
  * Adapter-owned {@code @Route} for {@link SessionManagementView}.
@@ -26,15 +28,23 @@ import com.vaadin.flow.router.Route;
  * path can subclass and override {@code @Route(...)}.
  *
  * <p><strong>Activation prerequisite.</strong> The route is only
- * useful when {@code VaadinJCustosBootstrap.sessionManagementView()}
+ * useful when {@code VaadinJCustosBootstrap.sessionManagementView(requirement)}
  * was called and {@code .sessions(s -> s.storeBacked(...))}
  * configured a {@link SessionStore}. Without the store, the bootstrap
  * emits {@code session-management-view-without-session-store}
  * (STRICT throws, PRODUCTION warns).
  *
+ * <p><strong>Access (JS-SEC-068, CWE-306).</strong> The route is
+ * protected by {@link SessionManagementAccess}: a subject must hold
+ * the roles and permissions published at bootstrap, otherwise
+ * navigation is denied and audited like any other denial. Without a
+ * published requirement the route denies everyone — the bootstrap
+ * reports {@code session-management-view-without-requirement}.
+ *
  * @since 00.73.00
  */
 @Route(SessionManagementRoute.ROUTE_NAME)
+@ProtectedBy(SessionManagementAccess.class)
 public class SessionManagementRoute extends SessionManagementView {
 
   /** Default URL path; overridable by subclassing. */
@@ -57,6 +67,9 @@ public class SessionManagementRoute extends SessionManagementView {
                 + "    .sessionManagementView()\n"
                 + "    .install();\n"
                 + "before navigating to /" + ROUTE_NAME + ".")),
-        SessionManagementContext.revoke());
+        SessionManagementContext.revoke(),
+        // JS-SEC-068 (CWE-306): the same requirement guards navigation
+        // (via @ProtectedBy) and every Revoke click on the server.
+        SessionManagementContext.requirement().orElseGet(Requirement::none));
   }
 }

@@ -30,7 +30,6 @@ import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;
-import eu.jsentinel.jcustos.components.SessionManagementView;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
@@ -170,23 +169,23 @@ public class AuthorizationListener
 
   /**
    * RF (exit-review): deny-by-default must not deny the navigation targets the framework
-   * itself reroutes to or ships un-annotated.
+   * itself reroutes to.
    * <ul>
    *   <li><strong>Error views</strong> ({@link HasErrorParameter}) are the reroute target
    *   of a denial. Denying them cascades into a second denial and a broken/blank page
    *   instead of the intended access-denied view, and Vaadin's built-in
    *   {@code RouteNotFoundError} / {@code InternalServerError} cannot be annotated by the
    *   integrator at all — so the documented "mark it @PublicRoute" remedy is impossible.</li>
-   *   <li><strong>Framework-owned routes</strong> (e.g. {@code SessionManagementRoute}) carry
-   *   no consumer annotation and cannot be annotated by the app either; the consumer activates
-   *   them by explicit opt-in ({@code .sessionManagementView()}), so deny-by-default leaves
-   *   them on the same allow-by-omission footing they already have in every other mode rather
-   *   than making them permanently unreachable.</li>
    * </ul>
+   * The framework's own {@code SessionManagementRoute} used to be exempt as well; since
+   * 00.84.00 it carries {@code @ProtectedBy} and is evaluated like any consumer route
+   * (JS-SEC-068, CWE-306).
    */
   static boolean isDenyByDefaultExempt(Class<?> navigationTarget) {
-    return HasErrorParameter.class.isAssignableFrom(navigationTarget)
-        || SessionManagementView.class.isAssignableFrom(navigationTarget);
+    // JS-SEC-068 (CWE-306): SessionManagementView subclasses are no longer exempt.
+    // The framework's own route now carries @ProtectedBy and evaluates the requirement
+    // configured at bootstrap; consumer subclasses carry their own annotation.
+    return HasErrorParameter.class.isAssignableFrom(navigationTarget);
   }
 
   /**

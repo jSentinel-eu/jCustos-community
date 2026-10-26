@@ -262,6 +262,7 @@ class VaadinJCustosBootstrapTest {
   }
 
   @Test
+  @SuppressWarnings("deprecation")
   void sessionManagementView_withStore_publishesContextAndAddsRuntimeEntry() {
     eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.reset();
     eu.jsentinel.jcustos.session.SessionStore store =
@@ -444,4 +445,83 @@ class VaadinJCustosBootstrapTest {
 
   /** Test-only stand-in for a real Vaadin error view; class identity is all that matters here. */
   private static final class MyErrorView { }
+
+  // ── JS-SEC-068 (CWE-306): the session-management route needs an access requirement ──
+
+  @Test
+  void sessionManagementView_withRequirement_publishesRequirementWithoutWarning() {
+    eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.reset();
+    eu.jsentinel.jcustos.session.SessionStore store =
+        new eu.jsentinel.jcustos.session.InMemorySessionStore();
+    FakeAuthenticationService<String, String> authn = FakeAuthenticationService.forType(String.class);
+    FakeAuthorizationService<String> authz = new FakeAuthorizationService<>();
+    var requirement = eu.jsentinel.jcustos.components.SecuredVisibility.Requirement.permission(
+        new eu.jsentinel.jcustos.authorization.api.permissions.PermissionName("admin:sessions"));
+
+    JCustosRuntime runtime = VaadinSecurity.bootstrap()
+        .authentication(authn)
+        .authorization(authz)
+        .sessions(s -> s.storeBacked(store))
+        .sessionManagementView(requirement)
+        .install();
+
+    assertEquals(java.util.Optional.of(requirement),
+        eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.requirement());
+    assertTrue(runtime.warnings().stream()
+        .noneMatch(w -> "session-management-view-without-requirement".equals(w.code())));
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  void sessionManagementView_withoutRequirement_strictThrows() {
+    eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.reset();
+    eu.jsentinel.jcustos.session.SessionStore store =
+        new eu.jsentinel.jcustos.session.InMemorySessionStore();
+    FakeAuthenticationService<String, String> authn = FakeAuthenticationService.forType(String.class);
+    FakeAuthorizationService<String> authz = new FakeAuthorizationService<>();
+
+    JCustosBootstrapException ex = assertThrows(JCustosBootstrapException.class, () ->
+        VaadinSecurity.bootstrap()
+            .mode(JCustosBootstrapMode.STRICT)
+            .authentication(authn)
+            .authorization(authz)
+            .sessions(s -> s.storeBacked(store))
+            .sessionManagementView()
+            .install());
+
+    assertTrue(ex.warnings().stream().anyMatch(w ->
+        w.severity() == Severity.ERROR
+            && "session-management-view-without-requirement".equals(w.code())));
+    assertTrue(eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.requirement().isEmpty());
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  void sessionManagementView_withoutRequirement_defaultModeWarnsAndKeepsRouteClosed() {
+    eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.reset();
+    eu.jsentinel.jcustos.session.SessionStore store =
+        new eu.jsentinel.jcustos.session.InMemorySessionStore();
+    FakeAuthenticationService<String, String> authn = FakeAuthenticationService.forType(String.class);
+    FakeAuthorizationService<String> authz = new FakeAuthorizationService<>();
+
+    JCustosRuntime runtime = VaadinSecurity.bootstrap()
+        .authentication(authn)
+        .authorization(authz)
+        .sessions(s -> s.storeBacked(store))
+        .sessionManagementView()
+        .install();
+
+    assertTrue(runtime.warnings().stream().anyMatch(w ->
+        w.severity() == Severity.WARNING
+            && "session-management-view-without-requirement".equals(w.code())));
+    assertTrue(eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext.requirement().isEmpty(),
+        "no requirement published → SessionManagementAccess denies everyone");
+  }
+
+  @Test
+  void sessionManagementView_emptyRequirement_rejected() {
+    assertThrows(IllegalArgumentException.class, () ->
+        VaadinSecurity.bootstrap().sessionManagementView(
+            eu.jsentinel.jcustos.components.SecuredVisibility.Requirement.none()));
+  }
 }

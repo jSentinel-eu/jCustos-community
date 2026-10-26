@@ -16,6 +16,7 @@ import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.vaadin.VaadinSessionSubjectStore;
+import eu.jsentinel.jcustos.components.SecuredVisibility.Requirement;
 import eu.jsentinel.jcustos.dx.bootstrap.JCustosBootstrapException;
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
 import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
@@ -48,6 +49,7 @@ final class VaadinJCustosBootstrapImpl
   private String stepUpRoute;
   private boolean securedComponents;
   private boolean sessionManagementView;
+  private Requirement sessionManagementRequirement;
   private boolean installed;
 
   private boolean discoverSecureRoutesEnabled;
@@ -82,8 +84,22 @@ final class VaadinJCustosBootstrapImpl
   }
 
   @Override
+  @SuppressWarnings("deprecation")
   public VaadinJCustosBootstrap sessionManagementView() {
     this.sessionManagementView = true;
+    return this;
+  }
+
+  @Override
+  public VaadinJCustosBootstrap sessionManagementView(Requirement requirement) {
+    Objects.requireNonNull(requirement, "requirement");
+    if (requirement.isEmpty()) {
+      throw new IllegalArgumentException(
+          "sessionManagementView(requirement) needs at least one role or permission; "
+              + "an empty requirement would leave the route open to every visitor (JS-SEC-068)");
+    }
+    this.sessionManagementView = true;
+    this.sessionManagementRequirement = requirement;
     return this;
   }
 
@@ -207,7 +223,23 @@ final class VaadinJCustosBootstrapImpl
             ".sessionManagementView() was set but no SessionStore is configured.",
             "Call .sessions(s -> s.storeBacked(yourSessionStore)) before .sessionManagementView()."));
       } else {
-        SessionManagementContext.publish(sessionStore, null);
+        // JS-SEC-068 (CWE-306): the route denies everyone until a requirement is
+        // published. Opting in without one is a configuration error in PRODUCTION
+        // and STRICT and a warning in DEVELOPMENT — never a silently open route.
+        if (sessionManagementRequirement == null) {
+          Severity severity = switch (state.mode()) {
+            case STRICT, PRODUCTION -> Severity.ERROR;
+            default -> Severity.WARNING;
+          };
+          warnings.add(new JCustosBootstrapWarning(
+              severity,
+              "session-management-view-without-requirement",
+              ".sessionManagementView() was set without an access requirement; "
+                  + "the route denies every subject.",
+              "Call .sessionManagementView(SecuredVisibility.Requirement.permission(...)) "
+                  + "(or .role(...)) so administrators can reach it."));
+        }
+        SessionManagementContext.publish(sessionStore, null, sessionManagementRequirement);
         services.add(new RegisteredJCustosService(
             SessionManagementRoute.class, SessionManagementRoute.class,
             "bootstrap-activated", false));

@@ -16,19 +16,29 @@
  */
 package eu.jsentinel.jcustos.components;
 
+import eu.jsentinel.jcustos.audit.AccessDenied;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.test.FakeAuthenticationService;
+import eu.jsentinel.jcustos.test.FakeAuthorizationService;
+import eu.jsentinel.jcustos.test.InMemorySubjectStore;
+import eu.jsentinel.jcustos.test.RecordingAuditSink;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.session.InMemorySessionStore;
 import eu.jsentinel.jcustos.session.JCustosVersion;
 import eu.jsentinel.jcustos.session.SessionId;
 import eu.jsentinel.jcustos.session.SessionRecord;
 import eu.jsentinel.jcustos.session.SessionStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -144,5 +154,90 @@ class SessionManagementViewTest {
     SessionManagementView view = new SessionManagementView(new InMemorySessionStore(), r -> {});
     assertEquals(8, view.grid().getColumns().size());
     assertFalse(view.grid().getColumns().isEmpty());
+  }
+
+  // ── Revoke guard (JS-SEC-068, CWE-306) ──────────────────────────
+
+  private static final PermissionName ADMIN_SESSIONS = new PermissionName("admin:sessions");
+
+  @AfterEach
+  void resetSecurityState() {
+    JCustosServiceResolver.resetAll();
+    SubjectStores.reset();
+  }
+
+  private static void bindSubject(String subject, Set<PermissionName> permissions) {
+    JCustosServiceResolver.setAuthenticationService(FakeAuthenticationService.forType(String.class));
+    FakeAuthorizationService<String> authz = new FakeAuthorizationService<>();
+    authz.putPermissions(subject, permissions);
+    JCustosServiceResolver.setAuthorizationService(authz);
+    InMemorySubjectStore subjectStore = new InMemorySubjectStore();
+    subjectStore.setCurrentSubject(subject, String.class);
+    SubjectStores.setSubjectStore(subjectStore);
+  }
+
+  @Test
+  @DisplayName("guarded revoke: no resolvable subject → refused, store untouched, AccessDenied audited")
+  void guardedRevokeRefusedWithoutSubject() {
+    InMemorySessionStore store = new InMemorySessionStore();
+    store.save(recordFor("s1", ALICE, SessionStatus.ACTIVE));
+    RecordingAuditSink audit = new RecordingAuditSink();
+    JCustosServiceResolver.setJCustosAuditService(audit);
+    List<SessionRecord> revoked = new ArrayList<>();
+    SessionManagementView view = new SessionManagementView(store, revoked::add,
+        SecuredVisibility.Requirement.permission(ADMIN_SESSIONS));
+
+    assertFalse(view.revokeIfAllowed(store.findAll().get(0)),
+        "without a resolvable subject the guard must refuse");
+    assertTrue(revoked.isEmpty(), "the revoke callback must not run");
+    assertEquals(1, store.findAll().size(), "the store must stay untouched");
+    AccessDenied denied = audit.single(AccessDenied.class);
+    assertEquals(SessionManagementView.AUDIT_ROUTE, denied.route());
+    assertEquals(SessionManagementView.REASON_REQUIREMENT_NOT_MET, denied.reason());
+  }
+
+  @Test
+  @DisplayName("guarded revoke: bound subject without the permission → refused")
+  void guardedRevokeRefusedForSubjectWithoutPermission() {
+    bindSubject("bob", Set.of());
+    JCustosServiceResolver.setJCustosAuditService(new RecordingAuditSink());
+    InMemorySessionStore store = new InMemorySessionStore();
+    store.save(recordFor("s1", ALICE, SessionStatus.ACTIVE));
+    List<SessionRecord> revoked = new ArrayList<>();
+    SessionManagementView view = new SessionManagementView(store, revoked::add,
+        SecuredVisibility.Requirement.permission(ADMIN_SESSIONS));
+
+    assertFalse(view.revokeIfAllowed(store.findAll().get(0)));
+    assertTrue(revoked.isEmpty());
+  }
+
+  @Test
+  @DisplayName("guarded revoke: admitted subject → the revoke callback runs")
+  void guardedRevokeAllowedForAdmittedSubject() {
+    bindSubject("alice", Set.of(ADMIN_SESSIONS));
+    InMemorySessionStore store = new InMemorySessionStore();
+    SessionRecord record = recordFor("s1", BOB, SessionStatus.ACTIVE);
+    store.save(record);
+    List<SessionRecord> revoked = new ArrayList<>();
+    SessionManagementView view = new SessionManagementView(store, revoked::add,
+        SecuredVisibility.Requirement.permission(ADMIN_SESSIONS));
+
+    assertTrue(view.revokeIfAllowed(record));
+    assertEquals(List.of(record), revoked);
+    assertEquals(SecuredVisibility.Requirement.permission(ADMIN_SESSIONS), view.requirement());
+  }
+
+  @Test
+  @DisplayName("two-argument constructor: empty requirement, revoke runs without any subject")
+  void unguardedRevokeRunsWithoutSubject() {
+    InMemorySessionStore store = new InMemorySessionStore();
+    SessionRecord record = recordFor("s1", ALICE, SessionStatus.ACTIVE);
+    store.save(record);
+    List<SessionRecord> revoked = new ArrayList<>();
+    SessionManagementView view = new SessionManagementView(store, revoked::add);
+
+    assertTrue(view.requirement().isEmpty());
+    assertTrue(view.revokeIfAllowed(record));
+    assertEquals(List.of(record), revoked);
   }
 }

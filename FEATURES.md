@@ -409,7 +409,8 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `SecuredButton` (Default DISABLE) | Vaadin-Button-Subklasse. Checkt auf Konstruktor und onAttach; `refresh()` für manuelle Re-Checks. |
 | `SecuredRouterLink` (Default HIDE) | Vaadin-RouterLink-Subklasse. Router-explicit Konstruktor für headless tests. |
 | `SecuredMenuItem.bind(MenuItem, Requirement, …)` | Binding-Helper, da MenuItem vom Parent-MenuBar erzeugt wird (kein Subclass-Pattern möglich). |
-| `SessionManagementView` | Reusable Composite. Grid über `SessionStore.findAll()` (Tenant/Subject/SessionId/Status/Created/LastActivity/Version/Action). Per-Row Revoke via `Consumer<SessionRecord>`. Apps subclassen mit `@Route` + `@RequiresPermission`. |
+| `SessionManagementView` | Reusable Composite. Grid über `SessionStore.findAll()` (Tenant/Subject/SessionId/Status/Created/LastActivity/Version/Action). Per-Row Revoke via `Consumer<SessionRecord>`. Apps subclassen mit `@Route` + `@RequiresPermission`. **V00.84 (JS-SEC-068, CWE-306):** Drei-Argument-Konstruktor mit `Requirement`; der Revoke-Handler prüft das aktuelle Subjekt serverseitig gegen die Anforderung, auditiert eine Ablehnung als `AccessDenied` und lässt den Store unberührt. |
+| `SessionManagementRoute` + `SessionManagementAccess` (`jCustos-dx-vaadin`) | Vom Bootstrap aktivierte Route `/session-management`. **V00.84 (JS-SEC-068):** trägt `@ProtectedBy(SessionManagementAccess)`; der Evaluator prüft die mit `.sessionManagementView(Requirement)` veröffentlichte Anforderung — ohne Anforderung fail-closed (`Forbidden`), ohne Subjekt `Unauthenticated`. `.sessionManagementView()` ohne Anforderung ist deprecated und meldet `session-management-view-without-requirement` (ERROR in PRODUCTION/STRICT, WARNING sonst). Die frühere Deny-by-Default-Ausnahme in `AuthorizationListener` und die Discovery-Ausnahme sind entfallen. |
 
 ---
 

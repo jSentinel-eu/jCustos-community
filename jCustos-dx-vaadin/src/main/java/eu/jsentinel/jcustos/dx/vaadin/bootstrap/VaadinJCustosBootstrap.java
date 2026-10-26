@@ -57,12 +57,36 @@ public interface VaadinJCustosBootstrap
   VaadinJCustosBootstrap securedComponents();
 
   /**
-   * Marks the bootstrap as opting into the SessionManagementView.
-   * Consumed by the Vaadin starter in Phase 3.
+   * Opts into the framework's {@code SessionManagementRoute} without an
+   * access requirement. Since 00.84.00 the route then denies every
+   * subject and the bootstrap reports
+   * {@code session-management-view-without-requirement} (an error in
+   * PRODUCTION and STRICT) — use
+   * {@link #sessionManagementView(eu.jsentinel.jcustos.components.SecuredVisibility.Requirement)}.
    *
    * @return this builder
+   * @deprecated since 00.84.00; pass the requirement (JS-SEC-068, CWE-306)
    */
+  @Deprecated(since = "00.84.00")
   VaadinJCustosBootstrap sessionManagementView();
+
+  /**
+   * Opts into the framework's {@code SessionManagementRoute} and names
+   * the roles and permissions a subject must hold to open it and to
+   * revoke sessions from it (JS-SEC-068, CWE-306). Requires a
+   * store-backed session configuration.
+   *
+   * @param requirement non-empty roles/permissions requirement
+   * @return this builder
+   * @throws UnsupportedOperationException from the default method; every
+   *     shipped implementation overrides it
+   * @since 00.84.00
+   */
+  default VaadinJCustosBootstrap sessionManagementView(
+      eu.jsentinel.jcustos.components.SecuredVisibility.Requirement requirement) {
+    throw new UnsupportedOperationException(
+        "sessionManagementView(Requirement) is not supported by " + getClass().getName());
+  }
 
   /**
    * V00.74: Configures the Vaadin {@code Component} class to render
