@@ -63,9 +63,11 @@ public class JCustosVersionInitListener
     }
     JCustosVersionEnforcer enforcer = new JCustosVersionEnforcer(
         storeOpt.get(), JCustosServiceResolver.securityAuditService());
+    JCustosVersionEnforcerListener listener =
+        new JCustosVersionEnforcerListener(enforcer, MyLoginView.class);
+    // JS-SEC-082: drift is enforced on every UIDL request, not only on navigation.
+    event.addRequestHandler(listener);
     event.getSource().addUIInitListener((UIInitListener) uiInitEvent -> {
-      JCustosVersionEnforcerListener listener =
-          new JCustosVersionEnforcerListener(enforcer, MyLoginView.class);
       Registration reg = uiInitEvent.getUI().addBeforeEnterListener(listener);
       uiInitEvent.getUI().addDetachListener(detach -> reg.remove());
     });

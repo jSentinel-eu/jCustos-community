@@ -34,9 +34,14 @@ import com.vaadin.flow.component.UI;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
 import com.vaadin.flow.router.ListenerPriority;
+import com.vaadin.flow.router.RouteConfiguration;
+import com.vaadin.flow.server.HandlerHelper;
+import com.vaadin.flow.server.RequestHandler;
 import com.vaadin.flow.server.ServiceInitEvent;
 import com.vaadin.flow.server.UIInitEvent;
 import com.vaadin.flow.server.UIInitListener;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
 import com.vaadin.flow.server.VaadinServiceInitListener;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.WrappedSession;
@@ -46,6 +51,7 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -70,7 +76,12 @@ import java.util.Optional;
  *
  * <p>For active sessions the listener writes the current time back to a
  * private session attribute so the next navigation observes the
- * advanced last-activity timestamp.
+ * advanced last-activity timestamp. Since 00.84.00 (JS-SEC-082, CWE-613) the
+ * listener is also a {@link RequestHandler}: every UIDL request - button
+ * clicks, grid paging, {@code @ClientCallable} - is evaluated as well, and
+ * Vaadin's {@link VaadinSession#getLastRequestTimestamp() last request
+ * timestamp} counts as activity, so a user working inside one view is neither
+ * left unenforced nor logged out spuriously on the next navigation.
  *
  * <p>The listener is loaded via
  * {@code META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener}.
@@ -78,7 +89,7 @@ import java.util.Optional;
  */
 @ListenerPriority(Integer.MAX_VALUE)
 public class SessionLifetimeListener
-    implements VaadinServiceInitListener, UIInitListener, BeforeEnterListener,
+    implements VaadinServiceInitListener, UIInitListener, BeforeEnterListener, RequestHandler,
                HasLogger, Serializable {
 
   @Serial
@@ -107,6 +118,8 @@ public class SessionLifetimeListener
   @Override
   public void serviceInit(ServiceInitEvent event) {
     event.getSource().addUIInitListener(this);
+    // JS-SEC-082 (CWE-613): RPC round-trips never reach beforeEnter - enforce per UIDL request too.
+    event.addRequestHandler(this);
   }
 
   @Override
@@ -122,26 +135,65 @@ public class SessionLifetimeListener
     if (session == null) {
       return;
     }
+    evaluate(session).ifPresent(expiry -> {
+      removeSubject(expiry.store());
+      audit(expiry.subjectId(), expiry.reason());
+      forwardToLogin(event);
+    });
+  }
 
+  /**
+   * JS-SEC-082 (CWE-613): enforcement per UIDL request. Button clicks, grid paging and
+   * {@code @ClientCallable} calls travel through the UIDL handler and never reach
+   * {@link #beforeEnter(BeforeEnterEvent)}, so a session past its absolute lifetime kept
+   * working inside the current view. This handler is registered through
+   * {@link ServiceInitEvent#addRequestHandler} and therefore runs ahead of the framework
+   * handlers with the session locked: for an expired session it drops the subject, audits
+   * the expiry, sends the browser to the login route and closes the session. The request
+   * is never consumed - the UIDL handler still runs, now without a subject.
+   *
+   * @since 00.84.00
+   */
+  @Override
+  public boolean handleRequest(VaadinSession session, VaadinRequest request, VaadinResponse response) {
+    if (session == null || !HandlerHelper.isRequestType(request, HandlerHelper.RequestType.UIDL)) {
+      return false;
+    }
+    evaluate(session).ifPresent(expiry -> {
+      removeSubject(expiry.store());
+      audit(expiry.subjectId(), expiry.reason());
+      redirectToLogin(session, request);
+      session.close();
+    });
+    return false;
+  }
+
+  /** An expired session: whose subject to drop and which reason to audit. */
+  private record Expiry(SubjectStore store, String subjectId, String reason) { }
+
+  /**
+   * Evaluates the policy for the bound subject. Advances the private last-activity
+   * attribute for an active session and returns empty; returns the expiry to enforce
+   * otherwise.
+   */
+  private Optional<Expiry> evaluate(VaadinSession session) {
     Optional<SubjectStore> store = SubjectStores.findSubjectStore();
     if (store.isEmpty()) {
-      return;
+      return Optional.empty();
     }
 
     Optional<?> currentSubject = currentSubject(store.get());
     if (currentSubject.isEmpty()) {
-      return;
+      return Optional.empty();
     }
     String subjectId = subjectIdOf(currentSubject.get());
 
     Instant createdAt = sessionCreatedAt(session);
     if (createdAt == null) {
-      return;
+      return Optional.empty();
     }
     Instant now = Instant.now(clock);
-    Instant lastActivity = lastActivityAttribute(session)
-        .filter(activity -> !activity.isBefore(createdAt))
-        .orElse(createdAt);
+    Instant lastActivity = lastActivityOf(session, createdAt);
 
     SessionMetadata metadata = new SessionMetadata(subjectId, createdAt, lastActivity);
     SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
@@ -157,23 +209,67 @@ public class SessionLifetimeListener
     }
     SessionPolicyDecision decision = policy.evaluate(metadata);
 
-    switch (decision) {
-      case SessionPolicyDecision.Active ignored -> session.setAttribute(LAST_ACTIVITY_ATTRIBUTE, now);
+    return switch (decision) {
+      case SessionPolicyDecision.Active ignored -> {
+        session.setAttribute(LAST_ACTIVITY_ATTRIBUTE, now);
+        yield Optional.empty();
+      }
       case SessionPolicyDecision.IdleTimeout ignored ->
-          expire(event, store.get(), subjectId, SessionExpired.REASON_IDLE_TIMEOUT);
+          Optional.of(new Expiry(store.get(), subjectId, SessionExpired.REASON_IDLE_TIMEOUT));
       case SessionPolicyDecision.AbsoluteLifetimeExceeded ignored ->
-          expire(event, store.get(), subjectId, SessionExpired.REASON_ABSOLUTE_LIFETIME);
-    }
+          Optional.of(new Expiry(store.get(), subjectId, SessionExpired.REASON_ABSOLUTE_LIFETIME));
+    };
   }
 
-  private void expire(BeforeEnterEvent event, SubjectStore store,
-                      String subjectId, String reasonLabel) {
+  /**
+   * JS-SEC-082: Vaadin stamps every serviced UIDL request ({@code ServerRpcHandler}); that is
+   * the activity signal of a single-view application, which used to be logged out on its next
+   * navigation because only navigations advanced the private attribute. The attribute remains
+   * for adapters and tests that drive the listener without the request pipeline. The later of
+   * both wins; neither may predate the session.
+   */
+  private static Instant lastActivityOf(VaadinSession session, Instant createdAt) {
+    Instant latest = createdAt;
+    long stamped = session.getLastRequestTimestamp();
+    if (stamped > 0) {
+      Instant fromVaadin = Instant.ofEpochMilli(stamped);
+      if (fromVaadin.isAfter(latest)) {
+        latest = fromVaadin;
+      }
+    }
+    Optional<Instant> fromAttribute = lastActivityAttribute(session);
+    if (fromAttribute.isPresent() && fromAttribute.get().isAfter(latest)) {
+      latest = fromAttribute.get();
+    }
+    return latest;
+  }
+
+  private static void removeSubject(SubjectStore store) {
     Class<?> subjectType = resolveSubjectType();
     if (subjectType != null) {
       removeSubjectUnchecked(store, subjectType);
     }
-    audit(subjectId, reasonLabel);
-    forwardToLogin(event);
+  }
+
+  private static void redirectToLogin(VaadinSession session, VaadinRequest request) {
+    try {
+      UI ui = session.getService().findUI(request);
+      if (ui != null) {
+        ui.getPage().setLocation(loginUrl(request));
+      }
+    } catch (RuntimeException ignored) {
+      // the session is closed regardless; the next round-trip lands on the login page
+    }
+  }
+
+  private static String loginUrl(VaadinRequest request) {
+    String route = LoginListeners.findLoginListener()
+        .map(LoginListener::loginNavigationTarget)
+        .filter(Objects::nonNull)
+        .map(target -> RouteConfiguration.forSessionScope().getUrl(target))
+        .orElseGet(JCustosServiceResolver::loginRouteName);
+    String contextPath = request.getContextPath();
+    return (contextPath == null ? "" : contextPath) + "/" + route;
   }
 
   private Optional<?> currentSubject(SubjectStore store) {

@@ -378,7 +378,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `LoginListener<U>` (abstract) | `BeforeEnterListener` mit Rollen-/Subject-Lifecycle-Hooks |
 | `LoginListeners` | Statischer Resolver für `LoginListener` (SPI + Cache + `setLoginListener`) |
 | `AuthorizationListener` (`@ListenerPriority(MAX_VALUE - 1)`) | Annotation-basierter Routenschutz pro Navigation |
-| `SessionLifetimeListener` (`@ListenerPriority(MAX_VALUE)`) | Idle/Absolute-Timeout-Enforcement vor Authorization |
+| `SessionLifetimeListener` (`@ListenerPriority(MAX_VALUE)`) | Idle/Absolute-Timeout-Enforcement vor Authorization; seit **V00.84** (JS-SEC-082, CWE-613) zusätzlich `RequestHandler` für jeden UIDL-Request (RPC ohne Navigation: Subjekt löschen, `SessionExpired`, Redirect auf die Login-Route, Session schließen) und `VaadinSession.getLastRequestTimestamp()` als Aktivitätssignal |
 | `ApplicationServiceInitListener` | Registriert `LoginListener` als `BeforeEnterListener` pro UI |
 | `VaadinSessionSubjectStore` | `SubjectStore`-Default — speichert Subject in `VaadinSession.getAttribute` |
 | `VaadinLogoutService<U>` | Vaadin-spezifischer `LogoutService` mit Page-Redirect / Session-Close / HTTP-Invalidate |
@@ -400,7 +400,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | Klasse | Zweck |
 |---|---|
 | `VaadinJCustosVersionContext` (Package `session/vaadin`) | Per-VaadinSession Snapshot-Carrier (`record(subjectId, tenant, snapshot, sessionId)` / `current()` / `clear()`). Survives Session-Rotation. |
-| `JCustosVersionEnforcerListener` (`@ListenerPriority(Integer.MAX_VALUE)`) | BeforeEnter-Listener vor `AuthorizationListener`. On Drift: clear snapshot + reroute zur konfigurierten LoginView-Klasse. |
+| `JCustosVersionEnforcerListener` (`@ListenerPriority(Integer.MAX_VALUE)`) | BeforeEnter-Listener vor `AuthorizationListener`. On Drift: clear snapshot + reroute zur konfigurierten LoginView-Klasse. Seit **V00.84** (JS-SEC-082) auch `RequestHandler`: dieselbe Instanz über `ServiceInitEvent.addRequestHandler` registrieren, dann wird Drift auf jedem UIDL-Request durchgesetzt (Subjekt löschen, Snapshot leeren, `SessionStale`, Redirect, Session schließen) |
 
 ### Phase-8a/b Components (`jCustos-vaadin/components/` — ⚠️)
 

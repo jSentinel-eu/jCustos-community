@@ -23,9 +23,15 @@ import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer.EnforcementOutcome;
 import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.UI;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
 import com.vaadin.flow.router.ListenerPriority;
+import com.vaadin.flow.router.RouteConfiguration;
+import com.vaadin.flow.server.HandlerHelper;
+import com.vaadin.flow.server.RequestHandler;
+import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinResponse;
 import com.vaadin.flow.server.VaadinSession;
 
 import java.util.Optional;
@@ -62,7 +68,7 @@ import static java.util.Objects.requireNonNull;
  */
 @ExperimentalJCustosApi
 @ListenerPriority(Integer.MAX_VALUE)
-public final class JCustosVersionEnforcerListener implements BeforeEnterListener {
+public final class JCustosVersionEnforcerListener implements BeforeEnterListener, RequestHandler {
 
   private final JCustosVersionEnforcer enforcer;
   private final Class<? extends Component> rerouteTargetOnStale;
@@ -109,6 +115,56 @@ public final class JCustosVersionEnforcerListener implements BeforeEnterListener
       // against the stale value while the user is on the login page.
       VaadinJCustosVersionContext.clear(VaadinSession.getCurrent());
       event.rerouteTo(rerouteTargetOnStale);
+    }
+  }
+
+  /**
+   * JS-SEC-082 (CWE-613): drift enforcement per UIDL request. A session whose roles were
+   * revoked kept working inside the current view because only navigations were checked.
+   * Applications register the same instance through
+   * {@code ServiceInitEvent.addRequestHandler(listener)}; the handler then runs ahead of the
+   * framework handlers with the session locked. On drift it drops the subject, clears the
+   * snapshot, sends the browser to the reroute target and closes the session. The request is
+   * never consumed.
+   *
+   * @since 00.84.00
+   */
+  @Override
+  public boolean handleRequest(VaadinSession session, VaadinRequest request, VaadinResponse response) {
+    if (session == null || !HandlerHelper.isRequestType(request, HandlerHelper.RequestType.UIDL)) {
+      return false;
+    }
+    Optional<VaadinJCustosVersionContext.Snapshot> snapshotOpt =
+        VaadinJCustosVersionContext.current(session);
+    if (snapshotOpt.isEmpty()) {
+      return false;
+    }
+    VaadinJCustosVersionContext.Snapshot snapshot = snapshotOpt.get();
+    EnforcementOutcome outcome = enforcer.enforce(
+        snapshot.subjectId(),
+        snapshot.tenant(),
+        snapshot.snapshot(),
+        snapshot.sessionId(),
+        null);
+    if (outcome instanceof EnforcementOutcome.SessionStale) {
+      clearCurrentSubject();
+      VaadinJCustosVersionContext.clear(session);
+      redirectToRerouteTarget(session, request);
+      session.close();
+    }
+    return false;
+  }
+
+  private void redirectToRerouteTarget(VaadinSession session, VaadinRequest request) {
+    try {
+      UI ui = session.getService().findUI(request);
+      if (ui != null) {
+        String contextPath = request.getContextPath();
+        ui.getPage().setLocation((contextPath == null ? "" : contextPath) + "/"
+            + RouteConfiguration.forSessionScope().getUrl(rerouteTargetOnStale));
+      }
+    } catch (RuntimeException ignored) {
+      // the session is closed regardless; the next round-trip lands on the reroute target
     }
   }
 

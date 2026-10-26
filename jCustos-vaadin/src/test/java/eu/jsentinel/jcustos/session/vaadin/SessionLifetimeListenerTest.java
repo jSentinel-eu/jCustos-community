@@ -30,6 +30,7 @@ import eu.jsentinel.jcustos.session.SessionDecision;
 import eu.jsentinel.jcustos.session.SessionMetadata;
 import eu.jsentinel.jcustos.session.SessionPolicy;
 import eu.jsentinel.jcustos.session.SessionPolicyDecision;
+import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.internal.CurrentInstance;
@@ -47,6 +48,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -250,6 +252,35 @@ class SessionLifetimeListenerTest {
     assertTrue(audit.events().isEmpty());
   }
 
+  @Test
+  @DisplayName("JS-SEC-082: Vaadin's last UIDL request timestamp counts as activity")
+  void vaadinLastRequestTimestamp_countsAsActivity() {
+    InMemoryVaadinSession session = bindSession(T0);
+    SubjectStores.setSubjectStore(new InMemorySubjectStore());
+    SubjectStores.subjectStore().setCurrentSubject("alice", String.class);
+    LoginListeners.setLoginListener(new TestLoginListener());
+    Instant now = T0.plus(Duration.ofMinutes(45));
+    JCustosServiceResolver.setSessionPolicy(new TimeoutSessionPolicy<>(
+        new TimeoutSessionPolicy.Config(Duration.ofMinutes(30), Duration.ofHours(12), false, "/login"),
+        Clock.fixed(now, ZoneOffset.UTC), audit));
+    // an RPC round-trip five minutes ago, no navigation since the session was created
+    session.setLastRequestTimestamp(T0.plus(Duration.ofMinutes(40)).toEpochMilli());
+
+    SessionLifetimeListener listener = new SessionLifetimeListener(Clock.fixed(now, ZoneOffset.UTC));
+    RecordingEvent active = new RecordingEvent();
+    listener.beforeEnter(active);
+    assertNull(active.forwardTarget, "RPC activity must keep the session alive");
+    assertTrue(audit.events().isEmpty());
+
+    // without the stamp the very same navigation is an idle timeout (45 min since creation)
+    session.setLastRequestTimestamp(0);
+    session.setAttribute(SessionLifetimeListener.LAST_ACTIVITY_ATTRIBUTE, null);
+    RecordingEvent expired = new RecordingEvent();
+    listener.beforeEnter(expired);
+    assertSame(StubLoginView.class, expired.forwardTarget);
+    assertEquals("IdleTimeout", ((SessionExpired) audit.events().get(0)).reason());
+  }
+
   // ── Helpers ───────────────────────────────────────────────────
 
   private InMemoryVaadinSession bindSession(Instant createdAt) {
@@ -288,6 +319,17 @@ class SessionLifetimeListenerTest {
 
     @Override public <T> T getAttribute(Class<T> type) {
       return type.cast(attributes.get(type));
+    }
+
+    // JS-SEC-082: plain field - the real implementation checks the session lock.
+    private long lastRequestTimestamp;
+
+    @Override public void setLastRequestTimestamp(long timestamp) {
+      this.lastRequestTimestamp = timestamp;
+    }
+
+    @Override public long getLastRequestTimestamp() {
+      return lastRequestTimestamp;
     }
   }
 

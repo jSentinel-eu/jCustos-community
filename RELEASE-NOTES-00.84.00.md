@@ -497,6 +497,35 @@ sub-interface and a method declared only there are both denied without the role 
 super-interface and pass with it; with deny-by-default an unannotated method throws
 `AccessDeniedException`, a `@PublicRoute` method passes, and allow-by-omission is unchanged.
 
+## Session lifetime and version drift are enforced on every RPC, not only on navigation (ER15, JS-SEC-082, CWE-613)
+
+`SessionLifetimeListener` and `JCustosVersionEnforcerListener` were pure `BeforeEnterListener`s.
+Vaadin RPC — button clicks, grid paging, `@ClientCallable` — travels through the UIDL handler and
+never reaches `beforeEnter`, so a session past its absolute lifetime or with revoked roles kept
+working inside the current view for as long as the user stayed there. The reverse was true as
+well: only navigations advanced the last-activity marker, so a user working in one view was
+logged out as idle on the next route change.
+
+Both listeners now also implement Vaadin's `RequestHandler`. `SessionLifetimeListener` registers
+itself through `ServiceInitEvent.addRequestHandler` and evaluates the policy on every UIDL
+request ahead of the framework handlers; on idle timeout or absolute lifetime it drops the
+subject, audits `SessionExpired`, sends the browser to the login route (the registered
+`LoginListener`'s view, otherwise the resolver's login route, with the context path) and closes
+the session. The request itself is never consumed. `JCustosVersionEnforcerListener` does the same
+on drift — subject dropped, snapshot cleared, `SessionStale` audited, redirect to the reroute
+target, session closed; applications register the same instance via
+`ServiceInitEvent.addRequestHandler(listener)` (the two demos show it). Vaadin's
+`VaadinSession.getLastRequestTimestamp()`, stamped by `ServerRpcHandler` on every serviced UIDL
+request, now counts as activity next to the listener's own attribute; heartbeats do not.
+Verified with browserless tests that drive the handlers with the UIDL mock request the servlet
+would hand over: after the absolute lifetime an RPC drops the subject, audits
+`AbsoluteLifetimeExceeded` and closes the session; before expiry it keeps the subject and records
+the activity; a heartbeat changes nothing; a drifted version snapshot is enforced on the RPC. A
+unit test shows that a 40-minute-old RPC stamp keeps a 45-minute-old session alive under the
+30-minute idle default, and that the same navigation is an idle timeout without the stamp.
+Browserless component events bypass the request pipeline, which is why the tests call the
+handler directly instead of clicking.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
