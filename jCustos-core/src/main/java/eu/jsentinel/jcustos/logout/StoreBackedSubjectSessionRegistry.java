@@ -125,10 +125,18 @@ public final class StoreBackedSubjectSessionRegistry implements SubjectSessionRe
     SessionId sid = sessionIdFrom(sessionId);
     java.time.Instant now = clock.instant();
     SessionRecord existing = store.findById(sid).orElse(null);
-    SessionRecord record = existing == null
-        ? new SessionRecord(sid, subjectId, tenant, now, now,
-            snapshotVersionFor(subjectId), SessionStatus.ACTIVE)
-        : existing.withLastActivityAt(now);
+    // JS-SEC-075 (CWE-613 / CWE-384): refresh only a record that is still this
+    // subject's live session. A record bound to another subject (the container
+    // reused the id) or one that is EXPIRED / REVOKED is replaced by a fresh
+    // ACTIVE record with the new subject's own version snapshot — otherwise
+    // clearAll(A) would end B's session, sessionsOf(B) would not know it and
+    // drift detection would compare B against A's snapshot.
+    SessionRecord record = existing != null
+        && existing.subjectId().equals(subjectId)
+        && existing.status().isActive()
+        ? existing.withLastActivityAt(now)
+        : new SessionRecord(sid, subjectId, tenant, now, now,
+            snapshotVersionFor(subjectId), SessionStatus.ACTIVE);
     store.save(record);
   }
 

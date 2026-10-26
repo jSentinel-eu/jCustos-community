@@ -174,7 +174,7 @@ sie die Security-Flow-Auswertung nie blockieren.
 |---|---|---|
 | `StoreBackedJCustosAuditService` | core/audit | `AuditEventStore` |
 | `StoreBackedLoginAttemptPolicy` | core/bruteforce | `LoginAttemptStore` (flacher Lockout) |
-| `StoreBackedSubjectSessionRegistry` | core/logout | `SessionStore` + optionaler `JCustosVersionStore` (Phase-4c-Snapshot beim Register) |
+| `StoreBackedSubjectSessionRegistry` | core/logout | `SessionStore` + optionaler `JCustosVersionStore` (Phase-4c-Snapshot beim Register); seit **V00.84** bindet `register` eine wiederverwendete Session-ID bei fremdem Subjekt oder nicht-aktivem Status neu statt aufzufrischen (JS-SEC-075) |
 | `StoreBackedRoleAuthorizationService<U>` | core/authorization/api/roles | `RoleAssignmentStore` (generic über Subject-Type) |
 | `StoreBackedRememberMeService` | core/authentication | `RememberMeTokenStore` + `PasswordHasher` |
 | `StoreBackedBootstrapStateService` | core/bootstrap | `BootstrapStateStore` (idempotentes `markCompleted`) |

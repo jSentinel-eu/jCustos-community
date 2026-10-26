@@ -349,6 +349,22 @@ subject, consume of the second succeeds and the first validates empty; 150 000 r
 the in-memory store at its bound and refuse the surplus in under a second; the audit sink sees
 one `PasswordResetRequested` per issue and one `PasswordResetCompleted` per consume.
 
+## Session registry: a reused session id no longer inherits another subject's record (ER08, JS-SEC-075, CWE-613, CWE-384)
+
+`StoreBackedSubjectSessionRegistry.register(subject, sessionId)` refreshed any record it found
+under the id, regardless of the subject or status stored in it. When a container reused a
+session id, or a login landed on an id whose record was already `EXPIRED` or `REVOKED`, the
+record stayed bound to the previous subject with the previous version snapshot: `clearAll(A)`
+ended B's session, `sessionsOf(B)` did not know it, and drift detection compared B against A's
+`JCustosVersion`.
+
+`register` now refreshes only a record that is still the same subject's `ACTIVE` session.
+Anything else — another subject, or a record that is `EXPIRED` or `REVOKED` — is replaced by a
+fresh `ACTIVE` record for the registering subject with its own version snapshot. Verified:
+after `register(A, sid)` and `register(B, sid)`, `sessionsOf(B)` lists the id, `sessionsOf(A)`
+does not, the record carries B's version and `clearAll(A)` leaves B's session alone; a record
+saved as `EXPIRED` or `REVOKED` is `ACTIVE` and listed again after the next `register`.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

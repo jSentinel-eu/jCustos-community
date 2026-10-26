@@ -178,6 +178,51 @@ class StoreBackedSubjectSessionRegistryTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-075: a reused session id bound to another subject is rebound, with the new subject's version")
+  void registerRebindsForeignSubject() {
+    InMemorySessionStore sessionStore = new InMemorySessionStore();
+    InMemoryJCustosVersionStore versionStore = new InMemoryJCustosVersionStore();
+    versionStore.increment(new JCustosVersionKey(TenantId.DEFAULT, ALICE)); // alice → 1
+    versionStore.increment(new JCustosVersionKey(TenantId.DEFAULT, BOB));   // bob → 1
+    versionStore.increment(new JCustosVersionKey(TenantId.DEFAULT, BOB));   // bob → 2
+    StoreBackedSubjectSessionRegistry registry =
+        new StoreBackedSubjectSessionRegistry(sessionStore, TenantId.DEFAULT, fixed(T0), versionStore);
+
+    registry.register(ALICE, "sid-1");
+    registry.register(BOB, "sid-1");
+
+    assertTrue(registry.sessionsOf(BOB).contains("sid-1"), "the id now belongs to bob");
+    assertTrue(registry.sessionsOf(ALICE).isEmpty(), "alice must not keep a session she no longer has");
+    assertEquals(new JCustosVersion(2L),
+        sessionStore.findById(new SessionId("sid-1")).orElseThrow().securityVersionAtLogin(),
+        "drift detection must compare bob against bob's snapshot, not alice's");
+    assertEquals(BOB, sessionStore.findById(new SessionId("sid-1")).orElseThrow().subjectId());
+    assertEquals(1, registry.clearAll(ALICE).size() + 1, "clearAll(alice) must not end bob's session");
+    assertTrue(registry.sessionsOf(BOB).contains("sid-1"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-075: registering over an EXPIRED or REVOKED record revives the session as ACTIVE")
+  void registerRevivesInactiveRecord() {
+    InMemorySessionStore sessionStore = new InMemorySessionStore();
+    StoreBackedSubjectSessionRegistry registry =
+        new StoreBackedSubjectSessionRegistry(sessionStore, TenantId.DEFAULT, fixed(T0));
+    registry.register(ALICE, "sid-1");
+    SessionId sid = new SessionId("sid-1");
+    sessionStore.save(sessionStore.findById(sid).orElseThrow().withStatus(SessionStatus.EXPIRED));
+    assertTrue(registry.sessionsOf(ALICE).isEmpty(), "precondition: an expired record is not listed");
+
+    registry.register(ALICE, "sid-1");
+
+    assertTrue(registry.sessionsOf(ALICE).contains("sid-1"), "a new login over a dead id is a live session again");
+    assertEquals(SessionStatus.ACTIVE, sessionStore.findById(sid).orElseThrow().status());
+
+    sessionStore.save(sessionStore.findById(sid).orElseThrow().withStatus(SessionStatus.REVOKED));
+    registry.register(ALICE, "sid-1");
+    assertEquals(SessionStatus.ACTIVE, sessionStore.findById(sid).orElseThrow().status());
+  }
+
+  @Test
   @DisplayName("without a JCustosVersionStore, register falls back to INITIAL")
   void registerFallsBackToInitialWithoutVersionStore() {
     InMemorySessionStore sessionStore = new InMemorySessionStore();
