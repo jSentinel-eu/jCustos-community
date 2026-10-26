@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authorization.api;
 
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.permissions.HasPermissions;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionMatcher;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
@@ -82,7 +83,10 @@ public final class JCustosEnforcer {
    * Reads the security annotation on the supplied {@code methodOrElement}
    * (or its {@code declaringClass} as fallback), evaluates the configured
    * evaluator, and throws {@link AccessDeniedException} when the decision
-   * is not {@code Granted}. No-op when no security annotation is present.
+   * is not {@code Granted}. No-op when no security annotation is present -
+   * unless {@link JCustosServiceResolver#isDenyByDefault()} is set (JS-SEC-081):
+   * then an element without a restriction is denied unless it, or its class,
+   * carries {@code @PublicRoute}.
    *
    * @param methodOrElement annotated method (typically) or any annotated
    *                        element to inspect first
@@ -99,6 +103,15 @@ public final class JCustosEnforcer {
     Optional<AnnotationAccessEvaluatorPair<Annotation>> match = SCANNER.scan(methodOrElement)
         .or(() -> SCANNER.scan(declaringClass));
     if (match.isEmpty()) {
+      // JS-SEC-081 (CWE-862): under deny-by-default an element without any restriction is
+      // unconfigured, not open. Only an explicit @PublicRoute on the element or on its class
+      // opens it - the same contract RestAuthorizationFilter and AuthorizationListener apply.
+      if (JCustosServiceResolver.isDenyByDefault()
+          && !methodOrElement.isAnnotationPresent(PublicRoute.class)
+          && !declaringClass.isAnnotationPresent(PublicRoute.class)) {
+        throw new AccessDeniedException("Denied by default: no security annotation on "
+            + declaringClass.getName() + "#" + methodName + " and no @PublicRoute");
+      }
       return;
     }
     AnnotationAccessEvaluatorPair<Annotation> pair = match.get();

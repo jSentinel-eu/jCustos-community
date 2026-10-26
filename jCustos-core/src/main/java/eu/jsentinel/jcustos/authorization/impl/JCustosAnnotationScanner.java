@@ -112,7 +112,20 @@ public final class JCustosAnnotationScanner {
     if (element instanceof Class<?> clazz) {
       Class<?> superClass = clazz.getSuperclass();
       if (superClass != null && superClass != Object.class) {
-        return doScan(superClass);
+        Optional<AnnotationAccessEvaluatorPair<Annotation>> inherited = doScan(superClass);
+        if (inherited.isPresent()) {
+          return inherited;
+        }
+      }
+      // JS-SEC-081 (CWE-862): SecuredProxy guards interface types, and a sub-interface that
+      // redeclares or adds methods used to shed the restriction declared on its super-interface
+      // (the superclass of an interface is null, so the walk above never saw it). Interfaces are
+      // walked after the superclass chain, in declaration order; the first restriction wins.
+      for (Class<?> implemented : clazz.getInterfaces()) {
+        Optional<AnnotationAccessEvaluatorPair<Annotation>> fromInterface = doScan(implemented);
+        if (fromInterface.isPresent()) {
+          return fromInterface;
+        }
       }
     }
     return Optional.empty();

@@ -385,7 +385,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `VaadinLogoutGateway` / `DefaultVaadinLogoutGateway` | Thin Wrapper über `UI.getPage().setLocation`, `VaadinSession.close`, `WrappedSession.invalidate` |
 | `VaadinAccessContextFactory` | Baut `AccessContext` aus `BeforeEnterEvent` |
 | `VaadinAccessDecisionMapper` / `VaadinNavigationAccessDecisionMapper` | Mappen `AccessDecision` / `NavigationAccessDecision` auf Vaadin-Navigation |
-| `JCustosAnnotationScanner` | Scannt Class/Method/AnnotatedElement nach `@JCustosAnnotation`-Meta-Annotation (cached) |
+| `JCustosAnnotationScanner` | Scannt Class/Method/AnnotatedElement nach `@JCustosAnnotation`-Meta-Annotation (cached); erbt entlang der Superklassen-Kette **und seit V00.84 entlang der Interfaces** (JS-SEC-081, CWE-862) — die am stärksten abgeleitete Einschränkung gewinnt |
 
 ### Login-View-Features
 
@@ -446,7 +446,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 |---|---|
 | `ThreadLocalSubjectStore` | `SubjectStore`-Default — per-Thread-Bindings, **nicht** inherited |
 | `StandaloneLoginFlow<T, U>` | Login-Treiber: konsultiert `LoginAttemptPolicy` → `AuthenticationService` → bindet Subject → emittiert `LoginSucceeded`/`LoginFailed` |
-| `SecuredProxy.wrap(Interface, impl)` | JDK Dynamic Proxy — enforce per Methode oder Klasse via `JCustosEnforcer.enforce(method, declaringClass)` |
+| `SecuredProxy.wrap(Interface, impl)` | JDK Dynamic Proxy — enforce per Methode oder Klasse via `JCustosEnforcer.enforce(method, declaringClass)`; Einschränkungen auf Super-Interfaces werden vererbt, und unter `setDenyByDefault(true)` wird eine Methode ohne Einschränkung abgelehnt, sofern sie oder ihr Interface nicht `@PublicRoute` trägt (seit V00.84, JS-SEC-081) |
 | `SecuredProxy.requireAllowed(Class, methodName)` | Single-shot Enforcement für Lambdas/Callbacks |
 | `LoginResult<U>` (sealed) | `Success` / `Rejected` / `LockedOut` |
 

@@ -20,6 +20,7 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;
 import eu.jsentinel.jcustos.authorization.annotations.JCustosAnnotation;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.AccessDeniedException;
 import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
@@ -323,6 +324,35 @@ class SecuredTest {
     SecuredProxy.requireAllowed(Service.class, "openOperation");
   }
 
+  // ── JS-SEC-081: super-interface restrictions and deny-by-default ──
+
+  @Test
+  @DisplayName("JS-SEC-081: a restriction on a super-interface guards redeclared and added methods of the sub-interface")
+  void superInterfaceRestrictionIsInherited() {
+    ExtendedService secured = SecuredProxy.wrap(ExtendedService.class, new ExtendedServiceImpl());
+    bindSubject("alice", Set.of(new RoleName("USER")), Set.of());
+    assertThrows(AccessDeniedException.class, secured::ping,
+        "a method redeclared on the sub-interface inherits @RequiresRole(ADMIN)");
+    assertThrows(AccessDeniedException.class, secured::extra,
+        "a method declared only on the sub-interface inherits the super-interface's class-level restriction");
+    bindSubject("admin", Set.of(new RoleName("ADMIN")), Set.of());
+    assertEquals("pong", secured.ping());
+    assertEquals("extra", secured.extra());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-081: deny-by-default blocks an unannotated interface method; @PublicRoute opens it")
+  void denyByDefaultBlocksUnannotatedMethod() {
+    JCustosServiceResolver.setDenyByDefault(true);
+    MixedService secured = SecuredProxy.wrap(MixedService.class, new MixedServiceImpl());
+    bindSubject("alice", Set.of(), Set.of());
+    assertThrows(AccessDeniedException.class, secured::unannotated,
+        "deny-by-default: no restriction means no access");
+    assertEquals("public", secured.publicOp(), "@PublicRoute is the explicit opt-out");
+    JCustosServiceResolver.setDenyByDefault(false);
+    assertEquals("plain", secured.unannotated(), "allow-by-omission keeps the previous behaviour");
+  }
+
   // ── Helpers ────────────────────────────────────────────────────
 
   private static void bindSubject(String id, Set<RoleName> roles, Set<PermissionName> perms) {
@@ -406,6 +436,30 @@ class SecuredTest {
 
   public static class GuardedServiceImpl implements GuardedService {
     @Override public String ping() { return "pong"; }
+  }
+
+  /** JS-SEC-081 fixture: redeclares ping() and adds extra(); the restriction sits on the super-interface. */
+  public interface ExtendedService extends GuardedService {
+    @Override String ping();
+    String extra();
+  }
+
+  public static class ExtendedServiceImpl implements ExtendedService {
+    @Override public String ping() { return "pong"; }
+    @Override public String extra() { return "extra"; }
+  }
+
+  /** JS-SEC-081 fixture: no restriction anywhere, one explicit opt-out. */
+  public interface MixedService {
+    String unannotated();
+
+    @PublicRoute
+    String publicOp();
+  }
+
+  public static class MixedServiceImpl implements MixedService {
+    @Override public String unannotated() { return "plain"; }
+    @Override public String publicOp() { return "public"; }
   }
 
   // Custom annotation + AccessEvaluator to exercise the AccessEvaluator branch

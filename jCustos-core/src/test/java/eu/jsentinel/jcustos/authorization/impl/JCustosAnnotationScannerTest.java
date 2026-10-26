@@ -139,6 +139,37 @@ class JCustosAnnotationScannerTest {
     assertTrue(scanner.scan(PlainSubclass.class).isEmpty());
   }
 
+  @Test
+  @DisplayName("JS-SEC-081: a sub-interface inherits the restriction of its super-interface")
+  void subInterfaceInheritsSuperInterfaceRestriction() {
+    var result = scanner.scan(SubContract.class);
+    assertTrue(result.isPresent(),
+        "an interface extending a @StubRestriction interface must inherit the restriction");
+    assertInstanceOf(StubRestriction.class, result.get().annotation());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-081: a method redeclared on the sub-interface still carries the super-interface restriction")
+  void redeclaredInterfaceMethodInheritsRestriction() throws NoSuchMethodException {
+    Method redeclared = SubContract.class.getDeclaredMethod("operation");
+    assertTrue(scanner.scan(redeclared).isPresent(),
+        "the redeclaring interface has no annotation of its own, the super-interface's must apply");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-081: the sub-interface's own restriction wins over the inherited one")
+  void subInterfaceOwnRestrictionWins() {
+    var result = scanner.scan(OverridingContract.class);
+    assertTrue(result.isPresent());
+    assertInstanceOf(AnotherRestriction.class, result.get().annotation());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-081: a plain sub-interface of a plain interface still scans as empty")
+  void plainSubInterfaceStillEmpty() {
+    assertTrue(scanner.scan(PlainSubContract.class).isEmpty());
+  }
+
   // ── Test fixtures ─────────────────────────────────────────────
 
   @Retention(RetentionPolicy.RUNTIME)
@@ -204,5 +235,27 @@ class JCustosAnnotationScannerTest {
     @PublicRoute
     void open() {
     }
+  }
+
+
+  // JS-SEC-081: interface hierarchy fixtures.
+  @StubRestriction
+  interface RestrictedContract {
+    void operation();
+  }
+
+  interface SubContract extends RestrictedContract {
+    @Override
+    void operation();
+  }
+
+  @AnotherRestriction
+  interface OverridingContract extends RestrictedContract {
+  }
+
+  interface PlainContract {
+  }
+
+  interface PlainSubContract extends PlainContract {
   }
 }

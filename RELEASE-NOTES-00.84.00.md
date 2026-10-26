@@ -479,6 +479,24 @@ adapter: no SPI yields the Noop plus exactly one warning, a repeated fallback do
 set afterwards wins, and
 an explicitly set Noop no longer reads as configured.
 
+## Restrictions on super-interfaces are inherited; `SecuredProxy` honours deny-by-default (ER14, JS-SEC-081, CWE-862)
+
+`JCustosAnnotationScanner` walked only the superclass chain. An interface has no superclass, so a
+sub-interface that redeclared or added methods shed the `@RequiresRole` or `@RequiresPermission`
+declared on its super-interface — and `SecuredProxy.wrap(...)` guards exactly such interface
+types. `JCustosEnforcer.enforce(...)` returned silently whenever no restriction was found, even
+with `JCustosServiceResolver.setDenyByDefault(true)`, which the REST filter and the Vaadin
+navigation listener already honoured: a proxied service was allow-by-omission while the rest of
+the application was deny-by-default.
+
+The scanner now walks the implemented interfaces after the superclass chain, in declaration
+order, with the most-derived restriction still winning. Under deny-by-default the enforcer denies an
+element without a restriction unless it, or its class, carries `@PublicRoute` — the same opt-out
+the other adapters use. Verified through the real dynamic proxy: a method redeclared on a
+sub-interface and a method declared only there are both denied without the role of the
+super-interface and pass with it; with deny-by-default an unannotated method throws
+`AccessDeniedException`, a `@PublicRoute` method passes, and allow-by-omission is unchanged.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
