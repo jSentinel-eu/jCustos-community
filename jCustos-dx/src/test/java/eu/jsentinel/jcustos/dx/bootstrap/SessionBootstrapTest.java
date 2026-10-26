@@ -126,17 +126,16 @@ class SessionBootstrapTest {
   }
 
   @Test
-  @DisplayName("BL06: STRICT store-backed sessions without any lifetime enforcement throw sessions/no-timeout-policy")
-  void strictStoreWithoutLifetimeThrows() {
-    JCustosBootstrapException ex = assertThrows(
-        JCustosBootstrapException.class,
-        () -> new VaadinTestBootstrap()
-            .mode(JCustosBootstrapMode.STRICT)
-            .sessions(s -> s.storeBacked(new InMemorySessionStore()))
-            .install());
-    assertTrue(ex.warnings().stream()
-        .anyMatch(w -> "sessions/no-timeout-policy".equals(w.code())),
-        "a silent never-expiring session setup must fail a STRICT boot");
+  @DisplayName("BL06/JS-SEC-065: STRICT store-backed sessions without explicit lifetime boot on the secure default and report INFO")
+  void strictStoreWithoutLifetimeBootsOnSecureDefault() {
+    var runtime = new VaadinTestBootstrap()
+        .mode(JCustosBootstrapMode.STRICT)
+        .sessions(s -> s.storeBacked(new InMemorySessionStore()))
+        .install();
+    assertTrue(runtime.warnings().stream()
+        .anyMatch(w -> "sessions/no-timeout-policy".equals(w.code())
+            && w.severity() == eu.jsentinel.jcustos.dx.runtime.Severity.INFO),
+        "since 00.84.00 the resolver default enforces 30 min / 12 h, so the finding is INFO, not a gate");
   }
 
   @Test

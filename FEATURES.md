@@ -78,7 +78,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
 | `LoginAttemptPolicy` | core | `InMemoryLoginAttemptPolicy` | Login-Throttling + Lockout-Entscheidungen |
-| `SessionPolicy<U>` | core | `TimeoutSessionPolicy` | Lifecycle-Hooks + Idle/Absolute-Timeout |
+| `SessionPolicy<U>` | core | `TimeoutSessionPolicy` (seit **V00.84 auch Resolver-Default**: 30 min Leerlauf, 12 h Gesamtlebensdauer, Rotation nach Login, Login-Route aus dem Resolver — JS-SEC-065; `NoopSessionPolicy` ist der ausdrückliche Opt-out) | Lifecycle-Hooks + Idle/Absolute-Timeout |
 
 ### Logout
 

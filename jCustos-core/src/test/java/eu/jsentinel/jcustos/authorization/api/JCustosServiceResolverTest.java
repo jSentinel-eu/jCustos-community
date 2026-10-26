@@ -36,6 +36,7 @@ import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import eu.jsentinel.jcustos.session.NoopSessionPolicy;
+import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 import eu.jsentinel.jcustos.session.JCustosVersionStore;
 import eu.jsentinel.jcustos.session.SessionContext;
 import eu.jsentinel.jcustos.session.SessionDecision;
@@ -372,10 +373,27 @@ class JCustosServiceResolverTest {
   // ── SessionPolicy ─────────────────────────────────────────────
 
   @Test
-  @DisplayName("sessionPolicy falls back to NoopSessionPolicy when no SPI is registered")
-  void sessionPolicy_defaultsToNoop() {
+  @DisplayName("JS-SEC-065: sessionPolicy falls back to the enforcing TimeoutSessionPolicy when no SPI is registered")
+  void sessionPolicy_defaultsToTimeoutSessionPolicy() {
     SessionPolicy<String> policy = JCustosServiceResolver.sessionPolicy();
-    assertTrue(policy instanceof NoopSessionPolicy<?>);
+    assertTrue(policy instanceof TimeoutSessionPolicy<?>,
+        "the secure default must enforce idle and absolute lifetime, not NoopSessionPolicy");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-065: the secure default still counts as 'not configured' for findSessionPolicy")
+  void findSessionPolicy_emptyForTheSecureDefault() {
+    JCustosServiceResolver.sessionPolicy();
+    assertTrue(JCustosServiceResolver.findSessionPolicy().isEmpty(),
+        "diagnostics must be able to tell a default from a registration");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-065: NoopSessionPolicy registered explicitly is the opt-out")
+  void explicitNoop_isTheOptOut() {
+    JCustosServiceResolver.setSessionPolicy(NoopSessionPolicy.instance());
+    assertTrue(JCustosServiceResolver.sessionPolicy() instanceof NoopSessionPolicy<?>);
+    assertTrue(JCustosServiceResolver.findSessionPolicy().isEmpty());
   }
 
   @Test
@@ -402,7 +420,7 @@ class JCustosServiceResolverTest {
     JCustosServiceResolver.resetAll();
 
     SessionPolicy<String> after = JCustosServiceResolver.sessionPolicy();
-    assertTrue(after instanceof NoopSessionPolicy<?>);
+    assertTrue(after instanceof TimeoutSessionPolicy<?>, "after reset the secure default applies again");
   }
 
   static final class AlwaysInvalidate<U> implements SessionPolicy<U> {

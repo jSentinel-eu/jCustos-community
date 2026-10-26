@@ -17,9 +17,14 @@
 package eu.jsentinel.jcustos.session;
 
 /**
- * Default {@link SessionPolicy} — every navigation continues, login and
- * logout do nothing. Used as the resolver fallback when no SPI
- * implementation is registered.
+ * Inert {@link SessionPolicy} — every navigation continues, login and
+ * logout do nothing.
+ *
+ * <p>Until 00.83.00 this was the resolver fallback; since 00.84.00 the
+ * fallback is the enforcing {@link TimeoutSessionPolicy#secureDefault(String)}
+ * (JS-SEC-065, CWE-1188). Register this policy explicitly to opt out of
+ * session-lifetime enforcement — the Vaadin {@code SessionLifetimeListener}
+ * reports that choice once at WARN.
  *
  * @param <U> subject type
  */

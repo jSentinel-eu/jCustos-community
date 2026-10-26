@@ -38,6 +38,7 @@ import eu.jsentinel.jcustos.policy.spi.ResourceResolverRegistry;
 import eu.jsentinel.jcustos.session.NoopSessionPolicy;
 import eu.jsentinel.jcustos.session.JCustosVersionStore;
 import eu.jsentinel.jcustos.session.SessionPolicy;
+import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 
 import java.util.Optional;
 import java.util.ServiceLoader;
@@ -88,6 +89,8 @@ public final class JCustosContext {
       new AtomicReference<>();
   private final AtomicReference<LoginAttemptPolicy> loginAttemptPolicyRef =
       new AtomicReference<>();
+  /** JS-SEC-065: the policy {@link #sessionPolicy()} created as its secure default, if any. */
+  private volatile SessionPolicy<?> defaultedSessionPolicy;
   private final AtomicReference<SessionPolicy<?>> sessionPolicyRef =
       new AtomicReference<>();
   private final AtomicReference<PasswordHasher> passwordHasherRef =
@@ -438,9 +441,9 @@ public final class JCustosContext {
   // ── SessionPolicy ──────────────────────────────────────────────
 
   /**
-   * Returns the registered {@link SessionPolicy}, or
-   * {@link NoopSessionPolicy#instance()} if no SPI implementation is
-   * configured. Like the audit and login-attempt accessors, this method
+   * Returns the registered {@link SessionPolicy}, or the secure default
+   * ({@link TimeoutSessionPolicy#secureDefault(String)}, JS-SEC-065) if no SPI
+   * implementation is configured. Like the audit and login-attempt accessors, this method
    * <strong>never</strong> throws — session policies are optional
    * infrastructure.
    *
@@ -458,10 +461,28 @@ public final class JCustosContext {
         SessionPolicy.class,
         ServiceLoader.load(SessionPolicy.class))
         .map(p -> (SessionPolicy<?>) p)
-        .orElseGet(NoopSessionPolicy::instance);
+        .orElse(null);
+    if (loaded == null) {
+      loaded = secureDefaultSessionPolicy();
+    }
 
     sessionPolicyRef.compareAndSet(null, loaded);
     return (SessionPolicy<U>) sessionPolicyRef.get();
+  }
+
+  /**
+   * JS-SEC-065 (CWE-1188): the resolver default is an enforcing
+   * {@link TimeoutSessionPolicy} — 30 min idle, 12 h absolute lifetime, rotation
+   * after login, login route from {@link #loginRouteName()} — not the inert
+   * {@link NoopSessionPolicy} it was until 00.83.00. {@link #findSessionPolicy()}
+   * still reports the default as "not configured", so bootstrap diagnostics can
+   * tell a default from a registration; registering {@link NoopSessionPolicy}
+   * explicitly remains the opt-out.
+   */
+  private SessionPolicy<?> secureDefaultSessionPolicy() {
+    SessionPolicy<?> policy = TimeoutSessionPolicy.secureDefault("/" + loginRouteName());
+    defaultedSessionPolicy = policy;
+    return policy;
   }
 
   /**
@@ -474,11 +495,9 @@ public final class JCustosContext {
   @SuppressWarnings("unchecked")
   public <U> Optional<SessionPolicy<U>> findSessionPolicy() {
     SessionPolicy<?> cached = sessionPolicyRef.get();
-    if (cached != null && !(cached instanceof NoopSessionPolicy<?>)) {
-      return Optional.of((SessionPolicy<U>) cached);
-    }
-    if (cached instanceof NoopSessionPolicy<?>) {
-      return Optional.empty();
+    if (cached != null) {
+      boolean configured = !(cached instanceof NoopSessionPolicy<?>) && cached != defaultedSessionPolicy;
+      return configured ? Optional.of((SessionPolicy<U>) cached) : Optional.empty();
     }
 
     Optional<SessionPolicy> loaded = findSingleService(
@@ -1095,6 +1114,7 @@ public final class JCustosContext {
     actionAuthServiceRef.set(null);
     loginAttemptPolicyRef.set(null);
     sessionPolicyRef.set(null);
+    defaultedSessionPolicy = null;
     passwordHasherRef.set(null);
     logoutServiceRef.set(null);
     policyRegistryRef.set(null);

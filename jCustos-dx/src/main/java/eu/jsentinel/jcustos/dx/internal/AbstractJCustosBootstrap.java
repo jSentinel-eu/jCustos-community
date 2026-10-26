@@ -818,16 +818,16 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
         && !session.timeoutConfigured()
         && !session.absoluteLifetimeConfigured();
     if (storeWithoutLifetime) {
-      Severity sev = switch (state.mode()) {
-        case STRICT, PRODUCTION -> Severity.ERROR;
-        default -> Severity.INFO;
-      };
-      warnings.add(new JCustosBootstrapWarning(sev, "sessions/no-timeout-policy",
+      // JS-SEC-065 (CWE-1188): since 00.84.00 the resolver default is an enforcing
+      // TimeoutSessionPolicy (30 min idle / 12 h absolute), so an unconfigured lifetime is no
+      // longer a silent no-op and no longer gates STRICT or PRODUCTION; the finding stays as
+      // INFO so the implicit choice is visible in the bootstrap report.
+      warnings.add(new JCustosBootstrapWarning(Severity.INFO, "sessions/no-timeout-policy",
           ".storeBacked(...) sessions are configured without .timeout(...) / "
-              + ".absoluteLifetime(...) / .policy(...) — sessions never expire.",
-          "Configure .timeout(Duration) and .absoluteLifetime(Duration) "
-              + "(TimeoutSessionPolicy defaults are 30 min idle / 12 h absolute), "
-              + "or supply a custom .policy(...)."));
+              + ".absoluteLifetime(...) / .policy(...) — the secure default applies "
+              + "(30 min idle, 12 h absolute, rotation after login).",
+          "Configure .timeout(Duration) and .absoluteLifetime(Duration) to choose your own "
+              + "limits, or supply a custom .policy(...)."));
     }
 
     // Policy: custom .policy(...) wins; otherwise construct TimeoutSessionPolicy
@@ -891,8 +891,10 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
     Duration idle = session.idleTimeout() != null ? session.idleTimeout() : defaults.idleTimeout();
     Duration absolute = session.absoluteLifetime() != null
         ? session.absoluteLifetime() : defaults.absoluteLifetime();
+    // JS-SEC-065: the login route follows the resolver, not the hardcoded default.
     TimeoutSessionPolicy.Config config = new TimeoutSessionPolicy.Config(
-        idle, absolute, defaults.rotateSessionAfterLogin(), defaults.loginRoute());
+        idle, absolute, defaults.rotateSessionAfterLogin(),
+        "/" + JCustosServiceResolver.loginRouteName());
     JCustosAuditService audit = JCustosServiceResolver.findJCustosAuditService()
         .orElseGet(NoopJCustosAuditService::new);
     return new TimeoutSessionPolicy<>(config, Clock.systemUTC(), audit);

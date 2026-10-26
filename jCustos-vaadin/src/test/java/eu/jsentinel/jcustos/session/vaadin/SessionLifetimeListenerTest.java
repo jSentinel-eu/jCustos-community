@@ -67,6 +67,14 @@ class SessionLifetimeListenerTest {
 
   private final RecordingAuditSink audit = new RecordingAuditSink();
 
+  /**
+   * Strong reference to the session bound by {@link #bindSession(Instant)}.
+   * {@code CurrentInstance} only holds a {@code WeakReference}; without this
+   * field a GC pause between binding and {@code beforeEnter} made
+   * {@code VaadinSession.getCurrent()} return {@code null} intermittently.
+   */
+  private InMemoryVaadinSession boundSession;
+
   @BeforeEach
   void resetState() {
     JCustosServiceResolver.resetAll();
@@ -80,6 +88,7 @@ class SessionLifetimeListenerTest {
     JCustosServiceResolver.resetAll();
     LoginListeners.reset();
     CurrentInstance.clearAll();
+    boundSession = null;
   }
 
   @Test
@@ -113,6 +122,42 @@ class SessionLifetimeListenerTest {
     assertEquals(later, session.getAttribute(SessionLifetimeListener.LAST_ACTIVITY_ATTRIBUTE));
     assertNull(event.forwardTarget);
     assertTrue(audit.events().isEmpty(), "active sessions must not emit SESSION_EXPIRED");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-065: with no registered policy the secure default expires an idle session")
+  void defaultPolicy_idleTimeout_expires() {
+    // The secure default runs on the system clock, so the session must be created relative to it:
+    // 31 minutes of inactivity trips the 30-minute idle timeout, well inside the 12-hour cap.
+    bindSession(Instant.now().minus(java.time.Duration.ofMinutes(31)));
+    SubjectStores.setSubjectStore(new InMemorySubjectStore());
+    SubjectStores.subjectStore().setCurrentSubject("alice", String.class);
+    LoginListeners.setLoginListener(new TestLoginListener());
+    JCustosServiceResolver.<String>setSubjectIdResolver(s -> SubjectId.of("resolved-" + s));
+    // no setSessionPolicy(...) — the resolver default must enforce the 30-minute idle timeout
+    SessionLifetimeListener listener = new SessionLifetimeListener(Clock.systemUTC());
+    RecordingEvent event = new RecordingEvent();
+    listener.beforeEnter(event);
+    assertTrue(SubjectStores.subjectStore().currentSubject(String.class).isEmpty(),
+        "the secure default must end the idle session");
+    assertSame(StubLoginView.class, event.forwardTarget);
+    assertTrue(audit.events().stream().anyMatch(e -> e instanceof SessionExpired ex
+        && "IdleTimeout".equals(ex.reason()) && "resolved-alice".equals(ex.subjectId())),
+        "SessionExpired(IdleTimeout) must be audited; got " + audit.events());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-065: with no registered policy a fresh session stays active")
+  void defaultPolicy_freshSession_active() {
+    bindSession(Instant.now().minusSeconds(60));
+    SubjectStores.setSubjectStore(new InMemorySubjectStore());
+    SubjectStores.subjectStore().setCurrentSubject("alice", String.class);
+    SessionLifetimeListener listener = new SessionLifetimeListener(Clock.systemUTC());
+    RecordingEvent event = new RecordingEvent();
+    listener.beforeEnter(event);
+    assertTrue(SubjectStores.subjectStore().currentSubject(String.class).isPresent());
+    assertNull(event.forwardTarget);
+    assertTrue(audit.events().isEmpty());
   }
 
   @Test
@@ -207,8 +252,9 @@ class SessionLifetimeListenerTest {
 
   // ── Helpers ───────────────────────────────────────────────────
 
-  private static InMemoryVaadinSession bindSession(Instant createdAt) {
+  private InMemoryVaadinSession bindSession(Instant createdAt) {
     InMemoryVaadinSession session = new InMemoryVaadinSession(createdAt);
+    boundSession = session;
     VaadinSession.setCurrent(session);
     return session;
   }

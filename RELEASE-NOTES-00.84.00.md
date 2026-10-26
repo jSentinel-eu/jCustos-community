@@ -127,3 +127,28 @@ sees the same answer. Scanner tests cover the fallback and the opt-out; the REST
 tests wire a class-annotated handler by `Method` and show 403 without the permission, the
 handler running with it, and a `@PublicRoute` method of the protected class staying public.
 
+## Session lifetime is enforced by default (R4, JS-SEC-065, CWE-1188)
+
+`SessionLifetimeListener` is registered for every Vaadin application and advertises idle
+and absolute-lifetime enforcement, but the resolver default behind it was
+`NoopSessionPolicy`: nothing was enforced unless the application registered a policy.
+00.79.40 added a warning (JS-SEC-035), 00.81.00 a bootstrap finding; the default itself
+stayed inert.
+
+`JCustosServiceResolver.sessionPolicy()` now falls back to
+`TimeoutSessionPolicy.secureDefault(...)`: 30 minutes idle, 12 hours absolute lifetime,
+rotation after login, login route from the resolver. `findSessionPolicy()` still reports
+the default as "not configured" so diagnostics can tell a default from a registration.
+`NoopSessionPolicy` remains available as the explicit opt-out, and the listener now says so
+in its one-time warning. The bootstrap finding `sessions/no-timeout-policy` is an INFO in
+every mode — an unconfigured lifetime is no longer a silent no-op and no longer gates
+STRICT — and the policy the DX bootstrap builds takes its login route from the resolver
+too.
+
+Migration: applications that registered a `TimeoutSessionPolicy` themselves see no change.
+Applications that registered nothing now end idle sessions after 30 minutes and every
+session after 12 hours; configure `.sessions(s -> s.timeout(...).absoluteLifetime(...))`
+or register a policy to choose other limits, or register `NoopSessionPolicy` to opt out.
+Verified: with no registered policy, a navigation 31 minutes after the last activity
+clears the subject, forwards to the login view and audits `SessionExpired(IdleTimeout)`.
+

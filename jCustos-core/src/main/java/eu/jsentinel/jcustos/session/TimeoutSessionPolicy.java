@@ -55,6 +55,13 @@ import java.util.Objects;
  *       {@link SessionInvalidated}.</li>
  * </ul>
  *
+ * <h2>Resolver default (JS-SEC-065, CWE-1188)</h2>
+ *
+ * Since 00.84.00 this policy with {@link Config#defaults(String)} is what
+ * {@code JCustosServiceResolver.sessionPolicy()} falls back to when no
+ * {@link SessionPolicy} is registered — idle and absolute lifetime are
+ * enforced out of the box. {@link NoopSessionPolicy} is the explicit opt-out.
+ *
  * @param <U> subject type
  */
 public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
@@ -107,8 +114,34 @@ public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
 
     /** Sensible defaults — 30 min idle, 12 h absolute, rotate after login, /login. */
     public static Config defaults() {
-      return new Config(Duration.ofMinutes(30), Duration.ofHours(12), true, "/login");
+      return defaults("/login");
     }
+
+    /**
+     * The secure defaults — 30 min idle, 12 h absolute, rotation after login —
+     * with an application-specific login route (JS-SEC-065).
+     *
+     * @param loginRoute non-blank route the {@code Invalidate} decisions carry
+     * @return the default configuration for that route
+     * @since 00.84.00
+     */
+    public static Config defaults(String loginRoute) {
+      return new Config(Duration.ofMinutes(30), Duration.ofHours(12), true, loginRoute);
+    }
+  }
+
+  /**
+   * The policy the resolver falls back to when no {@link SessionPolicy} is
+   * registered (JS-SEC-065, CWE-1188): {@link Config#defaults(String)} with the
+   * audit service resolved per event.
+   *
+   * @param loginRoute route for the {@code Invalidate} decisions
+   * @param <U>        subject type
+   * @return a fresh secure-default policy
+   * @since 00.84.00
+   */
+  public static <U> TimeoutSessionPolicy<U> secureDefault(String loginRoute) {
+    return new TimeoutSessionPolicy<>(Config.defaults(loginRoute), Clock.systemUTC(), null);
   }
 
   private final Config config;

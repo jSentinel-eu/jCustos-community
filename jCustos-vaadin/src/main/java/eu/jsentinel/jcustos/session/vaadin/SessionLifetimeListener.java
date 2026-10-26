@@ -146,15 +146,14 @@ public class SessionLifetimeListener
     SessionMetadata metadata = new SessionMetadata(subjectId, createdAt, lastActivity);
     SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
     if (policy instanceof NoopSessionPolicy && NOOP_POLICY_WARNED.compareAndSet(false, true)) {
-      // JS-SEC-035 (CWE-613): this listener is auto-registered and advertises idle /
-      // absolute-lifetime enforcement, but with the default NoopSessionPolicy the decision
-      // is always Active — no idle timeout and, critically, no absolute-lifetime cap is
-      // enforced (only the servlet container's idle timeout applies). Warn once (mirrors
-      // JS-SEC-027) so an integrator relying on jCustos for session lifetime registers a
-      // TimeoutSessionPolicy.
-      logger().warn("Session lifetime enforcement is inert: no SessionPolicy is registered, so "
-          + "SessionLifetimeListener enforces neither an idle timeout nor an absolute-lifetime cap "
-          + "(the servlet container's idle timeout still applies). Register a TimeoutSessionPolicy.");
+      // JS-SEC-035 (CWE-613) / JS-SEC-065 (CWE-1188): since 00.84.00 the resolver default is
+      // an enforcing TimeoutSessionPolicy, so a NoopSessionPolicy here is an explicit
+      // registration — the integrator opted out of idle and absolute-lifetime enforcement.
+      // Say so once (mirrors JS-SEC-027) so the choice is visible in the log.
+      logger().warn("Session lifetime enforcement is switched off: NoopSessionPolicy is registered "
+          + "explicitly, so SessionLifetimeListener enforces neither an idle timeout nor an "
+          + "absolute-lifetime cap (the servlet container's idle timeout still applies). Remove the "
+          + "registration to get the secure default (30 min idle, 12 h absolute).");
     }
     SessionPolicyDecision decision = policy.evaluate(metadata);
 

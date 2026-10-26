@@ -141,7 +141,7 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
   @DisplayName("JS-SEC-003: login rotates the session id even when the policy returns Continue (secure-by-default)")
   void rotatesEvenWhenPolicyReturnsContinue() {
     // Override the @BeforeEach RotatingPolicy with one that does NOT ask for
-    // invalidation — the behaviour of the resolver default, NoopSessionPolicy.
+    // invalidation — the behaviour of the pre-00.84.00 resolver default, NoopSessionPolicy.
     // Before JS-SEC-003 this left the pre-auth session id intact: a fixation
     // hole on the canonical login path.
     JCustosServiceResolver.setSessionPolicy(new NonRotatingPolicy(capturedContext));
@@ -222,7 +222,7 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
 
   /**
    * SessionPolicy that captures the {@code onLogin} context but returns
-   * {@link SessionDecision.Continue} — models the resolver default
+   * {@link SessionDecision.Continue} — models the pre-00.84.00 resolver default
    * ({@code NoopSessionPolicy}), which never asks for invalidation. Used to
    * prove JS-SEC-003 rotates the session id regardless of the decision.
    */
