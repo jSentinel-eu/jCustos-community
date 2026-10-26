@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.AccessDeniedException;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionMatcher;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 
@@ -49,6 +50,7 @@ public final class StaticActionAuthorizationService<U> implements ActionAuthoriz
 
   private final AuthorizationService<U> authorizationService;
   private final JCustosAuditService auditService;
+  private final SubjectIdResolver<U> subjectIdResolver;
 
   /**
    * Builds a service that resolves the {@link AuthorizationService} via
@@ -72,9 +74,26 @@ public final class StaticActionAuthorizationService<U> implements ActionAuthoriz
   public StaticActionAuthorizationService(
       AuthorizationService<U> authorizationService,
       JCustosAuditService auditService) {
+    this(authorizationService, auditService, null);
+  }
+
+  /**
+   * @param authorizationService source of the subject's permissions; non-null
+   * @param auditService         audit sink, or {@code null} to resolve from
+   *                             {@link JCustosServiceResolver} on each event
+   * @param subjectIdResolver    resolver for the audit subject id (JS-SEC-083), or
+   *                             {@code null} to use the one registered with
+   *                             {@link JCustosServiceResolver}
+   * @since 00.84.00
+   */
+  public StaticActionAuthorizationService(
+      AuthorizationService<U> authorizationService,
+      JCustosAuditService auditService,
+      SubjectIdResolver<U> subjectIdResolver) {
     this.authorizationService = Objects.requireNonNull(
         authorizationService, "authorizationService");
     this.auditService = auditService;
+    this.subjectIdResolver = subjectIdResolver;
   }
 
   @Override
@@ -106,13 +125,38 @@ public final class StaticActionAuthorizationService<U> implements ActionAuthoriz
         ? auditService
         : JCustosServiceResolver.securityAuditService();
     try {
-      String subjectId = subject == null ? null
-          : subject.getClass().getSimpleName()
-              + "@" + Integer.toHexString(System.identityHashCode(subject));
       sink.publish(new ActionDenied(
-          Instant.now(Clock.systemUTC()), subjectId, actionName));
+          Instant.now(Clock.systemUTC()), subjectIdOf(subject), actionName));
     } catch (RuntimeException auditFailure) {
       // never block the AccessDeniedException because the audit sink failed
     }
+  }
+
+  /**
+   * JS-SEC-083 (CWE-778): {@code ActionDenied} must correlate with the login and session
+   * events, which go through the {@link SubjectIdResolver} (JS-SEC-004); an identity hash
+   * changes per object and {@code toString()} is a PII source. The explicit resolver wins,
+   * then the registered one; without either (or with a blank result) the non-PII identity
+   * handle remains.
+   */
+  private String subjectIdOf(U subject) {
+    if (subject == null) {
+      return null;
+    }
+    SubjectIdResolver<U> resolver = subjectIdResolver != null
+        ? subjectIdResolver
+        : JCustosServiceResolver.<U>findSubjectIdResolver().orElse(null);
+    if (resolver != null) {
+      try {
+        String resolved = resolver.resolve(subject).value();
+        if (resolved != null && !resolved.isBlank()) {
+          return resolved;
+        }
+      } catch (RuntimeException ignored) {
+        // fall through to the identity handle
+      }
+    }
+    return subject.getClass().getSimpleName()
+        + "@" + Integer.toHexString(System.identityHashCode(subject));
   }
 }

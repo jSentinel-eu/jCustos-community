@@ -62,7 +62,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 | `PermissionAuthorizationService<U>` ⚠️ | core | — | Optionale Permission-API mit `HasPermissions` |
 | `AccessEvaluator<A>` | core | siehe § Evaluatoren | Annotation-basierte Vaadin-Access-Entscheidung |
 | `AuthorizationEvaluator<A>` | core | siehe § Evaluatoren | Adapter-neutrale Authorization-Entscheidung |
-| `ActionAuthorizationService<U>` | core | `StaticActionAuthorizationService` | Methoden-/Action-Level-Berechtigungen |
+| `ActionAuthorizationService<U>` | core | `StaticActionAuthorizationService` (seit **V00.84**, JS-SEC-083: optionaler dritter Konstruktorparameter `SubjectIdResolver<U>`; `ActionDenied.subjectId` kommt aus dem expliziten oder registrierten Resolver, nie aus Identity-Hash oder `toString()`) | Methoden-/Action-Level-Berechtigungen |
 | `SubjectStore` | core | siehe § Subject-Stores | Storage für das aktuelle Subject |
 | `LoginListener<U>` | vaadin | — | Vaadin-Login-Lifecycle-Hooks |
 
@@ -383,7 +383,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `VaadinSessionSubjectStore` | `SubjectStore`-Default — speichert Subject in `VaadinSession.getAttribute` |
 | `VaadinLogoutService<U>` | Vaadin-spezifischer `LogoutService` mit Page-Redirect / Session-Close / HTTP-Invalidate |
 | `VaadinLogoutGateway` / `DefaultVaadinLogoutGateway` | Thin Wrapper über `UI.getPage().setLocation`, `VaadinSession.close`, `WrappedSession.invalidate` |
-| `VaadinAccessContextFactory` | Baut `AccessContext` aus `BeforeEnterEvent` |
+| `VaadinAccessContextFactory` | Baut `AccessContext` aus `BeforeEnterEvent`; `subjectId` und `displayName` des `JCustosSubject` seit **V00.84** (JS-SEC-083) aus dem `SubjectIdResolver`, nie aus `toString()` (ohne Resolver: Identitäts-Handle) |
 | `VaadinAccessDecisionMapper` / `VaadinNavigationAccessDecisionMapper` | Mappen `AccessDecision` / `NavigationAccessDecision` auf Vaadin-Navigation |
 | `JCustosAnnotationScanner` | Scannt Class/Method/AnnotatedElement nach `@JCustosAnnotation`-Meta-Annotation (cached); erbt entlang der Superklassen-Kette **und seit V00.84 entlang der Interfaces** (JS-SEC-081, CWE-862) — die am stärksten abgeleitete Einschränkung gewinnt |
 

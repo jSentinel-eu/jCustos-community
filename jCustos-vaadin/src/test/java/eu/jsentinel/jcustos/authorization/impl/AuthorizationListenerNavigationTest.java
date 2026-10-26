@@ -23,6 +23,7 @@ import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;
 import eu.jsentinel.jcustos.test.InMemorySubjectStore;
@@ -41,6 +42,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -69,6 +71,24 @@ class AuthorizationListenerNavigationTest extends BrowserlessTest {
   void cleanUp() {
     JCustosServiceResolver.resetAll();
     SubjectStores.reset();
+  }
+
+  @Test
+  @DisplayName("JS-SEC-083: AccessGranted carries the resolver's subject id - no identity hash, no toString(), no credential")
+  void granted_subjectIdComesFromResolver() {
+    String subject = "carol:secret-password"; // toString() carries a credential
+    SubjectStores.subjectStore().setCurrentSubject(subject, String.class);
+    JCustosServiceResolver.<String>setSubjectIdResolver(s -> SubjectId.of("user-42"));
+
+    navigate(GrantedFixture.class);
+
+    AccessGranted event = audit.single(AccessGranted.class);
+    assertEquals("user-42", event.subjectId(), "the audit subject id must correlate with LoginSucceeded");
+    assertFalse(event.subjectId().contains("@"), "no identity-hash suffix");
+    for (var recorded : audit.events()) {
+      assertFalse(recorded.toString().contains("secret-password"),
+          "no audit field may carry the credential: " + recorded);
+    }
   }
 
   @Test

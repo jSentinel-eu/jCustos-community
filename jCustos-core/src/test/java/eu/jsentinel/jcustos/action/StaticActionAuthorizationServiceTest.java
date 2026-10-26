@@ -21,6 +21,8 @@ import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.AccessDeniedException;
+import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.permissions.HasPermissions;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
@@ -116,6 +118,36 @@ class StaticActionAuthorizationServiceTest {
     assertEquals(deleteUser.name(), event.action());
     assertTrue(event.subjectId().startsWith("String@"),
         "subject id must lead with the subject's class simple name");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-083: an explicit SubjectIdResolver supplies the audit subjectId")
+  void requireAllowed_auditsResolverSubjectId() {
+    RecordingAudit audit = new RecordingAudit();
+    StaticActionAuthorizationService<String> service = new StaticActionAuthorizationService<>(
+        permissionsFor("alice"), audit, s -> SubjectId.of("user-7"));
+
+    assertThrows(AccessDeniedException.class, () -> service.requireAllowed("alice", deleteUser));
+
+    ActionDenied event = (ActionDenied) audit.events.get(0);
+    assertEquals("user-7", event.subjectId(), "ActionDenied.subjectId must equal resolver.resolve(user).value()");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-083: without an explicit resolver the registered SubjectIdResolver is used")
+  void requireAllowed_auditsRegisteredResolverSubjectId() {
+    JCustosServiceResolver.<String>setSubjectIdResolver(s -> SubjectId.of("registered-" + s));
+    try {
+      RecordingAudit audit = new RecordingAudit();
+      StaticActionAuthorizationService<String> service =
+          new StaticActionAuthorizationService<>(permissionsFor("alice"), audit);
+
+      assertThrows(AccessDeniedException.class, () -> service.requireAllowed("alice", deleteUser));
+
+      assertEquals("registered-alice", ((ActionDenied) audit.events.get(0)).subjectId());
+    } finally {
+      JCustosServiceResolver.resetAll();
+    }
   }
 
   @Test

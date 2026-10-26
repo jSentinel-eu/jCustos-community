@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.authorization.impl;
 
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
@@ -40,6 +41,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -127,12 +129,30 @@ class VaadinAccessContextFactoryTest {
 
     assertTrue(snapshot.subjectId().startsWith("String@"),
         "subject id must lead with the subject's class simple name + '@'");
-    assertEquals("bob", snapshot.displayName(),
-        "displayName must default to subject.toString() when non-blank");
+    assertEquals(snapshot.subjectId(), snapshot.displayName(),
+        "JS-SEC-083: displayName must never be subject.toString(); without a resolver it is the identity handle");
   }
 
   @Test
-  @DisplayName("blank subject.toString() falls back to the subject id")
+  @DisplayName("JS-SEC-083: subjectId and displayName come from the SubjectIdResolver, never from toString()")
+  void resolverValueReplacesIdentityHashAndToString() {
+    InMemorySubjectStore store = new InMemorySubjectStore();
+    SubjectStores.setSubjectStore(store);
+    String subject = "carol:secret-password"; // toString() carries a credential
+    store.setCurrentSubject(subject, String.class);
+    StubAuthorizationService.put(subject, Set.of(), Set.of());
+    JCustosServiceResolver.<String>setSubjectIdResolver(s -> SubjectId.of("user-42"));
+
+    JCustosSubject snapshot = factory.create(event("/", AdminRoute.class)).subject().orElseThrow();
+
+    assertEquals("user-42", snapshot.subjectId(), "the resolver value correlates with LoginSucceeded");
+    assertEquals("user-42", snapshot.displayName(), "the display name is the resolver value, not toString()");
+    assertFalse(snapshot.subjectId().contains("@"), "no identity-hash suffix");
+    assertFalse(snapshot.displayName().contains("secret-password"), "no credential leaks into the context");
+  }
+
+  @Test
+  @DisplayName("without a resolver the displayName is the identity handle (blank toString() included)")
   void blankToStringFallsBackToId() {
     InMemorySubjectStore store = new InMemorySubjectStore();
     SubjectStores.setSubjectStore(store);

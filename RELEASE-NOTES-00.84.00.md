@@ -526,6 +526,28 @@ unit test shows that a 40-minute-old RPC stamp keeps a 45-minute-old session ali
 Browserless component events bypass the request pipeline, which is why the tests call the
 handler directly instead of clicking.
 
+## Navigation and action audit events carry the resolver's subject id, never an identity hash or `toString()` (ER16, JS-SEC-083, CWE-778, CWE-532)
+
+`VaadinAccessContextFactory` built the `JCustosSubject` of every navigation decision from
+`subject.getClass().getSimpleName() + "@" + identityHashCode` and used `subject.toString()` as the
+display name, and `StaticActionAuthorizationService` audited `ActionDenied` with the same identity
+handle. `AccessGranted`, `AccessDenied`, `StepUpChallenged` and `ActionDenied` therefore carried a
+value such as `DemoUser@3f2a1b` that changes per object instance and cannot be correlated with
+`LoginSucceeded` or `SessionExpired`, which already go through the `SubjectIdResolver`
+(JS-SEC-004). Worse, `toString()` — the PII source R019 closed elsewhere — flowed into the
+`AccessContext` of every evaluator as the display name.
+
+Both paths now derive the subject id from the registered `SubjectIdResolver`; the display name is
+the same value. Without a resolver (or with a blank result) the non-PII identity handle remains —
+`toString()` is never used. `StaticActionAuthorizationService` gained a third constructor argument
+for an explicit `SubjectIdResolver<U>`; the two-argument constructor keeps using the registered one.
+Verified with a registered resolver and a subject whose `toString()` carries a credential: the
+navigation context and the `AccessGranted` event carry the resolver value without an `@` suffix, no
+audit field contains the credential, and `ActionDenied.subjectId()` equals
+`resolver.resolve(user).value()` for both the explicit and the registered resolver. A shared facade
+for the four places that derive subject ids (session policy, lifetime listener, context factory,
+action service) is the subject of ER30.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

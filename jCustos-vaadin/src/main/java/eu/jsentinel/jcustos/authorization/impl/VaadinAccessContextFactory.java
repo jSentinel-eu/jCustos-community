@@ -20,6 +20,7 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
@@ -112,10 +113,32 @@ public final class VaadinAccessContextFactory {
       return Optional.empty();
     }
 
-    String subjectId = subject.getClass().getSimpleName() + "@"
+    String subjectId = subjectIdOf(subject);
+    return Optional.of(new JCustosSubject(subjectId, subjectId, roles, permissions));
+  }
+
+  /**
+   * JS-SEC-083 (CWE-778, CWE-532): the subject id of {@code AccessGranted} /
+   * {@code AccessDenied} / {@code StepUpChallenged} must correlate with
+   * {@code LoginSucceeded} and {@code SessionExpired}, which already go through the
+   * registered {@link SubjectIdResolver} (JS-SEC-004); an identity hash changes per
+   * object. The display name is the same value - never {@code subject.toString()},
+   * the PII source every evaluator would otherwise see in its {@code AccessContext}.
+   * Without a resolver (or with a blank result) the non-PII identity handle remains.
+   */
+  private static String subjectIdOf(Object subject) {
+    Optional<SubjectIdResolver<Object>> resolver = JCustosServiceResolver.findSubjectIdResolver();
+    if (resolver.isPresent()) {
+      try {
+        String resolved = resolver.get().resolve(subject).value();
+        if (resolved != null && !resolved.isBlank()) {
+          return resolved;
+        }
+      } catch (RuntimeException ignored) {
+        // fall through to the identity handle
+      }
+    }
+    return subject.getClass().getSimpleName() + "@"
         + Integer.toHexString(System.identityHashCode(subject));
-    String displayName = subject.toString();
-    if (displayName == null || displayName.isBlank()) displayName = subjectId;
-    return Optional.of(new JCustosSubject(subjectId, displayName, roles, permissions));
   }
 }
