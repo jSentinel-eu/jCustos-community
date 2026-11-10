@@ -239,6 +239,131 @@ class JCustosAnnotationScannerTest {
     assertTrue(scanner.scan(PlainMarkedView.class).isEmpty());
   }
 
+  // ── JS-SEC-114 (CWE-862, CWE-863): inherited and overriding methods ──────────
+
+  private static String roleOf(java.util.Optional<AnnotationAccessEvaluatorPair<Annotation>> result) {
+    assertTrue(result.isPresent(), "a restriction must apply");
+    return ((RequiresRole) result.get().annotation()).value()[0];
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: a method the handler class inherits takes the restriction of the handler class")
+  void inheritedMethod_takesTheRestrictionOfTheHandlerClass() throws NoSuchMethodException {
+    Method inherited = AdminHandlers.class.getMethod("deleteAll");
+    assertEquals(CrudHandlers.class, inherited.getDeclaringClass(),
+        "the premise: the Method names the base class, not the handler class");
+
+    assertTrue(scanner.scan(inherited).isEmpty(),
+        "scanned alone, the method only knows the base class - which carries nothing");
+    assertEquals("ADMIN", roleOf(scanner.scan(inherited, AdminHandlers.class)));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: the same inherited method is judged per handler class")
+  void inheritedMethod_isJudgedPerHandlerClass() throws NoSuchMethodException {
+    Method inherited = CrudHandlers.class.getMethod("deleteAll");
+
+    assertEquals("ADMIN", roleOf(scanner.scan(inherited, AdminHandlers.class)));
+    assertEquals("USER", roleOf(scanner.scan(inherited, UserHandlers.class)));
+    assertTrue(scanner.scan(inherited, CrudHandlers.class).isEmpty());
+    assertSame(scanner.scan(inherited, AdminHandlers.class), scanner.scan(inherited, AdminHandlers.class),
+        "results are cached per method and handler class");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: an override without an annotation keeps the restriction of the overridden method")
+  void overridingMethod_keepsTheRestrictionOfTheOverriddenMethod() throws NoSuchMethodException {
+    Method override = TenantOps.class.getMethod("purge");
+    assertEquals(TenantOps.class, override.getDeclaringClass());
+
+    assertEquals("ADMIN", roleOf(scanner.scan(override)));
+    assertEquals("ADMIN", roleOf(scanner.scan(override, TenantOps.class)));
+    assertEquals("ADMIN", roleOf(scanner.scan((java.lang.reflect.AnnotatedElement) override)));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: the base Method handed in with the handler class is resolved to the override that runs")
+  void baseMethodWithHandlerClass_isResolvedToTheOverride() throws NoSuchMethodException {
+    Method base = BaseOps.class.getMethod("audit");
+
+    assertEquals("ADMIN", roleOf(scanner.scan(base)), "the base declaration itself");
+    assertEquals("USER", roleOf(scanner.scan(base, RelabelledOps.class)),
+        "RelabelledOps overrides audit() with its own restriction - that one runs");
+    assertEquals(RelabelledOps.class,
+        JCustosAnnotationScanner.effectiveMethod(base, RelabelledOps.class).getDeclaringClass());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: the nearest overridden declaration wins")
+  void nearestOverriddenDeclarationWins() throws NoSuchMethodException {
+    assertEquals("USER", roleOf(scanner.scan(LeafOps.class.getMethod("audit"))),
+        "LeafOps overrides RelabelledOps#audit (USER), which overrides BaseOps#audit (ADMIN)");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: a restriction on an interface method reaches the implementing method")
+  void interfaceMethodRestriction_reachesTheImplementation() throws NoSuchMethodException {
+    assertEquals("ADMIN", roleOf(scanner.scan(ArchiveService.class.getMethod("wipe"))));
+    assertEquals("ADMIN", roleOf(scanner.scan(SubArchive.class.getDeclaredMethod("wipe"))),
+        "a method redeclared on a sub-interface keeps the restriction of the super-interface method");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: an inherited method that implements an interface of the handler class takes the interface restriction")
+  void inheritedImplementation_ofAnInterfaceTheHandlerClassNames() throws NoSuchMethodException {
+    Method inherited = PlainArchive.class.getMethod("wipe");
+
+    assertTrue(scanner.scan(inherited).isEmpty(), "PlainArchive knows nothing of the Archive interface");
+    assertEquals("ADMIN", roleOf(scanner.scan(inherited, ArchiveHandlers.class)),
+        "ArchiveHandlers extends PlainArchive implements Archive - wipe() implements Archive#wipe there");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: a generic handler method is matched through its bridge method")
+  void genericOverride_isMatchedThroughTheBridge() throws NoSuchMethodException {
+    assertEquals("ADMIN", roleOf(scanner.scan(TextSink.class.getMethod("accept", String.class))));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: the class restriction still comes before an overridden declaration (pre-00.84 results unchanged)")
+  void classRestrictionComesBeforeTheOverriddenDeclaration() throws NoSuchMethodException {
+    assertEquals("USER", roleOf(scanner.scan(UserScopedOps.class.getMethod("purge"))),
+        "UserScopedOps carries @RequiresRole(USER) and overrides purge() without an annotation");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: @PublicRoute on the overriding method is the opt-out; on the overridden one it is not inherited")
+  void publicRoute_countsOnTheMethodThatRuns() throws NoSuchMethodException {
+    assertTrue(scanner.scan(OpenedOps.class.getMethod("purge")).isEmpty(),
+        "the override says @PublicRoute - the explicit opt-out wins");
+    assertEquals("ADMIN", roleOf(scanner.scan(ReclosedOps.class.getMethod("purge"))),
+        "ReclosedOps overrides the @PublicRoute override without an annotation: "
+            + "the opt-out is not inherited, the restriction further up applies");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: static and private methods take part in no override")
+  void staticAndPrivateMethods_areNotOverrides() throws NoSuchMethodException {
+    assertTrue(scanner.scan(HidingOps.class.getDeclaredMethod("helper")).isEmpty(),
+        "a static method hides, it does not override");
+    assertTrue(scanner.scan(HidingOps.class.getDeclaredMethod("internal")).isEmpty(),
+        "a private method of the same name in the base class is not overridden");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: a handler class that does not inherit the method is a wiring error, not 'no restriction'")
+  void unrelatedHandlerClass_isRefused() throws NoSuchMethodException {
+    Method method = CrudHandlers.class.getMethod("deleteAll");
+    assertThrows(IllegalArgumentException.class, () -> scanner.scan(method, TenantOps.class));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: more than one restriction on an overridden declaration is still an error")
+  void twoRestrictionsOnTheOverriddenDeclaration_throw() throws NoSuchMethodException {
+    Method override = DualOverride.class.getMethod("purge");
+    assertThrows(IllegalStateException.class, () -> scanner.scan(override));
+  }
+
   // ── Test fixtures ─────────────────────────────────────────────
 
   @Retention(RetentionPolicy.RUNTIME)
@@ -392,5 +517,137 @@ class JCustosAnnotationScannerTest {
 
   @PlainMarker
   static class PlainMarkedView {
+  }
+
+  // JS-SEC-114: inherited and overriding handler methods.
+
+  /** Shared CRUD plumbing, no annotation of its own. */
+  public static class CrudHandlers {
+    public void deleteAll() {
+    }
+  }
+
+  @RequiresRole("ADMIN")
+  public static class AdminHandlers extends CrudHandlers {
+    public void own() {
+    }
+  }
+
+  @RequiresRole("USER")
+  public static class UserHandlers extends CrudHandlers {
+  }
+
+  public static class BaseOps {
+    @RequiresRole("ADMIN")
+    public void purge() {
+    }
+
+    @RequiresRole("ADMIN")
+    public void audit() {
+    }
+
+    public static void helper() {
+    }
+
+    @RequiresRole("ADMIN")
+    @SuppressWarnings("unused")
+    private void internal() {
+    }
+  }
+
+  public static class TenantOps extends BaseOps {
+    @Override
+    public void purge() {
+    }
+  }
+
+  public static class RelabelledOps extends BaseOps {
+    @Override
+    @RequiresRole("USER")
+    public void audit() {
+    }
+  }
+
+  public static class LeafOps extends RelabelledOps {
+    @Override
+    public void audit() {
+    }
+  }
+
+  @RequiresRole("USER")
+  public static class UserScopedOps extends BaseOps {
+    @Override
+    public void purge() {
+    }
+  }
+
+  public static class OpenedOps extends BaseOps {
+    @Override
+    @PublicRoute
+    public void purge() {
+    }
+  }
+
+  public static class ReclosedOps extends OpenedOps {
+    @Override
+    public void purge() {
+    }
+  }
+
+  public static class HidingOps extends BaseOps {
+    public static void helper() {
+    }
+
+    @SuppressWarnings("unused")
+    void internal() {
+    }
+  }
+
+  public interface Archive {
+    @RequiresRole("ADMIN")
+    void wipe();
+  }
+
+  public interface SubArchive extends Archive {
+    @Override
+    void wipe();
+  }
+
+  public static class ArchiveService implements Archive {
+    @Override
+    public void wipe() {
+    }
+  }
+
+  public static class PlainArchive {
+    public void wipe() {
+    }
+  }
+
+  public static class ArchiveHandlers extends PlainArchive implements Archive {
+  }
+
+  public interface Sink<T> {
+    @RequiresRole("ADMIN")
+    void accept(T value);
+  }
+
+  public static class TextSink implements Sink<String> {
+    @Override
+    public void accept(String value) {
+    }
+  }
+
+  public static class DualBase {
+    @StubRestriction
+    @AnotherRestriction
+    public void purge() {
+    }
+  }
+
+  public static class DualOverride extends DualBase {
+    @Override
+    public void purge() {
+    }
   }
 }

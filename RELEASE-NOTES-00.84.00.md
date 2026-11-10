@@ -1291,6 +1291,48 @@ audience, or of unknown audience, is not forwarded to a declared one. **Consumer
 with `.jwt(...)` and the stock filter get the known audience without a change, at the cost of one
 more validation per request; a resolver that binds the validated token itself avoids it.
 
+## A handler method that is inherited or overridden keeps its restriction (SA14, JS-SEC-114, CWE-862, CWE-863)
+
+`RestAuthorizationFilter` receives a handler as a `Method`, and a `Method` names the class that
+declares it. For `@RequiresRole("ADMIN") class AdminHandlers extends CrudHandlers`,
+`AdminHandlers.class.getMethod("deleteAll")` is `CrudHandlers#deleteAll`: the scanner looked at the
+base class, found nothing, and under allow-by-omission the endpoint was served to everybody, while
+`ClassScanningRestHandlerDiscovery` reported the handler class as protected. A method that overrode
+a restricted method without repeating the annotation lost the restriction in the same way. The
+filter now has overloads that take the handler class, `authorizeAndHandle(request, response,
+handler, method, handlerClass)`, and `JCustosAnnotationScanner.scan(Method, Class)` resolves the
+method as it runs on that class: the restriction on the method, otherwise the restriction of the
+handler class, otherwise the restriction on a declaration the method overrides or implements.
+`@PublicRoute` remains the opt-out and is not inherited by an override.
+
+The discovery walks every public method a handler class has, inherited ones included, and asks the
+filter's own `isOpenByOmission` for the verdict, so start-up and run time decide with the same code.
+**Consumers:** wire handler methods with the handler-class overload — the overloads without it
+cannot see the handler class of an inherited method. An un-annotated override of a restricted method
+is now restricted in every adapter, `SecuredProxy` and `@Secured` wrappers included; a restriction
+on the handler class takes precedence over one on an overridden declaration. Under deny-by-default
+the discovery also reports unprotected public methods a handler class inherits.
+
+## A revoked session stops working over REST (SA31, JS-SEC-131, CWE-613)
+
+Nothing on the REST request path read the `SessionStore`: a session whose record an administrator
+had revoked was served until its token expired. With a store registered — `.sessions(s ->
+s.storeBacked(...))` on `RestSecurity.bootstrap()`, or `RestSessionRevocation.useSessionStore(...)`
+— and a resolver that implements the new `RestSubjectResolver.resolveSessionId`,
+`RestAuthenticationFilter` and `RestAuthorizationFilter` look up the record before the handler runs.
+A record with the status `REVOKED`, or a record that was seen on an earlier request and is gone,
+ends the session: the request is answered as unauthenticated through the configured decision mapper
+(401, `WWW-Authenticate`, problem JSON where configured), `SessionInvalidated` with the reason
+`Revoked` is audited, and the handler does not run. As in the Vaadin adapter, `EXPIRED` alone does
+not end a session, a store failure is logged and the request proceeds, and the check never writes
+the store.
+
+**Consumers:** nothing changes without a store or without `resolveSessionId`. Record sessions under
+a non-secret key such as `SessionRef.of(token)`, never under the token. The memory of seen records
+is per node and holds 10 000 sessions; deployments with several nodes revoke by status or switch on
+`RestSessionRevocation.requireRecord(true)`, which refuses every session id without a record.
+`.storeBacked(...)` on a REST bootstrap is no longer reported as `rest/session-store-unused`.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

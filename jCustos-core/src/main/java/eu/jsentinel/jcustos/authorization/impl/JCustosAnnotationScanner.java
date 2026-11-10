@@ -22,10 +22,16 @@ import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -41,7 +47,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * restriction only, however it is written; a second one raises
  * {@link IllegalStateException}.
  * <p>
- * Results are cached per class. This class is Vaadin-free and can be
+ * <strong>Methods (JS-SEC-070, JS-SEC-114).</strong> The restriction of a method is
+ * looked up in this order, and the first hit wins:
+ * <ol>
+ *   <li>the restriction written on the method that runs;</li>
+ *   <li>{@link PublicRoute} on that method - the explicit opt-out, the result is
+ *       empty;</li>
+ *   <li>the restriction of the class the method is invoked on, as
+ *       {@link #scan(Class)} resolves it;</li>
+ *   <li>the restriction written on a declaration the method overrides or
+ *       implements, in a superclass or an interface, the nearest one first.</li>
+ * </ol>
+ * "The class the method is invoked on" is the declaring class for
+ * {@link #scan(Method)}. That is wrong for a method a handler class merely
+ * <em>inherits</em>: {@code AdminHandlers.class.getMethod("deleteAll")} yields a
+ * {@code Method} of the base class, and the {@code Method} does not remember
+ * {@code AdminHandlers}. Callers that know the class pass it to
+ * {@link #scan(Method, Class)}.
+ * <p>
+ * Results are cached per element. This class is Vaadin-free and can be
  * unit-tested independently.
  */
 public final class JCustosAnnotationScanner {
@@ -52,6 +76,14 @@ public final class JCustosAnnotationScanner {
 
   private final Map<AnnotatedElement, Optional<AnnotationAccessEvaluatorPair<Annotation>>> cache =
       new ConcurrentHashMap<>();
+
+  /** Results of {@link #scan(Method, Class)}; the pair of both is the key (JS-SEC-114). */
+  private final Map<MethodOnClass, Optional<AnnotationAccessEvaluatorPair<Annotation>>> methodCache =
+      new ConcurrentHashMap<>();
+
+  /** Cache key of {@link #scan(Method, Class)}. */
+  private record MethodOnClass(Method method, Class<?> handlerClass) {
+  }
 
   /**
    * Scans the given class for a restriction annotation and returns the
@@ -69,7 +101,9 @@ public final class JCustosAnnotationScanner {
   /**
    * Scans the given method for a restriction annotation and returns the
    * annotation together with the evaluator class declared via
-   * {@link JCustosAnnotation}.
+   * {@link JCustosAnnotation}. The method is taken to be invoked on its declaring
+   * class; see the class description for the lookup order and
+   * {@link #scan(Method, Class)} for methods a class inherits.
    *
    * @param method the method to scan
    * @return the pair, or empty if no restriction annotation is present
@@ -77,6 +111,105 @@ public final class JCustosAnnotationScanner {
    */
   public Optional<AnnotationAccessEvaluatorPair<Annotation>> scan(Method method) {
     return scan((AnnotatedElement) method);
+  }
+
+  /**
+   * Scans a method as it is invoked on {@code handlerClass} (JS-SEC-114, CWE-862).
+   * <p>
+   * A {@code Method} obtained through {@code handlerClass.getMethod(...)} belongs to the
+   * class that declares it. For an inherited method that is a base class, and
+   * {@link #scan(Method)} then never sees the restriction of the class the request is
+   * actually served by: {@code @RequiresRole("ADMIN") class AdminHandlers extends
+   * CrudHandlers} left {@code CrudHandlers#deleteAll} open to everybody. This overload
+   * resolves the method that runs on {@code handlerClass} - the override, if the class
+   * or one of its superclasses has one - and falls back to the restriction of
+   * {@code handlerClass} itself. The lookup order is the one in the class description.
+   *
+   * @param method       the handler method, declared by {@code handlerClass} or by one of
+   *                     its supertypes; non-null
+   * @param handlerClass the class whose instance serves the call; non-null
+   * @return the pair, or empty if no restriction applies
+   * @throws IllegalArgumentException if {@code handlerClass} is not a subtype of the
+   *                                  class that declares {@code method}
+   * @throws IllegalStateException    if more than one restriction annotation is found on
+   *                                  one element
+   * @since 00.84.00
+   */
+  public Optional<AnnotationAccessEvaluatorPair<Annotation>> scan(Method method, Class<?> handlerClass) {
+    Objects.requireNonNull(method, "method must not be null");
+    Objects.requireNonNull(handlerClass, "handlerClass must not be null");
+    if (!method.getDeclaringClass().isAssignableFrom(handlerClass)) {
+      // A wiring error, and one that must not be answered with "no restriction".
+      throw new IllegalArgumentException(handlerClass.getName() + " does not inherit "
+          + method.getDeclaringClass().getName() + "#" + method.getName());
+    }
+    return methodCache.computeIfAbsent(
+        new MethodOnClass(method, handlerClass),
+        key -> doScanMethod(effectiveMethod(key.method(), key.handlerClass()), key.handlerClass()));
+  }
+
+  /**
+   * The declaration that applies when {@code method} is invoked on an instance of
+   * {@code handlerClass}: the most derived declaration with the same signature in the
+   * superclass chain of {@code handlerClass}; for a method no class in that chain
+   * declares (an interface method, a default method), the most derived redeclaration in
+   * the interfaces of {@code handlerClass}; otherwise {@code method} itself.
+   *
+   * @param method       the method as the caller obtained it; non-null
+   * @param handlerClass the class whose instance serves the call; non-null
+   * @return the declaration that applies, never {@code null}
+   * @since 00.84.00
+   */
+  public static Method effectiveMethod(Method method, Class<?> handlerClass) {
+    Objects.requireNonNull(method, "method must not be null");
+    Objects.requireNonNull(handlerClass, "handlerClass must not be null");
+    if (!isOverridable(method)) {
+      return method;
+    }
+    for (Class<?> type = handlerClass; type != null && type != Object.class; type = type.getSuperclass()) {
+      if (type == method.getDeclaringClass()) {
+        return method;
+      }
+      if (type.isInterface()) {
+        break;
+      }
+      Method redeclared = declaredWithSignature(type, method.getName(), method.getParameterTypes());
+      if (redeclared != null && isOverridable(redeclared)) {
+        return redeclared;
+      }
+    }
+    Method mostDerived = method;
+    for (Class<?> implemented : interfacesOf(handlerClass)) {
+      Class<?> current = mostDerived.getDeclaringClass();
+      if (implemented == current || !current.isAssignableFrom(implemented)) {
+        continue;
+      }
+      Method redeclared = declaredWithSignature(implemented, method.getName(), method.getParameterTypes());
+      if (redeclared != null && isOverridable(redeclared)) {
+        mostDerived = redeclared;
+      }
+    }
+    return mostDerived;
+  }
+
+  /** Every interface {@code type} is or implements, directly or through a supertype. */
+  private static Set<Class<?>> interfacesOf(Class<?> type) {
+    Set<Class<?>> interfaces = new LinkedHashSet<>();
+    collectInterfaces(type, interfaces);
+    return interfaces;
+  }
+
+  private static void collectInterfaces(Class<?> type, Set<Class<?>> interfaces) {
+    if (type == null) {
+      return;
+    }
+    if (type.isInterface() && !interfaces.add(type)) {
+      return;
+    }
+    collectInterfaces(type.getSuperclass(), interfaces);
+    for (Class<?> implemented : type.getInterfaces()) {
+      collectInterfaces(implemented, interfaces);
+    }
   }
 
   /**
@@ -112,10 +245,7 @@ public final class JCustosAnnotationScanner {
     // allow-by-omission while the start-up check reported it as protected. An explicit
     // @PublicRoute on the method is the opt-out and wins over the class default.
     if (element instanceof Method method) {
-      if (method.isAnnotationPresent(PublicRoute.class)) {
-        return Optional.empty();
-      }
-      return doScan(method.getDeclaringClass());
+      return afterOwnRestriction(method, method.getDeclaringClass());
     }
     if (element instanceof Class<?> clazz) {
       Class<?> superClass = clazz.getSuperclass();
@@ -137,6 +267,153 @@ public final class JCustosAnnotationScanner {
       }
     }
     return Optional.empty();
+  }
+
+  /** {@link #scan(Method, Class)} for a method that is already the one that runs. */
+  private Optional<AnnotationAccessEvaluatorPair<Annotation>> doScanMethod(Method method, Class<?> handlerClass) {
+    Optional<AnnotationAccessEvaluatorPair<Annotation>> declared = scanDeclared(method);
+    if (declared.isPresent()) {
+      return declared;
+    }
+    return afterOwnRestriction(method, handlerClass);
+  }
+
+  /**
+   * Steps two to four of the method lookup, for a method without a restriction of its own.
+   * <p>
+   * JS-SEC-114 (CWE-862, CWE-863): the last step is new. A method that overrides or
+   * implements a restricted declaration without repeating the annotation used to scan as
+   * unrestricted whenever its class carried no restriction either - annotations on methods
+   * are not inherited in Java - so {@code TenantOps#purge}, overriding
+   * {@code @RequiresRole("ADMIN") BaseOps#purge}, was served to everybody. The step comes
+   * after the class restriction on purpose: every lookup that found a restriction before
+   * 00.84.00 finds the same one now, and only a result that used to be empty can change.
+   * {@code @PublicRoute} on an overridden declaration is not inherited; the opt-out has to
+   * be written on the method that runs.
+   */
+  private Optional<AnnotationAccessEvaluatorPair<Annotation>> afterOwnRestriction(
+      Method method, Class<?> handlerClass) {
+    if (method.isAnnotationPresent(PublicRoute.class)) {
+      return Optional.empty();
+    }
+    Optional<AnnotationAccessEvaluatorPair<Annotation>> fromClass = doScan(handlerClass);
+    if (fromClass.isPresent()) {
+      return fromClass;
+    }
+    return scanOverridden(method, handlerClass);
+  }
+
+  /**
+   * Looks for a restriction on the declarations {@code method} overrides or implements
+   * when it runs on {@code handlerClass}. The walk starts at {@code handlerClass}, not at
+   * the class that declares the method: a method inherited from a base class may implement
+   * an interface only the handler class names. The order is the one {@link #doScan} uses
+   * for classes - the type itself, the superclass chain, then the interfaces - and the
+   * first declaration that carries a restriction wins.
+   */
+  private Optional<AnnotationAccessEvaluatorPair<Annotation>> scanOverridden(
+      Method method, Class<?> handlerClass) {
+    if (!isOverridable(method)) {
+      return Optional.empty();
+    }
+    List<Class<?>[]> signatures = new ArrayList<>();
+    signatures.add(method.getParameterTypes());
+    addBridgeSignatures(method.getDeclaringClass(), method.getName(), signatures);
+    return scanOverriddenIn(handlerClass, method.getName(), signatures, new HashSet<>());
+  }
+
+  private Optional<AnnotationAccessEvaluatorPair<Annotation>> scanOverriddenIn(
+      Class<?> type, String name, List<Class<?>[]> signatures, Set<Class<?>> visited) {
+    if (type == null || type == Object.class || !visited.add(type)) {
+      return Optional.empty();
+    }
+    boolean declaresIt = false;
+    for (Class<?>[] signature : signatures) {
+      Method declared = declaredWithSignature(type, name, signature);
+      if (declared == null || !isOverridable(declared)) {
+        continue;
+      }
+      Optional<AnnotationAccessEvaluatorPair<Annotation>> restriction = scanDeclared(declared);
+      if (restriction.isPresent()) {
+        return restriction;
+      }
+      declaresIt = true;
+    }
+    List<Class<?>[]> known = signatures;
+    if (declaresIt) {
+      known = new ArrayList<>(signatures);
+      addBridgeSignatures(type, name, known);
+    }
+    Optional<AnnotationAccessEvaluatorPair<Annotation>> fromSuperclass =
+        scanOverriddenIn(type.getSuperclass(), name, known, visited);
+    if (fromSuperclass.isPresent()) {
+      return fromSuperclass;
+    }
+    for (Class<?> implemented : type.getInterfaces()) {
+      Optional<AnnotationAccessEvaluatorPair<Annotation>> fromInterface =
+          scanOverriddenIn(implemented, name, known, visited);
+      if (fromInterface.isPresent()) {
+        return fromInterface;
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * A method that implements a generic declaration has other parameter types than the
+   * declaration it overrides ({@code handle(String)} against {@code handle(T)}, erased to
+   * {@code handle(Object)}). The compiler records the link as a bridge method in the same
+   * class; its parameter types are the signature to look for further up.
+   */
+  private static void addBridgeSignatures(Class<?> type, String name, List<Class<?>[]> signatures) {
+    for (Method candidate : type.getDeclaredMethods()) {
+      if (!candidate.isBridge() || !candidate.getName().equals(name)) {
+        continue;
+      }
+      Class<?>[] bridged = candidate.getParameterTypes();
+      boolean alreadyKnown = false;
+      boolean bridgesKnown = false;
+      for (Class<?>[] signature : signatures) {
+        alreadyKnown |= Arrays.equals(signature, bridged);
+        bridgesKnown |= accepts(bridged, signature);
+      }
+      if (bridgesKnown && !alreadyKnown) {
+        signatures.add(bridged);
+      }
+    }
+  }
+
+  /** @return whether every parameter type of {@code wider} accepts the one of {@code narrower} */
+  private static boolean accepts(Class<?>[] wider, Class<?>[] narrower) {
+    if (wider.length != narrower.length) {
+      return false;
+    }
+    for (int i = 0; i < wider.length; i++) {
+      if (!wider[i].isAssignableFrom(narrower[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static Method declaredWithSignature(Class<?> type, String name, Class<?>[] parameterTypes) {
+    Method bridge = null;
+    for (Method candidate : type.getDeclaredMethods()) {
+      if (candidate.getName().equals(name)
+          && Arrays.equals(candidate.getParameterTypes(), parameterTypes)) {
+        if (!candidate.isBridge()) {
+          return candidate;
+        }
+        bridge = candidate;
+      }
+    }
+    return bridge;
+  }
+
+  /** Static and private methods are neither overridden nor do they override anything. */
+  private static boolean isOverridable(Method method) {
+    int modifiers = method.getModifiers();
+    return !Modifier.isStatic(modifiers) && !Modifier.isPrivate(modifiers);
   }
 
   private Optional<AnnotationAccessEvaluatorPair<Annotation>> scanDeclared(AnnotatedElement element) {

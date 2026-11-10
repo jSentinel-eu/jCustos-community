@@ -20,7 +20,9 @@ import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
+import eu.jsentinel.jcustos.rest.RestSessionRevocation;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
+import eu.jsentinel.jcustos.session.SessionStore;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,6 +38,9 @@ import eu.jsentinel.jcustos.dx.rest.handlers.RestHandlerDiscovery;
 final class RestJCustosBootstrapImpl
     extends AbstractJCustosBootstrap<RestJCustosBootstrap>
     implements RestJCustosBootstrap {
+
+  /** Finding the shared base records for {@code .storeBacked(...)} on a REST bootstrap. */
+  private static final String SESSION_STORE_UNUSED = "rest/session-store-unused";
 
   private RestSubjectResolver subjectResolver;
   private RestHandlerDiscovery handlerDiscovery;
@@ -147,6 +152,27 @@ final class RestJCustosBootstrapImpl
                 + "if it is meant to be reachable without a subject.")));
   }
 
+  /**
+   * JS-SEC-131 (CWE-613): hands the store configured through
+   * {@code .sessions(s -> s.storeBacked(...))} to the REST filters, which refuse a request
+   * whose session record was revoked. Until 00.84.00 REST did not read the store at all
+   * and the shared base reported it as {@code rest/session-store-unused}; that finding is
+   * no longer true and is taken out again. Without a configured store nothing is touched:
+   * an application may have registered its store with {@link RestSessionRevocation}
+   * itself.
+   */
+  private void publishSessionStore(List<RegisteredJCustosService> services,
+                                   List<JCustosBootstrapWarning> warnings) {
+    SessionStore sessionStore = state.sessionState().sessionStore();
+    if (sessionStore == null) {
+      return;
+    }
+    RestSessionRevocation.useSessionStore(sessionStore);
+    warnings.removeIf(warning -> SESSION_STORE_UNUSED.equals(warning.code()));
+    services.add(new RegisteredJCustosService(
+        SessionStore.class, sessionStore.getClass(), "bootstrap-explicit", false));
+  }
+
   @Override
   public JCustosRuntime install() {
     if (installed) {
@@ -231,8 +257,10 @@ final class RestJCustosBootstrapImpl
 
     // R05-Rest (V00.76.10): the shared per-concern sub-builder consumption is
     // hoisted into the base. REST symmetry is preserved inside the applyX
-    // methods (e.g. .storeBacked(...) emits rest/session-store-unused INFO).
+    // methods.
     applyCommonConfiguration(AdapterKind.REST, services, warnings);
+
+    publishSessionStore(services, warnings);
 
     // V00.74 (A2.2): publish CORS configuration when configured.
     if (corsConfiguration != null) {

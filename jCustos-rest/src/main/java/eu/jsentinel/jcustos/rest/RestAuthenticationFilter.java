@@ -47,6 +47,10 @@ import java.util.Optional;
  * {@code Unauthenticated:no-subject}, an expired session a
  * {@link SessionExpired}. The handler never runs on a refusal, whatever the
  * mapper returns.
+ * <p>
+ * JS-SEC-131 (CWE-613): when a {@code SessionStore} is registered with
+ * {@link RestSessionRevocation}, a request whose session record was revoked is
+ * refused in the same way, with a {@code SessionInvalidated} event.
  */
 public final class RestAuthenticationFilter {
 
@@ -65,6 +69,13 @@ public final class RestAuthenticationFilter {
       auditDenied(request, "Unauthenticated:no-subject");
       RestDecisionContext.mapperOrDefault()
           .apply(AuthorizationDecision.unauthenticated("no-subject"), response);
+      return;
+    }
+    // JS-SEC-131 (CWE-613): a session whose record was revoked is refused before anything
+    // else is looked at. A no-op unless a SessionStore is registered and the resolver
+    // reports a session id; RestSessionRevocation wrote the 401 and the audit event.
+    if (RestSessionRevocation.refuseIfRevoked(
+        subjectResolver, request, response, subject.get(), null, null)) {
       return;
     }
     Optional<SessionMetadata> metadata = subjectResolver.resolveSessionMetadata(request);

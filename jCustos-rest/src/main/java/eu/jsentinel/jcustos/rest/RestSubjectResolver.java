@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.rest;
 
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.session.SessionId;
 import eu.jsentinel.jcustos.session.SessionMetadata;
 
 import java.util.Optional;
@@ -69,6 +70,33 @@ public interface RestSubjectResolver {
    *         doesn't track per-session versions
    */
   default Optional<RestJCustosVersionContext> resolveJCustosVersionContext(RestRequest request) {
+    return Optional.empty();
+  }
+
+  /**
+   * Resolves the key under which the session of this request is recorded in the
+   * {@link eu.jsentinel.jcustos.session.SessionStore} (JS-SEC-131, CWE-613).
+   * <p>
+   * The default returns {@link Optional#empty()} so existing implementations keep
+   * working - the revocation check of {@link RestSessionRevocation} then passes every
+   * request. Override this when the application saves a
+   * {@link eu.jsentinel.jcustos.session.SessionRecord} per login and a revoked record is
+   * to end the session: return the {@link SessionId} the record was saved under.
+   * <p>
+   * JS-SEC-117 (CWE-522): the id is a key, and it ends up in a store that administrators
+   * list. Record a session under a non-secret identifier - a session row id, a token id
+   * ({@code jti}), or {@code SessionRef.of(token)} - <strong>never under the bearer token
+   * itself</strong>.
+   * <p>
+   * The method is only called while a store is registered with
+   * {@link RestSessionRevocation#useSessionStore}.
+   *
+   * @param request request
+   * @return the session id of the request, or empty when the request has no recorded
+   *         session
+   * @since 00.84.00
+   */
+  default Optional<SessionId> resolveSessionId(RestRequest request) {
     return Optional.empty();
   }
 }

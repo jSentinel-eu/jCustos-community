@@ -27,6 +27,7 @@ import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationEvaluator;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.authorization.impl.AnnotationAccessEvaluatorPair;
 import eu.jsentinel.jcustos.authorization.impl.JCustosAnnotationScanner;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.session.SessionMetadata;
@@ -41,11 +42,31 @@ import java.time.Instant;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * Authorizes a REST request before the protected handler is executed.
+ *
+ * <p><strong>Which overload (JS-SEC-114, CWE-862).</strong> A handler method is best
+ * passed together with the class that serves it -
+ * {@link #authorizeAndHandle(RestRequest, RestResponse, RestHandler, Method, Class)}. A
+ * {@link Method} alone names the class that <em>declares</em> it; for a method the
+ * handler class inherits that is a base class, and the restriction on the handler class
+ * is then invisible: with {@code @RequiresRole("ADMIN") class AdminHandlers extends
+ * CrudHandlers}, {@code AdminHandlers.class.getMethod("deleteAll")} is
+ * {@code CrudHandlers#deleteAll}, and the overloads that take an
+ * {@link AnnotatedElement} find no restriction for it. They remain correct for a class
+ * and for a method that is declared by the handler class itself.
+ *
+ * <p>JS-SEC-131 (CWE-613): when a {@code SessionStore} is registered with
+ * {@link RestSessionRevocation}, a request to a restricted handler whose session record
+ * was revoked is answered as unauthenticated and audited with {@code SessionInvalidated};
+ * the handler does not run.
  */
 public final class RestAuthorizationFilter {
+
+  /** Scanner behind {@link #isOpenByOmission(Method, Class)}; scan results are cached. */
+  private static final JCustosAnnotationScanner SHARED_SCANNER = new JCustosAnnotationScanner();
 
   private final RestSubjectResolver subjectResolver;
   private final JCustosAnnotationScanner scanner;
@@ -151,7 +172,9 @@ public final class RestAuthorizationFilter {
    * @param request        request
    * @param response       response
    * @param handler        protected handler
-   * @param securedElement method or class carrying a security annotation
+   * @param securedElement method or class carrying a security annotation; for a method
+   *                       the handler class inherits, use the overload that also takes
+   *                       the handler class (JS-SEC-114)
    * @param operation      operation name
    * @param attributes     additional attributes
    */
@@ -162,12 +185,115 @@ public final class RestAuthorizationFilter {
       AnnotatedElement securedElement,
       String operation,
       Map<String, Object> attributes) {
-    var pair = scanner.scan(securedElement);
+    authorize(request, response, handler,
+        scanner.scan(securedElement), () -> isPublicRoute(securedElement), operation, attributes);
+  }
+
+  /**
+   * Authorizes a call of {@code handlerMethod} on {@code handlerClass} and executes the
+   * handler when access is granted (JS-SEC-114, CWE-862).
+   *
+   * <p>The restriction is resolved for the method <em>as it runs on the handler
+   * class</em>: the restriction written on the method (or on the override the handler
+   * class has), otherwise the restriction of the handler class - also for a method the
+   * class only inherits - otherwise the restriction on a declaration the method overrides
+   * or implements. See {@link JCustosAnnotationScanner#scan(Method, Class)}.
+   *
+   * @param request       request
+   * @param response      response
+   * @param handler       protected handler
+   * @param handlerMethod the handler method, declared by {@code handlerClass} or by one
+   *                      of its supertypes
+   * @param handlerClass  the class whose instance serves the request
+   * @throws IllegalArgumentException if {@code handlerClass} does not inherit
+   *                                  {@code handlerMethod}
+   * @since 00.84.00
+   */
+  public void authorizeAndHandle(
+      RestRequest request,
+      RestResponse response,
+      RestHandler handler,
+      Method handlerMethod,
+      Class<?> handlerClass) {
+    authorizeAndHandle(
+        request,
+        response,
+        handler,
+        handlerMethod,
+        handlerClass,
+        operationOf(request),
+        Map.of());
+  }
+
+  /**
+   * Authorizes a call of {@code handlerMethod} on {@code handlerClass} and executes the
+   * handler when access is granted (JS-SEC-114, CWE-862). See
+   * {@link #authorizeAndHandle(RestRequest, RestResponse, RestHandler, Method, Class)}.
+   *
+   * @param request       request
+   * @param response      response
+   * @param handler       protected handler
+   * @param handlerMethod the handler method, declared by {@code handlerClass} or by one
+   *                      of its supertypes
+   * @param handlerClass  the class whose instance serves the request
+   * @param operation     operation name
+   * @param attributes    additional attributes
+   * @throws IllegalArgumentException if {@code handlerClass} does not inherit
+   *                                  {@code handlerMethod}
+   * @since 00.84.00
+   */
+  public void authorizeAndHandle(
+      RestRequest request,
+      RestResponse response,
+      RestHandler handler,
+      Method handlerMethod,
+      Class<?> handlerClass,
+      String operation,
+      Map<String, Object> attributes) {
+    authorize(request, response, handler,
+        scanner.scan(handlerMethod, handlerClass),
+        () -> isPublicRoute(handlerMethod, handlerClass), operation, attributes);
+  }
+
+  /**
+   * Tells whether the filter would serve {@code handlerMethod} on {@code handlerClass}
+   * without looking at the subject: no restriction applies to it and neither the method
+   * that runs, nor its declaring class, nor the handler class is marked
+   * {@link PublicRoute}. These are exactly the handlers
+   * deny-by-default (JS-SEC-024) refuses and allow-by-omission serves to everybody.
+   *
+   * <p>JS-SEC-114: the start-up discovery of the DX layer asks this method, and
+   * {@link #authorizeAndHandle(RestRequest, RestResponse, RestHandler, Method, Class)}
+   * decides with the same two lookups, so the start-up verdict is the verdict a request
+   * meets.
+   *
+   * @param handlerMethod the handler method, declared by {@code handlerClass} or by one
+   *                      of its supertypes; non-null
+   * @param handlerClass  the class whose instance serves the request; non-null
+   * @return {@code true} when the handler is neither restricted nor declared public
+   * @throws IllegalArgumentException if {@code handlerClass} does not inherit
+   *                                  {@code handlerMethod}
+   * @throws IllegalStateException    if an element carries more than one restriction
+   * @since 00.84.00
+   */
+  public static boolean isOpenByOmission(Method handlerMethod, Class<?> handlerClass) {
+    return SHARED_SCANNER.scan(handlerMethod, handlerClass).isEmpty()
+        && !isPublicRoute(handlerMethod, handlerClass);
+  }
+
+  private void authorize(
+      RestRequest request,
+      RestResponse response,
+      RestHandler handler,
+      Optional<AnnotationAccessEvaluatorPair<Annotation>> pair,
+      BooleanSupplier publicRoute,
+      String operation,
+      Map<String, Object> attributes) {
     if (pair.isEmpty()) {
       // JS-SEC-024 (CWE-862): fail closed on an un-annotated handler when
       // deny-by-default is enabled, unless the element opts back in via
       // @PublicRoute. The default (allow-by-omission) keeps the handler public.
-      if (JCustosServiceResolver.isDenyByDefault() && !isPublicRoute(securedElement)) {
+      if (JCustosServiceResolver.isDenyByDefault() && !publicRoute.getAsBoolean()) {
         Optional<JCustosSubject> denySubject = subjectResolver.resolveSubject(request);
         AccessContext denyContext =
             contextFactory.create(request, denySubject, operation, attributes);
@@ -189,6 +315,14 @@ public final class RestAuthorizationFilter {
     Optional<JCustosSubject> subject = subjectResolver.resolveSubject(request);
 
     if (subject.isPresent()) {
+      // JS-SEC-131 (CWE-613): a session whose record was revoked is refused before lifetime
+      // and authorisation are looked at. A no-op unless a SessionStore is registered and the
+      // resolver reports a session id; RestSessionRevocation wrote the 401 and the one audit
+      // event - no AccessDenied is added for the same request.
+      if (RestSessionRevocation.refuseIfRevoked(
+          subjectResolver, request, response, subject.get(), decisionMapper(), auditService)) {
+        return;
+      }
       Optional<SessionMetadata> metadata = subjectResolver.resolveSessionMetadata(request);
       if (metadata.isPresent()) {
         SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
@@ -322,6 +456,19 @@ public final class RestAuthorizationFilter {
     }
     return securedElement instanceof Method method
         && method.getDeclaringClass().isAnnotationPresent(PublicRoute.class);
+  }
+
+  /**
+   * JS-SEC-114: the opt-out for a method as it runs on {@code handlerClass}. It counts on
+   * the method that runs, on the class that declares that method and on the handler
+   * class - the same places as above, with the handler class added. It does not count on
+   * a declaration the method overrides: an override does not inherit the opt-out. The
+   * opt-out only matters when no restriction applies, so a restriction on the handler
+   * class still covers a method inherited from a {@code @PublicRoute} base class.
+   */
+  private static boolean isPublicRoute(Method handlerMethod, Class<?> handlerClass) {
+    return isPublicRoute(JCustosAnnotationScanner.effectiveMethod(handlerMethod, handlerClass))
+        || handlerClass.isAnnotationPresent(PublicRoute.class);
   }
 
   private static Object instantiate(Class<?> evaluatorClass) {
