@@ -887,6 +887,21 @@ protected through its layout is no longer reported as un-annotated and policies 
 layouts are cross-checked. Composed annotations take effect in the REST and standalone adapters as
 well.
 
+## The logout-token validator enforces issuer, audience and the replay window itself (ER20, JS-SEC-087, CWE-287, CWE-294)
+
+`DefaultLogoutTokenValidator` relied on the composed `JwtValidator` for `iss` and `aud`, while the
+bootstrap permits a validator without either expectation. Whoever reused such a validator accepted
+the logout token of every tenant sharing the signing keys and terminated sessions on a stranger's
+request. The validator now takes the expected issuer and client id in its constructor and checks
+both itself, as `DefaultIdTokenValidator` has done since JS-SEC-007; a mismatch is reported as
+`JwtInvalid` with `claims/iss-mismatch` or `claims/aud-mismatch`. It also requires `exp` and `iat`,
+rejects a token issued more than ten minutes ago, and remembers a `jti` until the token itself can
+no longer be accepted instead of for a fixed ten minutes. **Consumers:** the constructors without
+issuer and client id are deprecated and reject every token — back-channel logout stops working until
+the call site moves to `new DefaultLogoutTokenValidator(jwtValidator, issuer, clientId[,
+jtiStore])`; a warning `logout-token/no-expectations-configured` is logged at construction. Logout
+tokens without `exp` or `iat` are no longer accepted.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
