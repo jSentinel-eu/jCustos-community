@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
+import eu.jsentinel.jcustos.audit.LoggingAuditSink;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
@@ -44,6 +45,15 @@ import static java.util.Objects.requireNonNull;
  * {@link HttpStatusDecisionMapper}), so a configured error-body strategy
  * applies here as well. The mapper only renders: a drifted session is
  * refused whatever the mapper returns.
+ *
+ * <p>JS-SEC-117 (CWE-532, CWE-522): the {@code SessionStale} audit event never
+ * carries {@link RestJCustosVersionContext#sessionId()} itself. In a REST
+ * integration that value is usually the bearer token — a credential that stays
+ * valid in the token store after the drift — and an audit event is read by
+ * people and systems that must not hold it (audit view, SIEM, signed export).
+ * The filter hands the enforcer {@link #sessionReference(String)} instead: 16
+ * hex characters of the SHA-256, the same reference {@code LoggingAuditSink}
+ * writes as {@code sessionRef=}. Stable per session, useless as a credential.
  *
  * <p>If the {@link RestSubjectResolver} does not surface a
  * {@link RestJCustosVersionContext} (the default), the filter
@@ -92,11 +102,14 @@ public final class RestJCustosVersionFilter {
       return true;
     }
     RestJCustosVersionContext context = ctx.get();
+    // JS-SEC-117 (CWE-532, CWE-522): hash at the producer. The raw value - typically the bearer
+    // token - must not reach any audit sink; only LoggingAuditSink reduced it, the ring buffer,
+    // store-backed audit and the integrity chain kept it verbatim.
     EnforcementOutcome outcome = enforcer.enforce(
         context.subjectId(),
         context.tenant(),
         context.snapshot(),
-        context.sessionId(),
+        sessionReference(context.sessionId()),
         route);
     if (outcome instanceof EnforcementOutcome.SessionStale) {
       // JS-SEC-086: status and body come from the published mapper (body strategy included);
@@ -107,6 +120,21 @@ public final class RestJCustosVersionFilter {
       return false;
     }
     return true;
+  }
+
+  /**
+   * The non-secret reference this filter records in place of a session
+   * identifier (JS-SEC-117): the first 16 hex characters of its SHA-256, as
+   * {@link LoggingAuditSink#sessionRef(String)} computes it. Applications use
+   * the same function to find the audit events of a session or token they
+   * know.
+   *
+   * @param sessionId the raw session identifier or token; may be {@code null}
+   * @return the reference, or {@code null} when {@code sessionId} is {@code null}
+   * @since 00.84.00
+   */
+  public static String sessionReference(String sessionId) {
+    return sessionId == null ? null : LoggingAuditSink.sessionRef(sessionId);
   }
 
   /**

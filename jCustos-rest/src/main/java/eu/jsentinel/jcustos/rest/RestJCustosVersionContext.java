@@ -36,13 +36,23 @@ import static java.util.Objects.requireNonNull;
  * subject) keep the default {@code Optional.empty()} and the
  * filter is a no-op for them.
  *
+ * <p>JS-SEC-117 (CWE-532, CWE-522): {@code sessionId} exists for audit
+ * correlation only. Pass a non-secret identifier of the session — a session
+ * row id, a token id ({@code jti}), a hash — <strong>never the token
+ * itself</strong>. As a safeguard {@link RestJCustosVersionFilter} does not
+ * forward the value as it is: the audit event carries
+ * {@link RestJCustosVersionFilter#sessionReference(String)}, a truncated
+ * SHA-256. The safeguard does not make it right to keep a bearer token in
+ * this record longer than the request.
+ *
  * @param subjectId authenticated subject; non-null
  * @param tenant    tenant scope; {@code null} becomes
  *                  {@link TenantId#DEFAULT}
  * @param snapshot  security version captured when the session /
  *                  token was issued; non-null
- * @param sessionId opaque session identifier (token, session id, …)
- *                  for audit correlation; may be {@code null}
+ * @param sessionId non-secret session identifier for audit correlation
+ *                  (session row id, token id) — never the token itself;
+ *                  may be {@code null}
  */
 @ExperimentalJCustosApi
 public record RestJCustosVersionContext(

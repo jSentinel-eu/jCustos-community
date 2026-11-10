@@ -654,6 +654,24 @@ deployments that relied on a subject-free policy as a public gate must opt that 
 `PolicyRegistry` whose `find` does not return its policies overrides `allowsAnonymous(String)` to
 opt in. With a subject nothing changes.
 
+## The REST version filter records a session reference, never the bearer token (SA17, JS-SEC-117, CWE-532, CWE-522)
+
+`RestJCustosVersionContext.sessionId` was documented as an "opaque session identifier (token,
+session id, …)", and the reference resolver filled it with the raw bearer token.
+`RestJCustosVersionFilter` passed it on to `JCustosVersionEnforcer`, which stores it verbatim in the
+`SessionStale` event; only `LoggingAuditSink` reduced it to a reference (ER12), while the ring
+buffer, store-backed audit and the integrity chain kept a credential that remains valid in the token
+store after the drift.
+
+The filter now hashes at the producer: the event carries
+`RestJCustosVersionFilter.sessionReference(sessionId)`, the first 16 hex characters of the SHA-256 —
+the value `LoggingAuditSink.sessionRef` computes. The Javadoc of `RestJCustosVersionContext`,
+`JCustosVersionEnforcer` and `SessionStale` now says that the identifier must be non-secret, never
+the token itself. **Consumers:** `SessionStale.sessionId` of REST events is a reference from
+00.84.00 on; anything that compared it with its own session id must compute the same reference.
+Verified with the real filter and the real composite audit service: after a version drift no field
+of the event contains the token, and two events of one token share the reference.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

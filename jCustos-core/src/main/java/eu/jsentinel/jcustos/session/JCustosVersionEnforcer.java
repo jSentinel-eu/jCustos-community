@@ -45,6 +45,13 @@ import static java.util.Objects.requireNonNull;
  *
  * <p>Audit failures are swallowed — a misbehaving sink cannot turn a
  * drift into a "Continue".
+ *
+ * <p>JS-SEC-117 (CWE-532, CWE-522): the {@code sessionId} argument is stored
+ * in the {@link SessionStale} event exactly as it is passed in, and audit
+ * sinks keep events verbatim (ring buffer, store-backed audit, integrity
+ * chain). The <em>caller</em> therefore passes a non-secret reference, never a
+ * credential: the REST filter hands over a truncated SHA-256 of whatever its
+ * resolver supplied, because that is typically the bearer token.
  */
 @ExperimentalJCustosApi
 public final class JCustosVersionEnforcer {
@@ -91,8 +98,9 @@ public final class JCustosVersionEnforcer {
    * @param snapshot  session's
    *                  {@link SessionRecord#securityVersionAtLogin() captured version};
    *                  non-null
-   * @param sessionId session identifier for the audit event;
-   *                  may be {@code null}
+   * @param sessionId non-secret session reference for the audit event,
+   *                  stored verbatim — never a bearer token or another
+   *                  credential (JS-SEC-117); may be {@code null}
    * @param route     navigation route / REST path for the audit event;
    *                  may be {@code null}
    * @return enforcement outcome
