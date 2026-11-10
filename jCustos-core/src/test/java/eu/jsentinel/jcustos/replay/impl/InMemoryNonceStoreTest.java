@@ -25,7 +25,6 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("InMemoryNonceStore")
@@ -43,21 +42,43 @@ class InMemoryNonceStoreTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-051: a map full of live bindings rejects a new key with a capacity-exceeded error")
-  void fullOfLiveThrows() {
+  @DisplayName("JS-SEC-150: a store full of live bindings accepts a new key and evicts the earliest-expiring one")
+  void fullOfLiveEvictsEarliestExpiring() {
+    // Up to 00.83.x this bind threw replay/nonce-store-capacity-exceeded (JS-SEC-051) — an
+    // anonymous caller who kept the store full blocked every flow of every user.
     int cap = 20;
     InMemoryNonceStore store = new InMemoryNonceStore(() -> T0, cap);
-    for (int i = 0; i < cap; i++) {
-      store.bind("k-" + i, "n", Duration.ofMinutes(10));
+    store.bind("short-lived", "n-short", Duration.ofMinutes(1));
+    for (int i = 1; i < cap; i++) {
+      store.bind("k-" + i, "n-" + i, Duration.ofMinutes(10));
     }
-    IllegalStateException ex = assertThrows(IllegalStateException.class,
-        () -> store.bind("overflow", "n", Duration.ofMinutes(10)));
-    assertTrue(ex.getMessage().contains("replay/nonce-store-capacity-exceeded"), ex.getMessage());
+    assertEquals(cap, store.trackedKeyCount());
+
+    store.bind("overflow", "n-new", Duration.ofMinutes(10));
+
+    assertEquals(cap, store.trackedKeyCount(), "the size stays at the bound");
+    assertEquals(Optional.of("n-new"), store.consume("overflow"), "the newest binding is consumable");
+    assertTrue(store.consume("short-lived").isEmpty(), "the earliest-expiring binding was evicted");
+    assertEquals(Optional.of("n-1"), store.consume("k-1"), "a longer-lived binding survived");
   }
 
   @Test
-  @DisplayName("JS-SEC-051: a full-but-expired map is purged so a new binding succeeds")
-  void fullOfExpiredIsPurged() {
+  @DisplayName("JS-SEC-150: re-binding an existing key at capacity replaces it and evicts nothing")
+  void rebindAtCapacityEvictsNothing() {
+    int cap = 5;
+    InMemoryNonceStore store = new InMemoryNonceStore(() -> T0, cap);
+    for (int i = 0; i < cap; i++) {
+      store.bind("k-" + i, "n-" + i, Duration.ofMinutes(10));
+    }
+    store.bind("k-3", "n-3-new", Duration.ofMinutes(10));
+    assertEquals(cap, store.trackedKeyCount());
+    assertEquals(Optional.of("n-3-new"), store.consume("k-3"));
+    assertEquals(Optional.of("n-0"), store.consume("k-0"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-051 / JS-SEC-150: a full-but-expired map is reclaimed batch by batch, without a full scan")
+  void fullOfExpiredIsReclaimed() {
     int cap = 20;
     AtomicReference<Instant> now = new AtomicReference<>(T0);
     InMemoryNonceStore store = new InMemoryNonceStore(now::get, cap);
@@ -65,7 +86,12 @@ class InMemoryNonceStoreTest {
       store.bind("k-" + i, "n", Duration.ofSeconds(1));
     }
     now.set(T0.plusSeconds(60)); // every binding is now expired
-    store.bind("fresh", "n", Duration.ofMinutes(10));
-    assertEquals(1, store.trackedKeyCount(), "the expired bindings were reclaimed");
+    store.bind("fresh-0", "n", Duration.ofMinutes(10));
+    assertTrue(store.trackedKeyCount() < cap, "the first bind already reclaims a batch of expired bindings");
+    // JS-SEC-150: the purge is amortised — a few more binds reclaim the rest
+    store.bind("fresh-1", "n", Duration.ofMinutes(10));
+    store.bind("fresh-2", "n", Duration.ofMinutes(10));
+    assertEquals(3, store.trackedKeyCount(), "all expired bindings were reclaimed, the live ones kept");
+    assertEquals(Optional.of("n"), store.consume("fresh-0"));
   }
 }

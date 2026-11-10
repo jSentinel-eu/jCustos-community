@@ -196,8 +196,11 @@ public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
       response.body(INVALID_CALLBACK_BODY);
       return;
     }
+    // JS-SEC-150 (CWE-346, RFC 9207): hand the issuer of the response to the flow, which
+    // compares it with the expected issuer before it consumes the state or exchanges the code.
     AuthorizationCodeFlow.CallbackParams params = new AuthorizationCodeFlow.CallbackParams(
-        opt(query.get("code")), state, opt(query.get("error")), opt(query.get("error_description")));
+        opt(query.get("code")), state, opt(query.get("error")), opt(query.get("error_description")),
+        opt(query.get("iss")));
 
     Result<CallbackResult, OAuth2Error> result = flow.handleCallback(params);
     if (result.isSuccess()) {

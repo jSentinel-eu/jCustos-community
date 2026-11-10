@@ -73,6 +73,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.AfterEach;
@@ -87,11 +88,13 @@ class OAuth2CallbackHandlerTest {
 
   private HttpServer server;
   private URI tokenEndpoint;
+  private final AtomicInteger tokenRequests = new AtomicInteger();
 
   @BeforeEach
   void start() throws IOException {
     server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     server.createContext("/token", exchange -> {
+      tokenRequests.incrementAndGet();
       exchange.getRequestBody().readAllBytes();
       byte[] out = "{\"access_token\":\"AT-rest\",\"token_type\":\"Bearer\"}"
           .getBytes(StandardCharsets.UTF_8);
@@ -112,12 +115,19 @@ class OAuth2CallbackHandlerTest {
   }
 
   private AuthorizationCodeFlow flow(JdkInMemoryStateStore store) {
-    OAuth2ClientConfig config = new OAuth2ClientConfig(
+    return flow(store, config());
+  }
+
+  private OAuth2ClientConfig config() {
+    return new OAuth2ClientConfig(
         new ClientAuthentication.NoneAuthentication("rp"),
         Optional.of(URI.create("https://idp.example/authorize")),
         tokenEndpoint, Optional.empty(), Optional.empty(), Optional.empty(),
         Optional.of(URI.create("https://app.example/callback")),
         Set.of("openid"), true, true, Duration.ofMinutes(5));
+  }
+
+  private AuthorizationCodeFlow flow(JdkInMemoryStateStore store, OAuth2ClientConfig config) {
     return new HttpAuthorizationCodeFlow(config,
         new HttpTokenEndpointClient(tokenEndpoint, new ClientAuthentication.NoneAuthentication("rp"),
             HttpClient.newHttpClient(), () -> NOW),
@@ -497,5 +507,52 @@ class OAuth2CallbackHandlerTest {
     assertTrue(response.body != null && !response.body.contains("10.0.0.5"),
         "error_description must not leak");
     assertFalse(response.body.contains("access_denied"), "raw oauth error must not leak verbatim");
+  }
+
+  // ── JS-SEC-150 (CWE-346, RFC 9207): the handler passes the response issuer to the flow ──
+
+  @Test
+  @DisplayName("JS-SEC-150: a callback naming a foreign issuer is rejected before the code exchange")
+  void foreignIssuerIsRejectedBeforeTheCodeExchange() {
+    JdkInMemoryStateStore store = new JdkInMemoryStateStore(100, () -> NOW);
+    AuthorizationCodeFlow flow = flow(store, config().withExpectedIssuer("https://idp.example", true));
+    String state = flow.startRequest(AuthorizationCodeFlow.StartRequestParams.empty()).stateKey();
+    AtomicReference<CallbackResult> captured = new AtomicReference<>();
+    OAuth2CallbackHandler handler = new OAuth2CallbackHandler(flow, (result, req) -> captured.set(result));
+
+    Map<String, String> mixedUp = callbackQuery(state);
+    mixedUp.put("iss", "https://attacker.example");
+    CapturingResponse rejected = new CapturingResponse();
+    handler.handle(request(mixedUp, bindingCookie(state)), rejected);
+
+    assertEquals(400, rejected.status);
+    assertEquals("Invalid state", rejected.body);
+    assertNull(captured.get(), "the sink must not see a mixed-up response");
+    assertEquals(0, tokenRequests.get(), "the code must not reach the token endpoint");
+
+    // The state was not consumed: the response of the expected issuer still completes.
+    Map<String, String> honest = callbackQuery(state);
+    honest.put("iss", "https://idp.example");
+    CapturingResponse accepted = new CapturingResponse();
+    handler.handle(request(honest, bindingCookie(state)), accepted);
+
+    assertEquals(204, accepted.status);
+    assertNotNull(captured.get());
+    assertEquals(1, tokenRequests.get());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-150: a callback without iss is rejected when the issuer announces the parameter")
+  void missingIssuerIsRejectedWhenRequired() {
+    JdkInMemoryStateStore store = new JdkInMemoryStateStore(100, () -> NOW);
+    AuthorizationCodeFlow flow = flow(store, config().withExpectedIssuer("https://idp.example", true));
+    String state = flow.startRequest(AuthorizationCodeFlow.StartRequestParams.empty()).stateKey();
+    OAuth2CallbackHandler handler = new OAuth2CallbackHandler(flow, (t, r) -> { });
+
+    CapturingResponse response = new CapturingResponse();
+    handler.handle(request(callbackQuery(state), bindingCookie(state)), response);
+
+    assertEquals(400, response.status);
+    assertEquals(0, tokenRequests.get());
   }
 }

@@ -31,7 +31,8 @@ import java.util.Optional;
  * @param pkceVerifier the PKCE {@code code_verifier} bound to this {@code state}
  * @param nonce        the OIDC {@code nonce}, if any (unused in V00.77)
  * @param resumeTarget where to send the user after a successful login, if any
- * @param extra        opaque caller key/value extras
+ * @param extra        opaque caller key/value extras; the authorisation-code flow keeps the
+ *                     issuer a request was sent to under {@link #EXTRA_EXPECTED_ISSUER}
  * @param createdAt    when this entry was created (for TTL)
  * @since 00.77.00
  */
@@ -42,12 +43,31 @@ public record StateEntry(
     Map<String, String> extra,
     Instant createdAt) {
 
+  /**
+   * The {@link #extra()} key under which the authorisation-code flow records the issuer an
+   * authorisation request was sent to (JS-SEC-150, CWE-346). Kept in {@code extra} rather than in
+   * a new record component so that persistent {@link StateStore} implementations keep their
+   * storage format.
+   *
+   * @since 00.84.00
+   */
+  public static final String EXTRA_EXPECTED_ISSUER = "jcustos.expected-issuer";
+
   public StateEntry {
     Objects.requireNonNull(pkceVerifier, "pkceVerifier");
     Objects.requireNonNull(nonce, "nonce");
     Objects.requireNonNull(resumeTarget, "resumeTarget");
     extra = Map.copyOf(Objects.requireNonNull(extra, "extra"));
     Objects.requireNonNull(createdAt, "createdAt");
+  }
+
+  /**
+   * @return the issuer the authorisation request of this state was sent to, if the flow recorded
+   *         one (JS-SEC-150)
+   * @since 00.84.00
+   */
+  public Optional<String> expectedIssuer() {
+    return Optional.ofNullable(extra.get(EXTRA_EXPECTED_ISSUER));
   }
 
   @Override

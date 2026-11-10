@@ -42,6 +42,7 @@ package eu.jsentinel.jcustos.identity.oidc;
  */
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -71,6 +72,8 @@ class HttpOidcDiscoveryClientTest {
   private String issuer;
   private final AtomicInteger calls = new AtomicInteger();
   private volatile String issuerInDoc;
+  /** Extra members appended to the discovery document, e.g. the RFC 9207 flag. */
+  private volatile String extraMembers = "";
 
   @BeforeEach
   void start() throws IOException {
@@ -86,7 +89,7 @@ class HttpOidcDiscoveryClientTest {
           + "\"jwks_uri\":\"" + issuer + "/jwks\","
           + "\"userinfo_endpoint\":\"" + issuer + "/userinfo\","
           + "\"end_session_endpoint\":\"" + issuer + "/logout\","
-          + "\"scopes_supported\":[\"openid\",\"profile\"],"
+          + "\"scopes_supported\":[\"openid\",\"profile\"]," + extraMembers
           + "\"id_token_signing_alg_values_supported\":[\"RS256\"]}";
       byte[] out = doc.getBytes(StandardCharsets.UTF_8);
       exchange.sendResponseHeaders(200, out.length);
@@ -116,6 +119,26 @@ class HttpOidcDiscoveryClientTest {
     assertEquals(URI.create(issuer + "/logout"), md.endSessionEndpoint().orElseThrow());
     assertTrue(md.scopesSupported().contains("openid"));
     assertTrue(md.idTokenSigningAlgValuesSupported().contains("RS256"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-150: authorization_response_iss_parameter_supported is carried into the metadata")
+  void issParameterSupportIsParsed() {
+    // absent → false (the RFC 9207 §3 default)
+    OidcProviderMetadata plain = new HttpOidcDiscoveryClient(HttpClient.newHttpClient())
+        .discover(URI.create(issuer)).toOptional().orElseThrow();
+    assertFalse(plain.authorizationResponseIssParameterSupported());
+
+    extraMembers = "\"authorization_response_iss_parameter_supported\":true,";
+    OidcProviderMetadata announcing = new HttpOidcDiscoveryClient(HttpClient.newHttpClient())
+        .discover(URI.create(issuer)).toOptional().orElseThrow();
+    assertTrue(announcing.authorizationResponseIssParameterSupported());
+
+    // a string "true" is not the JSON boolean — treated as not announced
+    extraMembers = "\"authorization_response_iss_parameter_supported\":\"true\",";
+    OidcProviderMetadata sloppy = new HttpOidcDiscoveryClient(HttpClient.newHttpClient())
+        .discover(URI.create(issuer)).toOptional().orElseThrow();
+    assertFalse(sloppy.authorizationResponseIssParameterSupported());
   }
 
   @Test

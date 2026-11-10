@@ -946,6 +946,26 @@ known (for example `OidcAccessToken.fromValidated`) — the stock `RestTokenCred
 bearer token of unknown audience, which is then not forwarded; use the `exchange` strategy for a
 service outside the token's audience. Subjects stored as `github#<login>` no longer map.
 
+## The authorisation-code flow binds the response to its issuer; a full state store no longer blocks every login (SA50, JS-SEC-150, CWE-346, CWE-770)
+
+The callback of the authorisation-code flow did not know which authorisation server had answered: a
+relying party that reaches several issuers through one redirect URI could be led to send the code
+and the PKCE verifier of an honest server to the token endpoint of a malicious one.
+`OAuth2ClientConfig` now carries an expected issuer (`withExpectedIssuer(issuer, required)`),
+`CallbackParams` the `iss` parameter of the response (RFC 9207), and `OidcProviderMetadata` the
+discovery flag `authorization_response_iss_parameter_supported`. `HttpAuthorizationCodeFlow` rejects
+a response that names another issuer — or none, when the issuer announces the parameter — before it
+consumes the state or contacts the token endpoint; the REST `OAuth2CallbackHandler` passes the
+parameter through.
+
+`JdkInMemoryStateStore` and `InMemoryNonceStore` used to throw once they were full, so an anonymous
+script calling the login start could make every login fail; they now evict the entry that expires
+earliest and reclaim expired entries incrementally. **Consumers:** the binding is opt-in through the
+configuration — with discovery metadata, `config.withExpectedIssuer(metadata.issuer(),
+metadata.authorizationResponseIssParameterSupported())`; a custom callback adapter has to pass `iss`
+into `CallbackParams`, and a persistent `StateStore` has to keep `StateEntry.extra`. Code that
+relied on the `…-capacity-exceeded` exception no longer sees it.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

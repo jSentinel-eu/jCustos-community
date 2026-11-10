@@ -44,6 +44,11 @@ public interface AuthorizationCodeFlow {
    * <p>JS-SEC-059: returns a {@link CallbackResult} rather than a bare {@link TokenResponse} so the
    * stored OIDC {@code nonce} and {@code resumeTarget} survive the single-use state consumption and
    * the caller can bind the {@code id_token} to the nonce.
+   *
+   * <p>JS-SEC-150 (CWE-346, RFC 9207): an implementation that is configured with an expected
+   * issuer rejects a response whose {@code iss} differs — and, when the issuer announces the
+   * parameter, a response without one — <em>before</em> it consumes the {@code state} and before
+   * it contacts the token endpoint. This is the defence against authorisation-server mix-up.
    */
   Result<CallbackResult, OAuth2Error> handleCallback(CallbackParams params);
 
@@ -73,17 +78,51 @@ public interface AuthorizationCodeFlow {
     }
   }
 
-  /** The query parameters delivered to the redirect URI. */
+  /**
+   * The query parameters delivered to the redirect URI.
+   *
+   * <p><strong>JS-SEC-150 (CWE-346):</strong> since 00.84.00 the record carries the {@code iss}
+   * parameter of the authorisation response (RFC 9207). An adapter passes the raw query value
+   * through; {@link #handleCallback} compares it with the issuer the flow is configured for
+   * ({@link OAuth2ClientConfig#expectedIssuer()}) before the {@code state} is consumed and before
+   * any code is sent to a token endpoint. The four-argument constructor is kept for callers that
+   * have no {@code iss} to pass — a flow whose configuration requires the parameter then rejects
+   * the callback.
+   *
+   * @param code             the authorisation code, if the response carried one
+   * @param state            the {@code state} value
+   * @param error            the {@code error} code, if the response is an error response
+   * @param errorDescription the {@code error_description}, if any
+   * @param iss              the {@code iss} parameter of the response (RFC 9207), if present
+   */
   record CallbackParams(
       Optional<String> code,
       String state,
       Optional<String> error,
-      Optional<String> errorDescription) {
+      Optional<String> errorDescription,
+      Optional<String> iss) {
     public CallbackParams {
       Objects.requireNonNull(code, "code");
       Objects.requireNonNull(state, "state");
       Objects.requireNonNull(error, "error");
       Objects.requireNonNull(errorDescription, "errorDescription");
+      Objects.requireNonNull(iss, "iss");
+    }
+
+    /**
+     * The pre-00.84.00 shape: a callback without an {@code iss} parameter.
+     *
+     * @param code             the authorisation code, if the response carried one
+     * @param state            the {@code state} value
+     * @param error            the {@code error} code, if the response is an error response
+     * @param errorDescription the {@code error_description}, if any
+     */
+    public CallbackParams(
+        Optional<String> code,
+        String state,
+        Optional<String> error,
+        Optional<String> errorDescription) {
+      this(code, state, error, errorDescription, Optional.empty());
     }
   }
 }

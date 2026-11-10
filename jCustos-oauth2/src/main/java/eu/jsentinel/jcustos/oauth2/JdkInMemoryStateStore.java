@@ -43,21 +43,28 @@ package eu.jsentinel.jcustos.oauth2;
 
 import eu.jsentinel.jcustos.oauth2.api.StateEntry;
 import eu.jsentinel.jcustos.oauth2.api.StateStore;
+import eu.jsentinel.jcustos.replay.impl.BoundedExpiringMap;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
 
 /**
  * In-process {@link StateStore} (V00.77) for stateless REST / Standalone RPs:
- * a {@link ConcurrentHashMap} keyed by the {@code state} value, with per-entry
- * TTL and <strong>single-use</strong> {@link #consume(String)} (the entry is
- * atomically removed, so a replayed callback cannot succeed twice). Expired
- * entries are evicted lazily on access; a hard cap bounds memory.
+ * a map keyed by the {@code state} value, with per-entry TTL and
+ * <strong>single-use</strong> {@link #consume(String)} (the entry is
+ * atomically removed, so a replayed callback cannot succeed twice). A hard cap bounds memory.
+ *
+ * <p><strong>JS-SEC-150 (CWE-770):</strong> the store <em>never rejects a new login</em>. When it
+ * is full the entry that expires earliest is evicted; expired entries are reclaimed a few at a
+ * time on every {@link #bind}, without a scan over the whole map. Up to 00.83.x a full store threw
+ * {@code oauth2/state-store-capacity-exceeded} out of {@code startRequest}: the start of a login
+ * is reachable anonymously, so a script that kept the store full (some 170 requests per second at
+ * the defaults) made every login of every user fail with an HTTP 500 — and each failed attempt
+ * paid for a scan over all entries. A flood can now at most displace the oldest logins still in
+ * flight. Put a rate limit in front of the login start all the same.
  *
  * @since 00.77.00
  */
@@ -66,11 +73,7 @@ public final class JdkInMemoryStateStore implements StateStore {
   /** Default upper bound on retained (unconsumed) entries. */
   public static final int DEFAULT_CAPACITY = 100_000;
 
-  private record Bound(StateEntry entry, Instant expiresAt) {
-  }
-
-  private final ConcurrentMap<String, Bound> entries = new ConcurrentHashMap<>();
-  private final int capacity;
+  private final BoundedExpiringMap<StateEntry> entries;
   private final Supplier<Instant> clock;
 
   public JdkInMemoryStateStore() {
@@ -81,7 +84,7 @@ public final class JdkInMemoryStateStore implements StateStore {
     if (capacity < 1) {
       throw new IllegalArgumentException("capacity must be >= 1, was " + capacity);
     }
-    this.capacity = capacity;
+    this.entries = new BoundedExpiringMap<>(capacity);
     this.clock = Objects.requireNonNull(clock, "clock");
   }
 
@@ -90,25 +93,18 @@ public final class JdkInMemoryStateStore implements StateStore {
     Objects.requireNonNull(stateKey, "stateKey");
     Objects.requireNonNull(entry, "entry");
     Objects.requireNonNull(ttl, "ttl");
-    if (entries.size() >= capacity) {
-      purgeExpired();
-    }
-    if (entries.size() >= capacity) {
-      throw new IllegalStateException("oauth2/state-store-capacity-exceeded: " + capacity);
-    }
-    entries.put(stateKey, new Bound(entry, clock.get().plus(ttl)));
+    // JS-SEC-150 (CWE-770): never throw on a full store — evict the earliest-expiring entry.
+    Instant now = clock.get();
+    entries.put(stateKey, entry, now.plus(ttl), now);
   }
 
   @Override
   public Optional<StateEntry> consume(String stateKey) {
-    Bound bound = entries.remove(Objects.requireNonNull(stateKey, "stateKey"));
-    if (bound == null) {
-      return Optional.empty();
-    }
-    if (clock.get().isAfter(bound.expiresAt())) {
-      return Optional.empty();
-    }
-    return Optional.of(bound.entry());
+    Objects.requireNonNull(stateKey, "stateKey");
+    Instant now = clock.get();
+    return entries.remove(stateKey)
+        .filter(bound -> !bound.isExpiredAt(now))
+        .map(BoundedExpiringMap.Expiring::value);
   }
 
   @Override
@@ -119,10 +115,5 @@ public final class JdkInMemoryStateStore implements StateStore {
   /** @return the number of retained entries (test/diagnostic aid). */
   public int size() {
     return entries.size();
-  }
-
-  private void purgeExpired() {
-    Instant now = clock.get();
-    entries.values().removeIf(b -> now.isAfter(b.expiresAt()));
   }
 }

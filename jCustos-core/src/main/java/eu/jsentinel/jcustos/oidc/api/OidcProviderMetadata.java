@@ -28,6 +28,12 @@ import java.util.Set;
  * {@code authorizationEndpoint}, {@code tokenEndpoint} and {@code jwksUri} are
  * mandatory per spec; the rest are optional.
  *
+ * <p>JS-SEC-150 (CWE-346): since 00.84.00 the record carries
+ * {@code authorization_response_iss_parameter_supported} (RFC 9207 §3). An issuer that announces
+ * it puts an {@code iss} parameter on every authorisation response; a relying party passes the
+ * flag to {@code OAuth2ClientConfig.withExpectedIssuer(issuer, flag)} so that a response without
+ * the parameter is rejected.
+ *
  * @since 00.78.00
  */
 public record OidcProviderMetadata(
@@ -42,7 +48,8 @@ public record OidcProviderMetadata(
     Optional<URI> deviceAuthorizationEndpoint,
     Set<String> scopesSupported,
     Set<String> responseTypesSupported,
-    Set<String> idTokenSigningAlgValuesSupported) {
+    Set<String> idTokenSigningAlgValuesSupported,
+    boolean authorizationResponseIssParameterSupported) {
 
   public OidcProviderMetadata {
     Objects.requireNonNull(issuer, "issuer");
@@ -59,5 +66,27 @@ public record OidcProviderMetadata(
         Set.copyOf(Objects.requireNonNull(responseTypesSupported, "responseTypesSupported"));
     idTokenSigningAlgValuesSupported = Set.copyOf(
         Objects.requireNonNull(idTokenSigningAlgValuesSupported, "idTokenSigningAlgValuesSupported"));
+  }
+
+  /**
+   * The pre-00.84.00 shape, without {@code authorization_response_iss_parameter_supported}
+   * (treated as {@code false}, the default of RFC 9207 §3).
+   */
+  public OidcProviderMetadata(
+      String issuer,
+      URI authorizationEndpoint,
+      URI tokenEndpoint,
+      URI jwksUri,
+      Optional<URI> userinfoEndpoint,
+      Optional<URI> endSessionEndpoint,
+      Optional<URI> introspectionEndpoint,
+      Optional<URI> revocationEndpoint,
+      Optional<URI> deviceAuthorizationEndpoint,
+      Set<String> scopesSupported,
+      Set<String> responseTypesSupported,
+      Set<String> idTokenSigningAlgValuesSupported) {
+    this(issuer, authorizationEndpoint, tokenEndpoint, jwksUri, userinfoEndpoint, endSessionEndpoint,
+        introspectionEndpoint, revocationEndpoint, deviceAuthorizationEndpoint, scopesSupported,
+        responseTypesSupported, idTokenSigningAlgValuesSupported, false);
   }
 }

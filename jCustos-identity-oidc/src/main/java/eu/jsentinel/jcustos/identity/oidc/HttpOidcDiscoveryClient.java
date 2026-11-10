@@ -165,7 +165,10 @@ public final class HttpOidcDiscoveryClient implements OidcDiscoveryClient {
         optUri(json, "device_authorization_endpoint"),
         strSet(json, "scopes_supported"),
         strSet(json, "response_types_supported"),
-        strSet(json, "id_token_signing_alg_values_supported"));
+        strSet(json, "id_token_signing_alg_values_supported"),
+        // JS-SEC-150 (CWE-346, RFC 9207 §3): whether the issuer puts `iss` on every
+        // authorisation response; absent means false.
+        Boolean.TRUE.equals(json.get("authorization_response_iss_parameter_supported")));
 
     synchronized (cache) {
       cache.put(issuer, new Cached(metadata, now + ttlMillis));
