@@ -55,6 +55,19 @@ public final class RestDecisionContext {
     return Optional.ofNullable(MAPPER.get());
   }
 
+  /**
+   * The published mapper, or the {@link HttpStatusDecisionMapper} default (JS-SEC-086):
+   * every denial path of the REST adapter that has no explicit mapper of its own renders
+   * through this one seam — {@link RestAuthorizationFilter}, {@link RestAuthenticationFilter}
+   * and {@link RestJCustosVersionFilter} alike. Read per request, never cached, so a filter
+   * built before the bootstrap ran still picks up the configured mapper.
+   *
+   * @return never {@code null}
+   */
+  static RestDecisionMapping mapperOrDefault() {
+    return mapper().orElseGet(HttpStatusDecisionMapper::new);
+  }
+
   /** Clears the holder. Intended for tests and redeploys. */
   public static void reset() {
     MAPPER.set(null);

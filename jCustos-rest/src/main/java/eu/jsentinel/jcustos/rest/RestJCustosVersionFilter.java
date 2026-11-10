@@ -16,7 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
-import com.svenruppert.dependencies.core.net.HttpStatus;
+import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer.EnforcementOutcome;
@@ -38,6 +38,12 @@ import static java.util.Objects.requireNonNull;
  * SessionStale} header (RFC 7235) and the
  * {@code SessionStale} audit event has been published. Callers
  * must <em>not</em> invoke the handler in that case.
+ *
+ * <p>JS-SEC-086: status and body of that 401 are rendered by the mapper a
+ * bootstrap published to {@link RestDecisionContext} (falling back to
+ * {@link HttpStatusDecisionMapper}), so a configured error-body strategy
+ * applies here as well. The mapper only renders: a drifted session is
+ * refused whatever the mapper returns.
  *
  * <p>If the {@link RestSubjectResolver} does not surface a
  * {@link RestJCustosVersionContext} (the default), the filter
@@ -93,9 +99,11 @@ public final class RestJCustosVersionFilter {
         context.sessionId(),
         route);
     if (outcome instanceof EnforcementOutcome.SessionStale) {
-      response.status(HttpStatus.UNAUTHORIZED.code());
+      // JS-SEC-086: status and body come from the published mapper (body strategy included);
+      // the more specific challenge replaces the mapper's generic Bearer challenge.
+      RestDecisionContext.mapperOrDefault()
+          .apply(AuthorizationDecision.unauthenticated("session-stale"), response);
       response.header(RestHeaders.WWW_AUTHENTICATE, SESSION_STALE_CHALLENGE);
-      response.body("Unauthorized");
       return false;
     }
     return true;

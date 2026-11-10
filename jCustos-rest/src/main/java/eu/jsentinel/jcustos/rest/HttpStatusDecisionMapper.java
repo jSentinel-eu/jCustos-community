@@ -41,6 +41,9 @@ public final class HttpStatusDecisionMapper implements RestDecisionMapping {
    */
   public static final String STEP_UP_SCHEME = "StepUp";
 
+  /** JS-SEC-086: challenge sent with every {@code Unauthenticated} 401. */
+  public static final String BEARER_CHALLENGE = "Bearer";
+
   private final RestErrorBodies errorBodies;
 
   /** Uses the generic default bodies. */
@@ -71,7 +74,11 @@ public final class HttpStatusDecisionMapper implements RestDecisionMapping {
     return switch (decision) {
       case AuthorizationDecision.Granted() -> true;
       case AuthorizationDecision.Unauthenticated(String ignored) -> {
+        // JS-SEC-086 (RFC 7235 §3.1): a 401 carries a challenge. Bearer is the REST adapter's
+        // credential scheme; filters that know a more specific challenge (SessionStale) set it
+        // after the mapper has run.
         response.status(HttpStatus.UNAUTHORIZED.code());
+        response.header(RestHeaders.WWW_AUTHENTICATE, BEARER_CHALLENGE);
         response.body(errorBodies.bodyFor(decision));
         yield false;
       }

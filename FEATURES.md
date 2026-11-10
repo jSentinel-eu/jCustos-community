@@ -422,13 +422,13 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `RestRequest` / `RestResponse` / `RestHandler` (Interfaces) | Framework-light Abstractions, kein Spring/Jakarta-Servlet-Lock-in |
 | `BodyRestRequest` | `RestRequest`-Variante mit Body |
 | `BearerTokenExtractor` | Liest `Authorization: bearer <token>` (case-insensitive Scheme) |
-| `RestAuthenticationFilter` | "Authenticated-only" Filter — `401 Unauthorized` ohne Subject oder bei abgelaufener Session |
+| `RestAuthenticationFilter` | "Authenticated-only" Filter — `401` ohne Subject oder bei abgelaufener Session; rendert über den publizierten Decision-Mapper (Body-Strategie, `WWW-Authenticate: Bearer`) und auditiert `AccessDenied` (`Unauthenticated:no-subject`) bzw. `SessionExpired` (JS-SEC-086) |
 | `RestAuthorizationFilter` | Annotation-basierter Filter — `200`/Handler, `401 Unauthorized` (no subject), `403 Forbidden` (missing role/permission); emittiert AccessGranted / AccessDenied / SessionExpired |
 | `RestAccessContextFactory` | Baut `AccessContext` aus `RestRequest` (resourceType="rest-endpoint") |
-| `HttpStatusDecisionMapper` | `AuthorizationDecision` → HTTP-Status |
+| `HttpStatusDecisionMapper` | `AuthorizationDecision` → HTTP-Status; jedes `Unauthenticated`-401 trägt `WWW-Authenticate: Bearer` (RFC 7235), Step-Up `StepUp method="…"`; Body über die konfigurierte `RestErrorBodies`-Strategie |
 | `BootstrapRestStatusMapper` | Bootstrap-spezifisches Status-Mapping |
 | `RestHeaders` | Helper für Header-Lookup |
-| `RestJCustosVersionContext` + `RestJCustosVersionFilter` (Phase 4c, ⚠️) | Drift-Filter; `RestSubjectResolver.resolveJCustosVersionContext` als opt-in Default-Methode. Bei Drift: `401 + WWW-Authenticate: SessionStale` (RFC 7235-Style) und Audit-Event. |
+| `RestJCustosVersionContext` + `RestJCustosVersionFilter` (Phase 4c, ⚠️) | Drift-Filter; `RestSubjectResolver.resolveJCustosVersionContext` als opt-in Default-Methode. Bei Drift: `401 + WWW-Authenticate: SessionStale` (RFC 7235-Style) und Audit-Event; Status und Body über den publizierten Decision-Mapper (JS-SEC-086). |
 
 ### Phase-8d OpenAPI-Metadaten (`jCustos-rest/openapi/` — ⚠️)
 

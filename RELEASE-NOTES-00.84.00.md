@@ -592,6 +592,30 @@ Verified with the real REST adapter: STRICT without the switch throws with the f
 `.denyByDefault(true)` and fully annotated handlers boots, PRODUCTION records the warning and boots,
 DEVELOPMENT stays silent.
 
+## Every REST filter renders its 401 through the configured mapper, with a challenge and an audit event (ER19, JS-SEC-086, CWE-778)
+
+`RestAuthenticationFilter` and `RestJCustosVersionFilter` wrote status and body themselves. A
+bootstrap configured with `.errorBodies(ProblemJsonErrorBodyStrategy.INSTANCE)` or
+`.decisionMapper(...)` therefore changed the answers of `RestAuthorizationFilter` only: the other
+two filters kept replying with the plain text `Unauthorized`, the authentication filter sent its
+401 without a `WWW-Authenticate` challenge, and an anonymous request it turned away left no audit
+event at all.
+
+All three filters now render through the mapper published to `RestDecisionContext`, falling back
+to `HttpStatusDecisionMapper`. That mapper adds `WWW-Authenticate: Bearer` to every
+`Unauthenticated` 401 (RFC 7235 §3.1, new constant `HttpStatusDecisionMapper.BEARER_CHALLENGE`);
+the version filter replaces it with its more specific `SessionStale` challenge.
+`RestAuthenticationFilter` publishes an `AccessDenied` with reason `Unauthenticated:no-subject`
+for a request without a subject; an expired session keeps its `SessionExpired` event. The mapper
+renders a refusal and does not decide it: neither filter runs the handler, whatever the mapper
+returns. **Consumers:** clients and tests that expected a 401 without a `WWW-Authenticate` header
+now see `Bearer`, and audit trails gain one `AccessDenied` per anonymous request stopped by the
+authentication filter. The mapper sets the problem+json body, not the `Content-Type` header — that
+remains the job of the application's response adapter. Verified with the real REST bootstrap and
+the three real filters: each answers a 401 with
+`{"type":"about:blank","title":"Unauthorized","status":401}`, and the audit trail holds the
+`AccessDenied` and the `SessionStale` event.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

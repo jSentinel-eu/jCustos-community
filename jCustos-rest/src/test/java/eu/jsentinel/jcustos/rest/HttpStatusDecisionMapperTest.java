@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -46,20 +47,22 @@ class HttpStatusDecisionMapperTest {
   }
 
   @Test
-  @DisplayName("Unauthenticated emits 401 with body 'Unauthorized', no WWW-Authenticate header")
+  @DisplayName("JS-SEC-086: Unauthenticated emits 401 with body 'Unauthorized' and the Bearer challenge")
   void unauthenticatedReturns401() {
     RecordingResponse response = new RecordingResponse();
     boolean result = mapper.apply(
         AuthorizationDecision.unauthenticated("no subject"), response);
 
     assertFalse(result);
-    assertEquals(401, response.status);
+    assertEquals(HttpStatus.UNAUTHORIZED.code(), response.status);
     assertEquals("Unauthorized", response.body);
-    assertFalse(response.headers.containsKey(RestHeaders.WWW_AUTHENTICATE));
+    assertEquals(HttpStatusDecisionMapper.BEARER_CHALLENGE,
+        response.headers.get(RestHeaders.WWW_AUTHENTICATE),
+        "a 401 without a challenge violates RFC 7235 §3.1");
   }
 
   @Test
-  @DisplayName("Forbidden emits 403 with body 'Forbidden'")
+  @DisplayName("Forbidden emits 403 with body 'Forbidden' and no challenge")
   void forbiddenReturns403() {
     RecordingResponse response = new RecordingResponse();
     boolean result = mapper.apply(
@@ -68,6 +71,8 @@ class HttpStatusDecisionMapperTest {
     assertFalse(result);
     assertEquals(403, response.status);
     assertEquals("Forbidden", response.body);
+    assertFalse(response.headers.containsKey(RestHeaders.WWW_AUTHENTICATE),
+        "re-authenticating does not help a forbidden subject, so a 403 carries no challenge");
   }
 
   @Test
@@ -99,6 +104,25 @@ class HttpStatusDecisionMapperTest {
   @DisplayName("STEP_UP_SCHEME is the documented 'StepUp' constant")
   void stepUpSchemeConstant() {
     assertEquals("StepUp", HttpStatusDecisionMapper.STEP_UP_SCHEME);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-086: BEARER_CHALLENGE is the RFC 6750 'Bearer' scheme")
+  void bearerChallengeConstant() {
+    assertEquals("Bearer", HttpStatusDecisionMapper.BEARER_CHALLENGE);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-086: a custom body strategy changes the 401 body, never the challenge")
+  void customBodiesKeepTheChallenge() {
+    RecordingResponse response = new RecordingResponse();
+    new HttpStatusDecisionMapper(decision -> "{\"status\":401}")
+        .apply(AuthorizationDecision.unauthenticated("no subject"), response);
+
+    assertEquals(HttpStatus.UNAUTHORIZED.code(), response.status);
+    assertEquals("{\"status\":401}", response.body);
+    assertEquals(HttpStatusDecisionMapper.BEARER_CHALLENGE,
+        response.headers.get(RestHeaders.WWW_AUTHENTICATE));
   }
 
   private static final class RecordingResponse implements RestResponse {

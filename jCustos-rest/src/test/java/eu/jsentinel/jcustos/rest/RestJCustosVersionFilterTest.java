@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
@@ -27,6 +28,7 @@ import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import eu.jsentinel.jcustos.session.JCustosVersion;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionKey;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -127,6 +129,74 @@ class RestJCustosVersionFilterTest {
     assertEquals("/admin/secret", event.route());
     assertEquals(0L, event.snapshotVersion());
     assertEquals(2L, event.currentVersion());
+  }
+
+  // ── JS-SEC-086: mapper and body strategy ─────────────────────
+
+  @AfterEach
+  void resetPublishedMapper() {
+    RestDecisionContext.reset();
+  }
+
+  @Test
+  @DisplayName("JS-SEC-086: drift renders through the published mapper, the SessionStale challenge stays")
+  void driftedVersion_usesPublishedMapperAndKeepsChallenge() {
+    String problemJson = "{\"type\":\"about:blank\",\"title\":\"Unauthorized\",\"status\":401}";
+    RestDecisionContext.publish(new HttpStatusDecisionMapper(decision -> problemJson));
+    InMemoryJCustosVersionStore versionStore = new InMemoryJCustosVersionStore();
+    versionStore.increment(ALICE_KEY); // current → 1, the session still carries the initial snapshot
+
+    CollectingAuditService audit = new CollectingAuditService();
+    RestSubjectResolver resolver = new RestSubjectResolver() {
+      @Override public Optional<JCustosSubject> resolveSubject(RestRequest request) {
+        return Optional.empty();
+      }
+      @Override public Optional<RestJCustosVersionContext> resolveJCustosVersionContext(RestRequest request) {
+        return Optional.of(new RestJCustosVersionContext(
+            ALICE, TenantId.DEFAULT, JCustosVersion.INITIAL, "sid-9"));
+      }
+    };
+
+    RestJCustosVersionFilter filter = new RestJCustosVersionFilter(
+        resolver, new JCustosVersionEnforcer(versionStore, audit));
+
+    RecordingResponse response = new RecordingResponse();
+    assertFalse(filter.allow(new StubRequest("/admin/secret"), response));
+
+    assertEquals(HttpStatus.UNAUTHORIZED.code(), response.status);
+    assertEquals(problemJson, response.body,
+        "the body strategy of the published mapper must apply to the version filter too");
+    assertEquals(RestJCustosVersionFilter.SESSION_STALE_CHALLENGE,
+        response.headers.get(RestHeaders.WWW_AUTHENTICATE),
+        "the specific challenge must replace the mapper's generic Bearer challenge");
+    assertEquals(1, audit.published.size());
+    assertEquals("sid-9", ((SessionStale) audit.published.get(0)).sessionId());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-086: a published mapper that would let the request pass cannot reopen a drifted session")
+  void driftedVersion_staysRefusedWhateverTheMapperReturns() {
+    RestDecisionContext.publish((decision, target) -> true);
+    InMemoryJCustosVersionStore versionStore = new InMemoryJCustosVersionStore();
+    versionStore.increment(ALICE_KEY);
+
+    RestSubjectResolver resolver = new RestSubjectResolver() {
+      @Override public Optional<JCustosSubject> resolveSubject(RestRequest request) {
+        return Optional.empty();
+      }
+      @Override public Optional<RestJCustosVersionContext> resolveJCustosVersionContext(RestRequest request) {
+        return Optional.of(new RestJCustosVersionContext(
+            ALICE, TenantId.DEFAULT, JCustosVersion.INITIAL, "sid-9"));
+      }
+    };
+    RestJCustosVersionFilter filter = new RestJCustosVersionFilter(
+        resolver, new JCustosVersionEnforcer(versionStore, new CollectingAuditService()));
+
+    RecordingResponse response = new RecordingResponse();
+    assertFalse(filter.allow(new StubRequest("/admin/secret"), response),
+        "the drift verdict belongs to the enforcer, the mapper only renders it");
+    assertEquals(RestJCustosVersionFilter.SESSION_STALE_CHALLENGE,
+        response.headers.get(RestHeaders.WWW_AUTHENTICATE));
   }
 
   @Test

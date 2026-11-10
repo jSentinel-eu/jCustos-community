@@ -149,10 +149,11 @@ class DemoJCustosVersionDriftTest {
     assertEquals(UNAUTHORIZED.code(), response.statusCode());
     assertEquals("Unauthorized", response.body());
     // The SessionStale challenge must NOT be advertised when there's no token —
-    // that header is reserved for the drift outcome.
-    assertEquals(null,
+    // that header is reserved for the drift outcome. Since JS-SEC-086 the
+    // authentication filter's 401 carries the generic Bearer challenge instead.
+    assertEquals("Bearer",
         response.headers().firstValue("WWW-Authenticate").orElse(null),
-        "no version context → no SessionStale challenge header");
+        "no version context → Bearer challenge, not SessionStale");
   }
 
   private String login(String username, String password)

@@ -16,9 +16,10 @@
  */
 package eu.jsentinel.jcustos.rest;
 
-import com.svenruppert.dependencies.core.net.HttpStatus;
+import eu.jsentinel.jcustos.audit.AccessDenied;
 import eu.jsentinel.jcustos.audit.SessionExpired;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.session.SessionMetadata;
@@ -33,10 +34,19 @@ import java.util.Optional;
  * Authenticated-only REST filter for endpoints that require any subject but
  * no specific permission.
  * <p>
- * Returns {@code 401} with body {@code Unauthorized} when no subject is
- * resolved or when the resolved session has exceeded its idle / absolute
- * lifetime per the configured {@link SessionPolicy}; delegates to the
- * handler otherwise. Generic and side-effect-free.
+ * Refuses the request with {@code 401} when no subject is resolved or when
+ * the resolved session has exceeded its idle / absolute lifetime per the
+ * configured {@link SessionPolicy}; delegates to the handler otherwise.
+ * <p>
+ * JS-SEC-086 (CWE-778): both refusals render through the mapper a bootstrap
+ * published to {@link RestDecisionContext} (falling back to
+ * {@link HttpStatusDecisionMapper}), so the configured error-body strategy
+ * and the {@code WWW-Authenticate} challenge apply here as they do in
+ * {@link RestAuthorizationFilter}. Both leave an audit event: a missing
+ * subject an {@link AccessDenied} with reason
+ * {@code Unauthenticated:no-subject}, an expired session a
+ * {@link SessionExpired}. The handler never runs on a refusal, whatever the
+ * mapper returns.
  */
 public final class RestAuthenticationFilter {
 
@@ -49,8 +59,12 @@ public final class RestAuthenticationFilter {
   public void requireAuthenticated(RestRequest request, RestResponse response, RestHandler handler) {
     Optional<JCustosSubject> subject = subjectResolver.resolveSubject(request);
     if (subject.isEmpty()) {
-      response.status(HttpStatus.UNAUTHORIZED.code());
-      response.body("Unauthorized");
+      // JS-SEC-086 (CWE-778): render through the published mapper (status, challenge, body
+      // strategy) and leave an AccessDenied in the audit trail - the anonymous request used to
+      // be answered with a bare "Unauthorized" and no audit event at all.
+      auditDenied(request, "Unauthenticated:no-subject");
+      RestDecisionContext.mapperOrDefault()
+          .apply(AuthorizationDecision.unauthenticated("no-subject"), response);
       return;
     }
     Optional<SessionMetadata> metadata = subjectResolver.resolveSessionMetadata(request);
@@ -59,12 +73,22 @@ public final class RestAuthenticationFilter {
       SessionPolicyDecision decision = policy.evaluate(metadata.get());
       if (!(decision instanceof SessionPolicyDecision.Active)) {
         auditExpired(metadata.get(), subject.orElse(null), decision);
-        response.status(HttpStatus.UNAUTHORIZED.code());
-        response.body("Unauthorized");
+        RestDecisionContext.mapperOrDefault()
+            .apply(AuthorizationDecision.unauthenticated("session-expired"), response);
         return;
       }
     }
     handler.handle(request, response);
+  }
+
+  private static void auditDenied(RestRequest request, String reason) {
+    JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
+    try {
+      sink.publish(new AccessDenied(
+          Instant.now(Clock.systemUTC()), null, request == null ? null : request.path(), reason));
+    } catch (RuntimeException auditFailure) {
+      // never block the filter because the audit sink failed
+    }
   }
 
   private static void auditExpired(SessionMetadata metadata,

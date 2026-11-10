@@ -225,7 +225,8 @@ public final class RestAuthorizationFilter {
     if (decisionMapper != null) {
       return decisionMapper;
     }
-    return RestDecisionContext.mapper().orElseGet(HttpStatusDecisionMapper::new);
+    // JS-SEC-086: the same seam the authentication and version filters render through.
+    return RestDecisionContext.mapperOrDefault();
   }
 
   private void auditSessionExpired(SessionMetadata metadata,
