@@ -1105,6 +1105,19 @@ origins behind a proxy. **Consumers:** existing sign-out links have to be built 
 `logoutLocation(...)`; the REST route has to be mapped as `POST`; `onBeforeLogout()` now runs after
 the subject has been cleared, as its Javadoc always stated.
 
+## `jCustos-bom` manages the jCustos modules and nothing else (SA39, JS-SEC-139, CWE-1104, CWE-1395)
+
+`jCustos-bom` was a child of the community parent, so importing it also imported that parent's
+complete dependency management: the Vaadin BOM and some eighty third-party pins together with their
+scopes, 259 entries besides the 37 jCustos modules. An application that imported the BOM could have
+its own libraries moved to older, vulnerable versions (Jackson 3.2.0 and 2.22.0, httpclient5 5.6.1)
+or have a scope changed without notice. The BOM is now a stand-alone POM without a parent and
+manages the 37 library and testkit modules only. **Consumers:** if your build relied on
+`jCustos-bom` for the version of Vaadin, SLF4J, Log4j, JUnit or any other third-party library,
+declare that version yourself or import the vendor's BOM (for Vaadin: `com.vaadin:vaadin-bom`). A
+dependency without a version that the BOM used to cover now fails with "version is missing", which
+names exactly the entries to add. The jCustos coordinates and versions are unchanged.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

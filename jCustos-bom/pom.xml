@@ -4,13 +4,32 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <parent>
-    <groupId>eu.jsentinel</groupId>
-    <artifactId>jCustos-community-parent</artifactId>
-    <version>00.84.00-SNAPSHOT</version>
-  </parent>
+  <!--
+    This POM deliberately has NO <parent>.
 
+    A BOM hands its complete effective dependency management to whoever
+    imports it. As a child of jCustos-community-parent it therefore exported
+    not only the jCustos modules, but also the Vaadin BOM and every
+    third-party pin (with its scope) of com.svenruppert:dependencies, and
+    silently moved libraries in the consumer's application to those versions.
+    A stand-alone POM exports exactly the entries listed below and nothing
+    else.
+
+    Consequences of standing alone:
+      * The version is a literal here and has to be raised together with the
+        reactor version, in every version bump. Nothing in the build compares
+        the two (Maven 4 warns against importing a BOM from within its own
+        reactor, so no module does); the entries below follow this POM's own
+        version.
+      * Nothing is inherited. The metadata Maven Central asks for, the deploy
+        target, the plugin versions and the signing profile are repeated
+        below; keep them in step with the community parent.
+      * Only eu.jsentinel entries belong into <dependencyManagement>, and
+        neither properties nor imports that would leak into consumers.
+  -->
+  <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-bom</artifactId>
+  <version>00.84.00-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>jCustos BOM</name>
@@ -18,8 +37,55 @@
     Bill of materials for the jCustos community edition. Import it to pin every
     community artifact from one place instead of repeating versions per
     dependency. Covers the 37 library and testkit modules; demo modules are
-    deliberately absent.
+    deliberately absent. It manages jCustos artifacts only and leaves every
+    third-party version to the importing project.
   </description>
+  <url>https://github.com/jSentinel-eu/jCustos-community</url>
+  <inceptionYear>2018</inceptionYear>
+  <organization>
+    <name>jCustos by Sven Ruppert</name>
+    <url>https://jsentinel.eu</url>
+  </organization>
+  <licenses>
+    <license>
+      <name>European Union Public Licence 1.2</name>
+      <url>https://joinup.ec.europa.eu/software/page/eupl</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>Sven Ruppert</name>
+      <email>sven.ruppert@gmail.com</email>
+      <roles>
+        <role>Developer</role>
+      </roles>
+      <timezone>+1</timezone>
+    </developer>
+  </developers>
+  <scm>
+    <url>https://github.com/jSentinel-eu/jCustos-community</url>
+    <connection>scm:git:https://github.com/jSentinel-eu/jCustos-community.git</connection>
+    <developerConnection>scm:git:https://github.com/jSentinel-eu/jCustos-community.git</developerConnection>
+    <tag>HEAD</tag>
+  </scm>
+  <issueManagement>
+    <system>Github</system>
+    <url>https://github.com/jSentinel-eu/jCustos-community/issues</url>
+  </issueManagement>
+
+  <!-- Same deploy target as the community parent; the repository ids are the
+       ones the credentials are stored under and must not be renamed. -->
+  <distributionManagement>
+    <repository>
+      <id>jsentinel-releases</id>
+      <url>https://repo.jsentinel.eu/releases</url>
+    </repository>
+    <snapshotRepository>
+      <id>jsentinel-snapshots</id>
+      <url>https://repo.jsentinel.eu/snapshots</url>
+    </snapshotRepository>
+  </distributionManagement>
 
   <dependencyManagement>
     <dependencies>
@@ -210,4 +276,65 @@
       </dependency>
     </dependencies>
   </dependencyManagement>
+
+  <build>
+    <!-- Versions as managed by com.svenruppert:dependencies:06.02.04 for the
+         rest of the reactor. Without them Maven would fall back to the
+         defaults built into the running Maven version. -->
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-clean-plugin</artifactId>
+          <version>3.5.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>3.1.4</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-deploy-plugin</artifactId>
+          <version>3.1.4</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-site-plugin</artifactId>
+          <version>4.0.0-M16</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-gpg-plugin</artifactId>
+          <version>3.2.8</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
+  <profiles>
+    <!-- Mirrors the profile of the same name in com.svenruppert:dependencies,
+         so that the release build (-P _release_sign-artifacts) signs this POM
+         like every other artefact of the reactor. -->
+    <profile>
+      <id>_release_sign-artifacts</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
