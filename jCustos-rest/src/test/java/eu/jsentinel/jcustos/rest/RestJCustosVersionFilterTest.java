@@ -19,9 +19,11 @@ package eu.jsentinel.jcustos.rest;
 import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
+import eu.jsentinel.jcustos.audit.CompositeAuditService;
 import eu.jsentinel.jcustos.audit.DefaultCompositeAuditService;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.LoggingAuditSink;
+import eu.jsentinel.jcustos.audit.RingBufferAuditSink;
 import eu.jsentinel.jcustos.audit.SessionStale;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -292,14 +294,72 @@ class RestJCustosVersionFilterTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-117: sessionReference is stable, 16 hex characters, distinct per value and null-safe")
+  @DisplayName("JS-SEC-117: sessionReference is stable, marked, 16 hex characters, idempotent, distinct per value and null-safe")
   void sessionReferenceContract() {
     String reference = RestJCustosVersionFilter.sessionReference(BEARER_TOKEN);
 
     assertEquals(reference, RestJCustosVersionFilter.sessionReference(BEARER_TOKEN));
-    assertTrue(reference.matches("[0-9a-f]{16}"), reference);
+    assertTrue(reference.matches("sref-[0-9a-f]{16}"), reference);
+    assertEquals(reference, RestJCustosVersionFilter.sessionReference(reference),
+        "a reference is not reduced a second time");
     assertNotEquals(reference, RestJCustosVersionFilter.sessionReference(BEARER_TOKEN + "x"));
     assertNull(RestJCustosVersionFilter.sessionReference(null));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-117: the log line of a REST SessionStale shows the reference the event carries")
+  void driftedSession_logLineAndEventShowTheSameReference() {
+    InMemoryJCustosVersionStore versionStore = new InMemoryJCustosVersionStore();
+    versionStore.increment(ALICE_KEY);
+    // the real sinks side by side: the ring buffer an audit view reads and the audit log line
+    RecordingLogger auditLog = new RecordingLogger();
+    CompositeAuditService audit = new CompositeAuditService(
+        new RingBufferAuditSink(), new LoggingAuditSink(auditLog));
+    RestJCustosVersionFilter filter = new RestJCustosVersionFilter(
+        tokenAsSessionIdResolver(), new JCustosVersionEnforcer(versionStore, audit));
+
+    assertFalse(filter.allow(bearerRequest(BEARER_TOKEN), new RecordingResponse()));
+
+    List<AuditEvent> events = audit.query(AuditQuery.ofType(SessionStale.class));
+    assertEquals(1, events.size());
+    String inEvent = ((SessionStale) events.get(0)).sessionId();
+    assertEquals(1, auditLog.lines.size(), auditLog.lines.toString());
+    String line = auditLog.lines.get(0);
+    assertTrue(line.contains(" sessionRef=" + inEvent + " "),
+        "the line must carry the event's reference " + inEvent + ", not a hash of it: " + line);
+    assertFalse(line.contains(BEARER_TOKEN), line);
+  }
+
+  /** Hand-written SLF4J logger that keeps the rendered lines. */
+  private static final class RecordingLogger extends org.slf4j.helpers.AbstractLogger {
+    private final List<String> lines = new ArrayList<>();
+
+    RecordingLogger() {
+      this.name = "recording";
+    }
+
+    @Override protected String getFullyQualifiedCallerName() {
+      return RecordingLogger.class.getName();
+    }
+
+    @Override protected void handleNormalizedLoggingCall(
+        org.slf4j.event.Level level, org.slf4j.Marker marker, String messagePattern,
+        Object[] arguments, Throwable throwable) {
+      lines.add(arguments == null || arguments.length == 0
+          ? messagePattern
+          : org.slf4j.helpers.MessageFormatter.basicArrayFormat(messagePattern, arguments));
+    }
+
+    @Override public boolean isTraceEnabled() { return true; }
+    @Override public boolean isTraceEnabled(org.slf4j.Marker marker) { return true; }
+    @Override public boolean isDebugEnabled() { return true; }
+    @Override public boolean isDebugEnabled(org.slf4j.Marker marker) { return true; }
+    @Override public boolean isInfoEnabled() { return true; }
+    @Override public boolean isInfoEnabled(org.slf4j.Marker marker) { return true; }
+    @Override public boolean isWarnEnabled() { return true; }
+    @Override public boolean isWarnEnabled(org.slf4j.Marker marker) { return true; }
+    @Override public boolean isErrorEnabled() { return true; }
+    @Override public boolean isErrorEnabled(org.slf4j.Marker marker) { return true; }
   }
 
   @Test

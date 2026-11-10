@@ -449,8 +449,9 @@ The Vaadin adapter fills `SessionContext.sessionId` with the value of the servle
 shipping, SIEM, support — could take over a running session. Tokens and API keys already
 followed the hash convention.
 
-`LoggingAuditSink` now writes `sessionRef=`, the first 16 hex characters of the SHA-256 of the
-session id: stable for correlating events of one session, useless for hijacking. The change is
+`LoggingAuditSink` now writes `sessionRef=`, the marker `sref-` followed by the first 16 hex
+characters of the SHA-256 of the session id (`SessionRef`, JS-SEC-117): stable for correlating
+events of one session, useless for hijacking. The change is
 confined to the sink; the audit events still carry the id for stores and consumers that need
 it, and `LoggingAuditSink.sessionRef(String)` is public so dashboards and tests can compute the
 same reference. Verified with a real recording SLF4J logger: a `SessionCreated` with session id
@@ -664,8 +665,8 @@ buffer, store-backed audit and the integrity chain kept a credential that remain
 store after the drift.
 
 The filter now hashes at the producer: the event carries
-`RestJCustosVersionFilter.sessionReference(sessionId)`, the first 16 hex characters of the SHA-256 —
-the value `LoggingAuditSink.sessionRef` computes. The Javadoc of `RestJCustosVersionContext`,
+`RestJCustosVersionFilter.sessionReference(sessionId)`, the marker `sref-` followed by the first 16
+hex characters of the SHA-256 — the value `LoggingAuditSink.sessionRef` computes. The Javadoc of `RestJCustosVersionContext`,
 `JCustosVersionEnforcer` and `SessionStale` now says that the identifier must be non-secret, never
 the token itself. **Consumers:** `SessionStale.sessionId` of REST events is a reference from
 00.84.00 on; anything that compared it with its own session id must compute the same reference.
@@ -942,9 +943,9 @@ now forwards the token only when it is known to be issued for that audience and 
 `propagation/audience-mismatch` otherwise. A call without a declared audience keeps forwarding and
 is reported once as `propagation/pass-through-without-audience`. **Consumers:**
 `@PropagateToken(audience = …)` with pass-through needs an inbound credential whose audience is
-known (for example `OidcAccessToken.fromValidated`) — the stock `RestTokenCredentialFilter` binds a
-bearer token of unknown audience, which is then not forwarded; use the `exchange` strategy for a
-service outside the token's audience. Subjects stored as `github#<login>` no longer map.
+known (for example `OidcAccessToken.fromValidated`) — the stock `RestTokenCredentialFilter` binds
+one when a `JwtValidator` is configured, see the addition further down; use the `exchange` strategy
+for a service outside the token's audience. Subjects stored as `github#<login>` no longer map.
 
 ## The authorisation-code flow binds the response to its issuer; a full state store no longer blocks every login (SA50, JS-SEC-150, CWE-346, CWE-770)
 
@@ -1068,8 +1069,8 @@ the default revoke of `SessionManagementRoute`. A record with the status `EXPIRE
 session: that status is derived from the lifetime policy, which the listener evaluates against the
 live session itself. A store failure during the check is logged and the request proceeds.
 **Consumers:** applications that pass their own revoke callback or store must call
-`VaadinSessionRevocation.revoke` / `terminate` or register the store with `useSessionStore`; the
-REST adapter does not read the session status yet.
+`VaadinSessionRevocation.revoke` / `terminate` or register the store with `useSessionStore`. The
+REST adapter has its own check, described in the next section but one.
 
 ## The federated login rotates the session id (SA46, JS-SEC-146, CWE-384)
 
@@ -1262,6 +1263,19 @@ whose id, type, tenant or subject is malformed is refused with `EventPublishExce
 `malformed-text`) and reported as `EnvelopeRejected`. **Consumers:** validate or replace unpaired
 surrogates in user-supplied identifiers before building events; otherwise those events are rejected
 at publish and appear as `EnvelopeRejected` with reason `malformed-text`.
+
+## Log line and audit event show the same session reference (SA17, JS-SEC-117, CWE-532, CWE-522)
+
+The REST version filter reduces the session identifier to a reference before the event is built, and
+`LoggingAuditSink` reduced whatever it found in the event: for a REST `SessionStale` it hashed the
+reference a second time, so the `sessionRef=` of the log line matched no event. The new `SessionRef`
+gives a reference a recognisable form — `sref-` followed by the first 16 hex characters of the
+SHA-256 — and `SessionRef.of` returns a value of that form unchanged. The sink,
+`LoggingAuditSink.sessionRef`, `RestJCustosVersionFilter.sessionReference` and the REST revocation
+check all use it; the event records keep their `String` component. **Consumers:** a reference is 21
+characters with the `sref-` marker, in the log line and in `SessionStale.sessionId` of REST events
+alike; dashboards call `SessionRef.of` to compute it. An identifier of 16 hex characters without the
+marker is still hashed.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

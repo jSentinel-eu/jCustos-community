@@ -41,8 +41,8 @@ import static java.util.Objects.requireNonNull;
  * row id, a token id ({@code jti}), a hash — <strong>never the token
  * itself</strong>. As a safeguard {@link RestJCustosVersionFilter} does not
  * forward the value as it is: the audit event carries
- * {@link RestJCustosVersionFilter#sessionReference(String)}, a truncated
- * SHA-256. The safeguard does not make it right to keep a bearer token in
+ * {@link RestJCustosVersionFilter#sessionReference(String)}, a marked,
+ * truncated SHA-256. The safeguard does not make it right to keep a bearer token in
  * this record longer than the request.
  *
  * @param subjectId authenticated subject; non-null

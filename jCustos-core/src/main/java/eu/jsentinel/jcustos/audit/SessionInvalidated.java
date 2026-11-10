@@ -25,7 +25,9 @@ import java.util.Objects;
  *
  * @param timestamp UTC creation time, never {@code null}
  * @param subjectId subject identifier, never {@code null}
- * @param sessionId session identifier, or {@code null} if not tracked
+ * @param sessionId session identifier, or {@code null} if not tracked.
+ *                  JS-SEC-117 (CWE-532): the REST adapter records the
+ *                  {@link SessionRef} of the identifier, never a token
  * @param reason    short reason key (e.g. {@code "RotationAfterLogin"},
  *                  {@code "RoleChange"}), never {@code null}
  */

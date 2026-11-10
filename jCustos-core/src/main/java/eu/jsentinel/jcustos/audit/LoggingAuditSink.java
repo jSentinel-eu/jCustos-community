@@ -20,10 +20,6 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.Objects;
 
 /**
@@ -247,31 +243,33 @@ public final class LoggingAuditSink implements AuditSink {
    * JS-SEC-079 (CWE-532): the session id in these events is the live servlet
    * session cookie value. Written as-is, anyone who reads the audit log — log
    * shipping, SIEM, support — can take over a running session. The line
-   * therefore carries {@code sessionRef=}, the first 16 hex characters of the
-   * SHA-256 of the id: stable for correlation across events, useless for
-   * hijacking. Tokens and API keys already follow the same hash convention.
+   * therefore carries {@code sessionRef=}, the {@link SessionRef} of the id:
+   * stable for correlation across events, useless for hijacking. Tokens and
+   * API keys already follow the same hash convention.
+   *
+   * <p>JS-SEC-117: an event whose producer already reduced the id — the REST
+   * filters do, because there the id is the bearer token — carries a
+   * reference. {@link SessionRef#of(String)} returns it unchanged, so the
+   * line shows the very value the event holds instead of a hash of a hash.
    */
   private static void appendSessionRef(StringBuilder sb, String sessionId) {
     if (sessionId == null) return;
-    appendField(sb, "sessionRef", sessionRef(sessionId));
+    appendField(sb, "sessionRef", SessionRef.of(sessionId));
   }
 
   /**
-   * Correlation reference for a session id: 16 hex characters of its SHA-256.
+   * Correlation reference for a session id, as this sink writes it after
+   * {@code sessionRef=}: {@link SessionRef#of(String)}, the marker
+   * {@value SessionRef#PREFIX} and 16 hex characters of the SHA-256.
+   * Idempotent — a value that already is a reference comes back unchanged
+   * (JS-SEC-117).
    *
-   * @param sessionId the raw session id; non-null
+   * @param sessionId the raw session id, or a reference; non-null
    * @return the reference, never the id itself
    * @since 00.84.00
    */
   public static String sessionRef(String sessionId) {
-    Objects.requireNonNull(sessionId, "sessionId");
-    try {
-      byte[] digest = MessageDigest.getInstance("SHA-256")
-          .digest(sessionId.getBytes(StandardCharsets.UTF_8));
-      return HexFormat.of().formatHex(digest, 0, 8);
-    } catch (NoSuchAlgorithmException e) {
-      throw new IllegalStateException("SHA-256 unavailable", e);
-    }
+    return SessionRef.of(sessionId);
   }
 
   private static void appendField(StringBuilder sb, String key, String value) {

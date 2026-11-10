@@ -36,9 +36,9 @@ import java.util.Objects;
  * @param sessionId       session identifier, or {@code null} if
  *                        the adapter does not track session ids.
  *                        JS-SEC-117 (CWE-532): producers pass a non-secret
- *                        reference; the REST filter records a truncated
- *                        SHA-256 of the token-derived identifier, never
- *                        the token
+ *                        reference; the REST filter records the
+ *                        {@link SessionRef} of the token-derived
+ *                        identifier, never the token
  * @param route           navigation route / REST path that triggered
  *                        the check, or {@code null}
  * @param snapshotVersion value captured when the session was opened

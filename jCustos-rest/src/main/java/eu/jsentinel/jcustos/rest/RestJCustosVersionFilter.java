@@ -16,7 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
-import eu.jsentinel.jcustos.audit.LoggingAuditSink;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
@@ -51,9 +51,10 @@ import static java.util.Objects.requireNonNull;
  * integration that value is usually the bearer token — a credential that stays
  * valid in the token store after the drift — and an audit event is read by
  * people and systems that must not hold it (audit view, SIEM, signed export).
- * The filter hands the enforcer {@link #sessionReference(String)} instead: 16
- * hex characters of the SHA-256, the same reference {@code LoggingAuditSink}
- * writes as {@code sessionRef=}. Stable per session, useless as a credential.
+ * The filter hands the enforcer {@link #sessionReference(String)} instead: the
+ * {@link SessionRef} of the value, which {@code LoggingAuditSink} recognises
+ * and writes unchanged as {@code sessionRef=}, so the log line and the event
+ * show the same reference. Stable per session, useless as a credential.
  *
  * <p>If the {@link RestSubjectResolver} does not surface a
  * {@link RestJCustosVersionContext} (the default), the filter
@@ -124,17 +125,18 @@ public final class RestJCustosVersionFilter {
 
   /**
    * The non-secret reference this filter records in place of a session
-   * identifier (JS-SEC-117): the first 16 hex characters of its SHA-256, as
-   * {@link LoggingAuditSink#sessionRef(String)} computes it. Applications use
-   * the same function to find the audit events of a session or token they
-   * know.
+   * identifier (JS-SEC-117): {@link SessionRef#of(String)}, the marker
+   * {@value SessionRef#PREFIX} and the first 16 hex characters of the SHA-256.
+   * Every sink of the library prints exactly this value. Applications use the
+   * same function to find the audit events of a session or token they know.
+   * A value that already is a reference is returned unchanged.
    *
    * @param sessionId the raw session identifier or token; may be {@code null}
    * @return the reference, or {@code null} when {@code sessionId} is {@code null}
    * @since 00.84.00
    */
   public static String sessionReference(String sessionId) {
-    return sessionId == null ? null : LoggingAuditSink.sessionRef(sessionId);
+    return SessionRef.ofNullable(sessionId);
   }
 
   /**

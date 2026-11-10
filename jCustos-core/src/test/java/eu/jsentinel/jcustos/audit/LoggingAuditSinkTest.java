@@ -73,10 +73,44 @@ class LoggingAuditSinkTest {
     assertFalse(first.contains("ABCDEF0123456789"), first);
     assertFalse(second.contains("ABCDEF0123456789"), second);
     String ref = LoggingAuditSink.sessionRef("ABCDEF0123456789");
-    assertEquals(16, ref.length());
+    assertTrue(ref.matches("sref-[0-9a-f]{16}"), ref);
     assertTrue(first.contains("sessionRef=" + ref), first);
     assertTrue(second.contains("sessionRef=" + ref), "two events with the same id share the reference: " + second);
     assertFalse(LoggingAuditSink.sessionRef("other").equals(ref), "different ids give different references");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-117: a reference the producer already derived is printed as it is, not hashed again")
+  void referenceFromTheProducerIsNotHashedAgain() {
+    // What the REST version filter publishes: the event carries a reference, not the token.
+    String reference = SessionRef.of("eyJhbGciOiJub25lIn0.synthetic-bearer-token.0123456789");
+    RecordingSlf4jLogger logger = new RecordingSlf4jLogger();
+    LoggingAuditSink sink = new LoggingAuditSink(logger);
+
+    sink.accept(new SessionStale(T0, "alice", reference, "/api/things", 0L, 1L));
+    sink.accept(new SessionInvalidated(T0, "alice", reference, "Revoked"));
+    sink.accept(new LoginSucceeded(T0, "alice", "127.0.0.1", reference));
+
+    assertEquals(3, logger.messages.size());
+    for (String line : logger.messages) {
+      assertTrue(line.contains(" sessionRef=" + reference + " ") || line.endsWith(" sessionRef=" + reference),
+          "the line must show the reference the event carries: " + line);
+    }
+    assertEquals(reference, LoggingAuditSink.sessionRef(reference), "sessionRef is idempotent");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-117: sixteen hex characters without the marker are an id, not a reference - they are hashed")
+  void bareHexIsStillHashed() {
+    // A home-grown session id may well be 16 hex characters (Long.toHexString of a random
+    // long). Recognising a reference by that shape alone would print such an id verbatim.
+    String rawId = "0123456789abcdef";
+    RecordingSlf4jLogger logger = new RecordingSlf4jLogger();
+    new LoggingAuditSink(logger).accept(new SessionCreated(T0, "alice", rawId));
+
+    String line = logger.firstMessage();
+    assertFalse(line.contains(rawId), "a raw id must never reach the line: " + line);
+    assertTrue(line.contains("sessionRef=" + SessionRef.of(rawId)), line);
   }
 
   @Test
