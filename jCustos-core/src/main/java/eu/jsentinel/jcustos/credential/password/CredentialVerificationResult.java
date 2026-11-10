@@ -56,6 +56,28 @@ public sealed interface CredentialVerificationResult
             CredentialVerificationResult.Failed {
 
   /**
+   * Whether the verification could not be carried out at all - the system
+   * shed load or a dependency was unavailable - as opposed to having been
+   * carried out with a negative result.
+   *
+   * <p>JS-SEC-126 (CWE-703): such a result is neither a success nor a
+   * failed attempt. A caller answers "try again later" (HTTP 503 or 429),
+   * records no failure with its {@code LoginAttemptPolicy} - it calls
+   * {@code abandonAttempt} - and writes no "login failed" audit event. A
+   * caller behind a boolean contract such as
+   * {@code AuthenticationService.checkCredentials} throws
+   * {@link CredentialVerificationUnavailableException}.</p>
+   *
+   * @return {@code true} for a {@link Failed} result whose public type is
+   *         {@link PublicFailureType#TEMPORARILY_UNAVAILABLE}
+   * @since 00.84.00
+   */
+  default boolean temporarilyUnavailable() {
+    return this instanceof Failed failed
+        && failed.publicFailureType() == PublicFailureType.TEMPORARILY_UNAVAILABLE;
+  }
+
+  /**
    * Successful verification. Carries every piece of metadata the caller
    * needs to decide whether to perform a transparent rehash and to do
    * so atomically against the credential store.

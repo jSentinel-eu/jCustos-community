@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
@@ -216,6 +217,119 @@ class DirectServiceBootstrapTest {
     assertThrows(NullPointerException.class, () -> new TestBootstrap().rateLimit(null));
     assertThrows(NullPointerException.class, () -> new TestBootstrap().apiKeys(null));
     assertThrows(NullPointerException.class, () -> new TestBootstrap().refreshTokens(null));
+  }
+
+  // ── JS-SEC-124: disabled throttling and missing logout ───────────
+
+  private static boolean has(List<JCustosBootstrapWarning> warnings, String code, Severity severity) {
+    return warnings.stream().anyMatch(w -> code.equals(w.code()) && w.severity() == severity);
+  }
+
+  private static boolean has(List<JCustosBootstrapWarning> warnings, String code) {
+    return warnings.stream().anyMatch(w -> code.equals(w.code()));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: STRICT with an explicit NoopLoginAttemptPolicy refuses to boot with bruteforce/noop-policy")
+  void strictWithExplicitNoopPolicyThrows() {
+    JCustosBootstrapException ex = assertThrows(JCustosBootstrapException.class,
+        () -> new TestBootstrap()
+            .mode(JCustosBootstrapMode.STRICT)
+            .logout(new RecordingLogoutService())
+            .bruteForce(new NoopLoginAttemptPolicy())   // a fresh instance: type, not identity
+            .install());
+    assertTrue(has(ex.warnings(), "bruteforce/noop-policy", Severity.ERROR), ex.warnings().toString());
+    assertFalse(has(ex.warnings(), "logout/missing-service"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: PRODUCTION records bruteforce/noop-policy as ERROR and boots; DEVELOPMENT records a WARNING")
+  void explicitNoopPolicySeverityByMode() {
+    JCustosRuntime production = new TestBootstrap()
+        .mode(JCustosBootstrapMode.PRODUCTION)
+        .logout(new RecordingLogoutService())
+        .bruteForce(NoopLoginAttemptPolicy.INSTANCE)
+        .install();
+    assertTrue(has(production.warnings(), "bruteforce/noop-policy", Severity.ERROR));
+
+    JCustosServiceResolver.resetAll();
+    JCustosRuntime development = new TestBootstrap()
+        .mode(JCustosBootstrapMode.DEVELOPMENT)
+        .logout(new RecordingLogoutService())
+        .bruteForce(NoopLoginAttemptPolicy.INSTANCE)
+        .install();
+    assertTrue(has(development.warnings(), "bruteforce/noop-policy", Severity.WARNING));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: a Noop registered at the resolver, outside the bootstrap, is reported as well")
+  void noopRegisteredOutsideTheBootstrapIsReported() {
+    JCustosServiceResolver.setLoginAttemptPolicy(new NoopLoginAttemptPolicy());
+    JCustosBootstrapException ex = assertThrows(JCustosBootstrapException.class,
+        () -> new TestBootstrap()
+            .mode(JCustosBootstrapMode.STRICT)
+            .logout(new RecordingLogoutService())
+            .install());
+    assertTrue(has(ex.warnings(), "bruteforce/noop-policy", Severity.ERROR));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: STRICT without any policy boots - the resolver default throttles and is no finding")
+  void strictWithoutPolicyBootsOnTheThrottlingDefault() {
+    JCustosRuntime runtime = new TestBootstrap()
+        .mode(JCustosBootstrapMode.STRICT)
+        .logout(new RecordingLogoutService())
+        .install();
+
+    assertFalse(has(runtime.warnings(), "bruteforce/noop-policy"), runtime.warnings().toString());
+    assertTrue(runtime.warnings().isEmpty(), runtime.warnings().toString());
+    assertTrue(JCustosServiceResolver.loginAttemptPolicy() instanceof InMemoryLoginAttemptPolicy,
+        "what the application gets without configuring anything");
+    assertFalse(runtime.services().stream().anyMatch(s -> LoginAttemptPolicy.class.equals(s.spi())),
+        "the default is not listed as a registration");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: a throttling policy passed to .bruteForce(...) is no finding")
+  void throttlingPolicyIsNoFinding() {
+    JCustosRuntime runtime = new TestBootstrap()
+        .mode(JCustosBootstrapMode.STRICT)
+        .logout(new RecordingLogoutService())
+        .bruteForce(new InMemoryLoginAttemptPolicy())
+        .install();
+    assertTrue(runtime.warnings().isEmpty(), runtime.warnings().toString());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: STRICT without a LogoutService refuses to boot with logout/missing-service")
+  void strictWithoutLogoutThrows() {
+    JCustosBootstrapException ex = assertThrows(JCustosBootstrapException.class,
+        () -> new TestBootstrap()
+            .mode(JCustosBootstrapMode.STRICT)
+            .install());
+    assertTrue(has(ex.warnings(), "logout/missing-service", Severity.ERROR), ex.warnings().toString());
+    assertFalse(has(ex.warnings(), "bruteforce/noop-policy"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: logout/missing-service is ERROR in PRODUCTION, WARNING otherwise, and silenced by a registered service")
+  void missingLogoutSeverityByMode() {
+    assertTrue(has(new TestBootstrap().mode(JCustosBootstrapMode.PRODUCTION).install().warnings(),
+        "logout/missing-service", Severity.ERROR));
+    assertTrue(has(new TestBootstrap().mode(JCustosBootstrapMode.DEVELOPMENT).install().warnings(),
+        "logout/missing-service", Severity.WARNING));
+    assertTrue(has(new TestBootstrap().install().warnings(),
+        "logout/missing-service", Severity.WARNING), "the default mode warns");
+
+    // a service registered outside the bootstrap counts
+    JCustosServiceResolver.setLogoutService(new RecordingLogoutService());
+    assertFalse(has(new TestBootstrap().mode(JCustosBootstrapMode.STRICT).install().warnings(),
+        "logout/missing-service"));
+
+    // a Noop does not - detected by type
+    JCustosServiceResolver.setLogoutService(new eu.jsentinel.jcustos.logout.NoopLogoutService());
+    assertTrue(has(new TestBootstrap().mode(JCustosBootstrapMode.PRODUCTION).install().warnings(),
+        "logout/missing-service", Severity.ERROR));
   }
 
   // ── adapter test double ──────────────────────────────────────────

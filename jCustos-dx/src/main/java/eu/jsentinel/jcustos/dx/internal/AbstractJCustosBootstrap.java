@@ -1245,6 +1245,46 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    *       feature must not read as an actively-wired service.</li>
    * </ul>
    */
+  /**
+   * JS-SEC-124 (CWE-1188, CWE-307): two protections that used to be absent without a word.
+   *
+   * <ul>
+   *   <li>{@code bruteforce/noop-policy} - the effective {@link LoginAttemptPolicy} is the
+   *       {@code NoopLoginAttemptPolicy}, set through {@code .bruteForce(...)}, the resolver or
+   *       {@code META-INF/services}. Since 00.84.00 the resolver default throttles, so a
+   *       bootstrap that configures no policy is <em>not</em> a finding; only the explicit
+   *       opt-out is.</li>
+   *   <li>{@code logout/missing-service} - no {@link LogoutService} is registered, so
+   *       {@code JCustosServiceResolver.logoutService()} hands out the no-op and a logout
+   *       request ends nothing.</li>
+   * </ul>
+   *
+   * <p>Both are a WARNING, and an ERROR in PRODUCTION and STRICT - STRICT refuses to boot.
+   */
+  private void reportDisabledProtections(List<JCustosBootstrapWarning> warnings) {
+    Severity severity = switch (state.mode()) {
+      case STRICT, PRODUCTION -> Severity.ERROR;
+      default -> Severity.WARNING;
+    };
+    if (JCustosServiceResolver.isLoginThrottlingDisabled()) {
+      warnings.add(new JCustosBootstrapWarning(
+          severity,
+          "bruteforce/noop-policy",
+          "Login throttling is explicitly disabled: the registered LoginAttemptPolicy is "
+              + "NoopLoginAttemptPolicy, so failed logins are neither counted nor limited.",
+          "Remove the NoopLoginAttemptPolicy registration to get the default "
+              + "InMemoryLoginAttemptPolicy, or pass a throttling policy to .bruteForce(...)."));
+    }
+    if (JCustosServiceResolver.findLogoutService().isEmpty()) {
+      warnings.add(new JCustosBootstrapWarning(
+          severity,
+          "logout/missing-service",
+          "No LogoutService is configured; logout requests are discarded and sessions stay valid.",
+          "Call .logout(...) (for example with a SubjectClearingLogoutService) or register a "
+              + "LogoutService via META-INF/services."));
+    }
+  }
+
   @SuppressWarnings({"unchecked", "rawtypes"})
   protected final void applyDirectServiceConfiguration(
       List<RegisteredJCustosService> services,
@@ -1261,6 +1301,7 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
           LoginAttemptPolicy.class, state.loginAttemptPolicy().getClass(),
           "bootstrap-explicit", false));
     }
+    reportDisabledProtections(warnings);
     if (state.clientAddressResolver() != null) {
       // JS-SEC-061 (CWE-348): the resolver decides which address keys throttles and audit lines.
       JCustosServiceResolver.setClientAddressResolver(state.clientAddressResolver());

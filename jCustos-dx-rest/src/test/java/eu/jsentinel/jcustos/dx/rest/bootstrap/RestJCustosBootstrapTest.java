@@ -18,10 +18,12 @@ import eu.jsentinel.jcustos.dx.bootstrap.JCustosBootstrapException;
 import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
+import eu.jsentinel.jcustos.logout.SubjectClearingLogoutService;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
 import eu.jsentinel.jcustos.test.FakeAuthenticationService;
 import eu.jsentinel.jcustos.test.FakeAuthorizationService;
+import eu.jsentinel.jcustos.test.InMemorySubjectStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,6 +58,8 @@ class RestJCustosBootstrapTest {
         .authorization(new FakeAuthorizationService<String>())
         .subjectResolver(TEST_RESOLVER)
         .audit(a -> a.logging()) // JS-SEC-080: without an audit trail the bootstrap now reports audit/noop-fallback
+        // JS-SEC-124: without a LogoutService the bootstrap now reports logout/missing-service
+        .logout(new SubjectClearingLogoutService<>(new InMemorySubjectStore(), String.class))
         .install();
 
     assertTrue(runtime.warnings().isEmpty(),

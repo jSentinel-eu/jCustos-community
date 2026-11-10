@@ -20,10 +20,11 @@ import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptStore;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
 
 /**
- * Runs every default test in {@link LoginAttemptStoreContract}
- * against the {@link InMemoryLoginAttemptStore} default.
+ * Runs every default test in {@link LoginAttemptStoreContract} and
+ * {@link AtomicLoginAttemptStoreContract} against the
+ * {@link InMemoryLoginAttemptStore} default.
  */
-class InMemoryLoginAttemptStoreContractTest implements LoginAttemptStoreContract {
+class InMemoryLoginAttemptStoreContractTest implements AtomicLoginAttemptStoreContract {
 
   @Override
   public LoginAttemptStore newStore() {

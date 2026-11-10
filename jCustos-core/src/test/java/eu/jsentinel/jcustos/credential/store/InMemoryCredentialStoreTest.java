@@ -209,4 +209,51 @@ class InMemoryCredentialStoreTest {
     assertEquals(T2, finalRecord.updatedAt());
     assertEquals(3L, finalRecord.version());
   }
+
+  // ── JS-SEC-123 (CWE-178): one account per canonical name ────────
+
+  @Test
+  @DisplayName("JS-SEC-123: alice and ALICE cannot be two accounts")
+  void spellingsOfOneNameAreOneAccount() {
+    InMemoryCredentialStore store = newStoreWithAlice();
+
+    assertThrows(IllegalStateException.class, () ->
+            store.register(CredentialRecord.initial(
+                "ALICE", "encoded-attacker", CredentialStatus.ACTIVE, T0)),
+        "a second account that differs only in case would share alice's failure counter");
+    assertThrows(IllegalStateException.class, () ->
+        store.register(CredentialRecord.initial(
+            " Alice ", "encoded-attacker", CredentialStatus.ACTIVE, T0)));
+    assertEquals(1, store.size());
+
+    CredentialRecord found = store.findByUsername("ALICE").orElseThrow();
+    assertEquals("alice", found.username(), "the record keeps the spelling it was registered with");
+    assertEquals("encoded-v0", found.encodedHash());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-123: updates address the account through any spelling")
+  void updatesUseTheCanonicalKey() {
+    InMemoryCredentialStore store = newStoreWithAlice();
+
+    assertInstanceOf(CredentialUpdateResult.Updated.class,
+        store.updateHashIfCurrent("ALICE", "encoded-v0", "encoded-v1", T1));
+    assertEquals("encoded-v1", store.findByUsername("alice").orElseThrow().encodedHash());
+    assertInstanceOf(CredentialUpdateResult.Updated.class,
+        store.updateStatusIfCurrent(" Alice ", CredentialStatus.ACTIVE, CredentialStatus.DISABLED, T2));
+    assertEquals(CredentialStatus.DISABLED, store.findByUsername("alice").orElseThrow().status());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-123: with exact() every spelling is its own account, as before 00.84.00")
+  void exactCanonicalizerKeepsSpellingsApart() {
+    InMemoryCredentialStore store = new InMemoryCredentialStore(
+        eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer.exact());
+    store.register(CredentialRecord.initial("alice", "encoded-a", CredentialStatus.ACTIVE, T0));
+    store.register(CredentialRecord.initial("ALICE", "encoded-b", CredentialStatus.ACTIVE, T0));
+
+    assertEquals(2, store.size());
+    assertEquals("encoded-b", store.findByUsername("ALICE").orElseThrow().encodedHash());
+    assertTrue(store.findByUsername("Alice").isEmpty());
+  }
 }

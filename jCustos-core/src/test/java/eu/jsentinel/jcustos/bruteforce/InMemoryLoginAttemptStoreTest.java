@@ -37,7 +37,7 @@ class InMemoryLoginAttemptStoreTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-048: a distinct-key spray stays bounded (oldest-first eviction)")
+  @DisplayName("JS-SEC-048: a distinct-key spray stays bounded (least-recently-written unprotected entry goes first)")
   void sprayBounded() {
     int cap = 20;
     InMemoryLoginAttemptStore bounded = new InMemoryLoginAttemptStore(cap);

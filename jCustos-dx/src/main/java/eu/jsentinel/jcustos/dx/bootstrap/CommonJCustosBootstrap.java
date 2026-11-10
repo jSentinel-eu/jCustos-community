@@ -108,6 +108,10 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
    * {@code JCustosServiceResolver.setLogoutService(...)} by
    * {@code install()}.
    *
+   * <p>JS-SEC-124: when neither this call nor {@code META-INF/services}
+   * supplies one, {@code install()} reports {@code logout/missing-service}
+   * - a WARNING, an ERROR in PRODUCTION and STRICT.
+   *
    * @param service non-null logout service
    * @return this builder
    * @since 00.74.00
@@ -118,6 +122,12 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
    * V00.74: registers the brute-force / login-attempt policy.
    * Wired through {@code JCustosServiceResolver.setLoginAttemptPolicy(...)}
    * by {@code install()}.
+   *
+   * <p>JS-SEC-124: without this call the resolver's default applies, which
+   * since 00.84.00 is a throttling {@code InMemoryLoginAttemptPolicy}.
+   * Passing a {@code NoopLoginAttemptPolicy} switches throttling off;
+   * {@code install()} reports that as {@code bruteforce/noop-policy} - a
+   * WARNING, an ERROR in PRODUCTION and STRICT.
    *
    * @param policy non-null login-attempt policy
    * @return this builder

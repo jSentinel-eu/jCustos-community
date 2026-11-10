@@ -25,6 +25,7 @@ import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredential;
 
 import java.time.Clock;
@@ -42,14 +43,24 @@ import java.util.Objects;
  * <ol>
  *   <li>Ask {@link LoginAttemptPolicy} whether the username is currently
  *       throttled — return {@link LoginResult#lockedOut} on a hit so the
- *       caller can render a wait time.</li>
+ *       caller can render a wait time. An allowed attempt is reserved by
+ *       the policy (JS-SEC-123) and is reported back exactly once, by one
+ *       of the next three steps.</li>
  *   <li>Delegate to the registered {@link AuthenticationService}.</li>
- *   <li>On success — load the subject, bind it into the active
- *       {@link eu.jsentinel.jcustos.authorization.api.SubjectStore},
- *       record the success on the policy and emit a
- *       {@link LoginSucceeded} audit event.</li>
+ *   <li>On success — load the subject, confirm the success with the
+ *       policy, bind the subject into the active
+ *       {@link eu.jsentinel.jcustos.authorization.api.SubjectStore} and
+ *       emit a {@link LoginSucceeded} audit event. If the policy answers
+ *       that the key was locked in the meantime, the login is denied with
+ *       {@link LoginResult#lockedOut} and no subject is bound.</li>
  *   <li>On failure — record the failure on the policy and emit a
  *       {@link LoginFailed} audit event.</li>
+ *   <li>No verdict — the {@link AuthenticationService} threw, typically
+ *       {@link CredentialVerificationUnavailableException} because the
+ *       credential check was shed under load (JS-SEC-126). The attempt is
+ *       given back to the policy, nothing is counted, no
+ *       {@link LoginFailed} is written, and the exception reaches the
+ *       caller, who answers "try again later".</li>
  * </ol>
  *
  * @param <T> the credentials type
@@ -84,8 +95,16 @@ public final class StandaloneLoginFlow<T, U> {
    *                    {@link AuthenticationService}
    * @param username    displayed username, used for brute-force tracking
    *                    and audit; may be {@code null} or empty for
-   *                    anonymous flows (no throttling applies)
+   *                    anonymous flows (all of which share one throttle key)
    * @return the outcome
+   * @throws CredentialVerificationUnavailableException when the
+   *         {@link AuthenticationService} could not verify the credentials
+   *         at all (JS-SEC-126). This is neither {@link LoginResult.Rejected}
+   *         nor a failed attempt: nothing was counted and no
+   *         {@link LoginFailed} was written. Map it to "temporarily
+   *         unavailable, try again" (HTTP 503 or 429). Any other
+   *         {@link RuntimeException} of the service passes through the same
+   *         way.
    */
   public LoginResult<U> login(T credentials, String username) {
     LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
@@ -96,22 +115,39 @@ public final class StandaloneLoginFlow<T, U> {
       return LoginResult.lockedOut(lockout);
     }
 
-    boolean ok = authenticationService.checkCredentials(credentials);
+    boolean ok;
+    U subject = null;
+    try {
+      ok = authenticationService.checkCredentials(credentials);
+      if (ok) {
+        subject = authenticationService.loadSubject(credentials);
+      }
+    } catch (RuntimeException noVerdict) {
+      // JS-SEC-126 (CWE-703): "could not verify" is not "wrong". The reservation taken in
+      // beforeAttempt is released (JS-SEC-123), no failure is recorded, no LoginFailed is
+      // audited; the caller sees the exception as the third outcome.
+      policy.abandonAttempt(attempt);
+      throw noVerdict;
+    }
+
     if (!ok) {
       policy.recordFailure(attempt);
       audit(new LoginFailed(now(), username, null, "Credentials rejected"));
       return LoginResult.rejected();
     }
-
-    U subject = authenticationService.loadSubject(credentials);
     if (subject == null) {
       policy.recordFailure(attempt);
       audit(new LoginFailed(now(), username, null, "Subject lookup returned null"));
       return LoginResult.rejected();
     }
 
+    // JS-SEC-123 (CWE-367, CWE-307): the key can have been locked while the credentials were
+    // being checked. A correct password neither lifts that lockout nor passes it.
+    if (policy.confirmSuccess(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
+      audit(new LoginFailed(now(), username, null, "Locked out while the attempt was in flight"));
+      return LoginResult.lockedOut(lockout);
+    }
     SubjectStores.subjectStore().setCurrentSubject(subject, authenticationService.subjectType());
-    policy.recordSuccess(attempt);
     audit(new LoginSucceeded(now(), username, null, null));
     return LoginResult.success(subject);
   }
@@ -175,7 +211,11 @@ public final class StandaloneLoginFlow<T, U> {
     /** Credentials were invalid (wrong password, unknown user, etc.). */
     record Rejected<U>() implements LoginResult<U> { }
 
-    /** The username is currently locked out. The caller should not retry yet. */
+    /**
+     * The username is currently locked out. The caller should not retry yet. Also the outcome
+     * when the lockout set in while the credentials were being checked (JS-SEC-123), or when
+     * the throttle is full of live lockouts and refuses further keys (JS-SEC-122).
+     */
     record LockedOut<U>(LoginAttemptDecision.LockedOut decision) implements LoginResult<U> { }
 
     static <U> LoginResult<U> success(U subject) {

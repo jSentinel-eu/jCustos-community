@@ -162,7 +162,8 @@ class InMemoryLoginAttemptPolicyTest {
       policy.recordFailure(ctx("spray-" + i, "10.0.0.9", t));
     }
 
-    assertTrue(policy.trackedCombinedKeyCount() <= cap + 2,
+    // JS-SEC-122: the bound is hard - the "+ 2" slack of the soft bound is gone
+    assertTrue(policy.trackedCombinedKeyCount() <= cap,
         "combined-key map must stay bounded, was " + policy.trackedCombinedKeyCount());
     // the victim's in-force lockout survived the eviction pressure
     assertInstanceOf(LoginAttemptDecision.LockedOut.class,

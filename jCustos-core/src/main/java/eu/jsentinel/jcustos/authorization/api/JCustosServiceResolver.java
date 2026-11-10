@@ -255,10 +255,12 @@ public final class JCustosServiceResolver {
   // ── LoginAttemptPolicy ─────────────────────────────────────────
 
   /**
-   * Returns the registered {@link LoginAttemptPolicy}, or the noop
-   * fallback if no SPI implementation is configured. This method
-   * <strong>never</strong> throws — brute-force throttling is optional
-   * infrastructure.
+   * Returns the registered {@link LoginAttemptPolicy}, or the secure
+   * default if no SPI implementation is configured: since 00.84.00 an
+   * {@code InMemoryLoginAttemptPolicy} with the default thresholds
+   * (JS-SEC-124), no longer the no-op. This method <strong>never</strong>
+   * throws. Applications that want no throttling register
+   * {@code NoopLoginAttemptPolicy} explicitly.
    *
    * @return the resolved policy, never {@code null}
    */
@@ -268,8 +270,9 @@ public final class JCustosServiceResolver {
 
   /**
    * Returns the registered {@link LoginAttemptPolicy}, or empty if none
-   * is configured. Use {@link #loginAttemptPolicy()} for the noop
-   * fallback.
+   * is configured. The secure default of {@link #loginAttemptPolicy()}
+   * and an explicitly registered {@code NoopLoginAttemptPolicy} both count
+   * as "not configured".
    *
    * @return the SPI-registered policy, or empty
    */
@@ -278,8 +281,22 @@ public final class JCustosServiceResolver {
   }
 
   /**
+   * Whether login throttling has been switched off by registering a
+   * {@code NoopLoginAttemptPolicy} (JS-SEC-124). Neither creates the
+   * default policy nor logs.
+   *
+   * @return {@code true} when the effective policy is the no-op
+   * @since 00.84.00
+   */
+  public static boolean isLoginThrottlingDisabled() {
+    return DEFAULT.isLoginThrottlingDisabled();
+  }
+
+  /**
    * Replaces the cached {@link LoginAttemptPolicy}. Intended for tests
    * and for applications that prefer programmatic wiring over SPI.
+   * Passing a {@code NoopLoginAttemptPolicy} switches throttling off and
+   * is announced once as {@code bruteforce/noop-policy}.
    *
    * @param policy the policy, or {@code null} to clear
    */

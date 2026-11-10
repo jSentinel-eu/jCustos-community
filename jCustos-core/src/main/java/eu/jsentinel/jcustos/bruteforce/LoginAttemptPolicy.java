@@ -25,27 +25,42 @@ package eu.jsentinel.jcustos.bruteforce;
  *       password check. If the decision is not
  *       {@link LoginAttemptDecision#allowed() allowed}, skip the
  *       check and return the user a generic "try again later" error.</li>
- *   <li>{@link #recordSuccess(LoginAttemptContext)} — after the password
- *       check succeeds. Resets the failure counter.</li>
- *   <li>{@link #recordFailure(LoginAttemptContext)} — after the password
- *       check rejects the credentials. Increments the failure counter
- *       and may escalate the throttling decision for subsequent attempts.</li>
+ *   <li>Exactly one report for every allowed attempt:
+ *       <ul>
+ *         <li>{@link #confirmSuccess(LoginAttemptContext)} (or the older
+ *             {@link #recordSuccess(LoginAttemptContext)}) — the check
+ *             succeeded;</li>
+ *         <li>{@link #recordFailure(LoginAttemptContext)} — the check
+ *             rejected the credentials;</li>
+ *         <li>{@link #abandonAttempt(LoginAttemptContext)} — the check
+ *             could not be carried out (load shedding, an outage, an
+ *             exception) and says nothing about the credentials.</li>
+ *       </ul></li>
  * </ol>
+ *
+ * <p><strong>An allowed attempt is a reservation</strong> (JS-SEC-123,
+ * CWE-367). The shipped policies count the attempt as "in flight" when
+ * they allow it and release it with the report, so that requests arriving
+ * in parallel see each other: with a threshold of five, the sixth
+ * concurrent request is denied although none of the first five has failed
+ * yet. A reservation that is never reported lapses after a short time, so
+ * a caller that forgets the report degrades the throttle for a moment
+ * instead of locking the key for good.
  *
  * <p>Implementations decide which key to track by — typically a
  * combination of {@code username} and {@code clientAddress}. The default
  * {@link InMemoryLoginAttemptPolicy} tracks the combined key plus the
- * raw username so an attacker cannot cycle clients to escape the
+ * user name alone so an attacker cannot cycle clients to escape the
  * counter.
  */
 public interface LoginAttemptPolicy {
 
   /**
    * Decides whether the attempt described by {@code context} may proceed.
-   * Implementations <strong>must not</strong> mutate the failure counter
-   * here — that is the responsibility of
-   * {@link #recordSuccess(LoginAttemptContext)} /
-   * {@link #recordFailure(LoginAttemptContext)} after the actual check.
+   * The failure counter is not touched here — that happens in
+   * {@link #recordFailure(LoginAttemptContext)} after the actual check —
+   * but an implementation may reserve the attempt, see the type
+   * description.
    *
    * @param context attempt context
    * @return decision; never {@code null}
@@ -53,9 +68,35 @@ public interface LoginAttemptPolicy {
   LoginAttemptDecision beforeAttempt(LoginAttemptContext context);
 
   /**
+   * Reports whether {@code context} is locked out right now, without
+   * starting an attempt.
+   * <p>
+   * For a user interface that wants to show "locked for another 12
+   * minutes" outside a login. Since 00.84.00 {@link #beforeAttempt} reserves
+   * the attempt it allows, so calling it merely to look leaves a
+   * reservation behind until that lapses. The default asks
+   * {@code beforeAttempt} and gives an allowed attempt straight back; the
+   * shipped policies answer from their state without reserving anything.
+   *
+   * @param context attempt context
+   * @return the lockout in force, or {@link LoginAttemptDecision#allowed()};
+   *         never {@code null}
+   * @since 00.84.00
+   */
+  default LoginAttemptDecision peek(LoginAttemptContext context) {
+    LoginAttemptDecision decision = beforeAttempt(context);
+    if (decision instanceof LoginAttemptDecision.Allowed) {
+      abandonAttempt(context);
+    }
+    return decision;
+  }
+
+  /**
    * Records a successful attempt. Implementations typically reset the
-   * per-key failure counter so a successful login lifts a partial
-   * lockout immediately.
+   * per-key failure counter. A lockout that is in force is
+   * <strong>not</strong> lifted (JS-SEC-123): callers that must know
+   * whether the login may complete use
+   * {@link #confirmSuccess(LoginAttemptContext)} instead.
    *
    * @param context attempt context
    */
@@ -68,4 +109,47 @@ public interface LoginAttemptPolicy {
    * @param context attempt context
    */
   void recordFailure(LoginAttemptContext context);
+
+  /**
+   * Records a successful attempt and says whether the login may complete.
+   * <p>
+   * JS-SEC-123 (CWE-367, CWE-307): the key can have been locked while this
+   * attempt was being checked — by failures reported in the meantime, or
+   * because the report arrives after its reservation lapsed. A correct
+   * password must not buy its way past that lockout, and it must not
+   * remove it either. In that case the policy keeps the lockout and
+   * returns {@link LoginAttemptDecision.LockedOut}; the caller treats the
+   * attempt as denied and does <strong>not</strong> establish a session.
+   * <p>
+   * The default delegates to {@link #recordSuccess(LoginAttemptContext)}
+   * and allows, which is the behaviour of every policy written before this
+   * method existed.
+   *
+   * @param context attempt context
+   * @return {@link LoginAttemptDecision#allowed()} when the login may
+   *         complete, {@link LoginAttemptDecision.LockedOut} when it must
+   *         be denied; never {@code null}
+   * @since 00.84.00
+   */
+  default LoginAttemptDecision confirmSuccess(LoginAttemptContext context) {
+    recordSuccess(context);
+    return LoginAttemptDecision.allowed();
+  }
+
+  /**
+   * Gives back an allowed attempt whose check produced neither a success
+   * nor a failure.
+   * <p>
+   * JS-SEC-126 (CWE-703): "could not verify" is not "wrong". When the
+   * credential check was shed under load or failed with an exception, the
+   * caller reports that here: the reservation is released and the failure
+   * counter stays where it was. The default does nothing, which is correct
+   * for a policy that reserves nothing.
+   *
+   * @param context attempt context
+   * @since 00.84.00
+   */
+  default void abandonAttempt(LoginAttemptContext context) {
+    // nothing reserved, nothing to release
+  }
 }

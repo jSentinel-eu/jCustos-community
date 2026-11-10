@@ -16,9 +16,11 @@ import eu.jsentinel.jcustos.dx.rest.handlers.RestHandlerDiscovery;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
+import eu.jsentinel.jcustos.logout.SubjectClearingLogoutService;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
 import eu.jsentinel.jcustos.test.FakeAuthenticationService;
 import eu.jsentinel.jcustos.test.FakeAuthorizationService;
+import eu.jsentinel.jcustos.test.InMemorySubjectStore;
 
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -49,7 +51,9 @@ class RestDenyByDefaultDiscoveryTest {
     return RestSecurity.bootstrap()
         .authentication(FakeAuthenticationService.forType(String.class))
         .authorization(new FakeAuthorizationService<String>())
-        .subjectResolver((RestSubjectResolver) request -> Optional.empty());
+        .subjectResolver((RestSubjectResolver) request -> Optional.empty())
+        // JS-SEC-124: without a LogoutService the bootstrap reports logout/missing-service
+        .logout(new SubjectClearingLogoutService<>(new InMemorySubjectStore(), String.class));
   }
 
   @Test

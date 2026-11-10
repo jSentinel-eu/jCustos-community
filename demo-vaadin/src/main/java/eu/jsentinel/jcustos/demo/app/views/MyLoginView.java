@@ -103,7 +103,9 @@ public class MyLoginView
     }
     try {
       LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
-      return policy.beforeAttempt(
+      // JS-SEC-123: peek, not beforeAttempt - since 00.84.00 beforeAttempt reserves
+      // the attempt it allows, and a mere look must not hold a slot.
+      return policy.peek(
           LoginAttemptContext.now(username, currentClientAddress(), null));
     } catch (RuntimeException ignored) {
       return LoginAttemptDecision.allowed();

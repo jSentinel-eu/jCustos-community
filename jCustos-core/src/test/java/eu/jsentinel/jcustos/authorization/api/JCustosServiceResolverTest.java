@@ -29,6 +29,8 @@ import eu.jsentinel.jcustos.logout.LogoutScope;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.logout.NoopLogoutService;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptConfiguration;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
@@ -324,10 +326,13 @@ class JCustosServiceResolverTest {
   // ── LoginAttemptPolicy ────────────────────────────────────────
 
   @Test
-  @DisplayName("loginAttemptPolicy falls back to NoopLoginAttemptPolicy when no SPI is registered")
-  void loginAttemptPolicy_defaultsToNoop() {
-    assertSame(NoopLoginAttemptPolicy.INSTANCE,
-        JCustosServiceResolver.loginAttemptPolicy());
+  @DisplayName("JS-SEC-124: loginAttemptPolicy falls back to a throttling InMemoryLoginAttemptPolicy when no SPI is registered")
+  void loginAttemptPolicy_defaultsToThrottlingPolicy() {
+    LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
+    assertTrue(policy instanceof InMemoryLoginAttemptPolicy,
+        "the default must throttle, was " + policy.getClass().getName());
+    assertSame(policy, JCustosServiceResolver.loginAttemptPolicy(),
+        "the default is created once and cached - its counters must survive between logins");
   }
 
   @Test
@@ -353,8 +358,19 @@ class JCustosServiceResolverTest {
 
     JCustosServiceResolver.resetAll();
 
-    assertSame(NoopLoginAttemptPolicy.INSTANCE,
-        JCustosServiceResolver.loginAttemptPolicy());
+    assertTrue(JCustosServiceResolver.loginAttemptPolicy() instanceof InMemoryLoginAttemptPolicy,
+        "after a reset the secure default is back");
+    assertTrue(JCustosServiceResolver.findLoginAttemptPolicy().isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: resetAll discards the default policy together with its counters")
+  void resetAll_discardsDefaultLoginAttemptPolicy() {
+    LoginAttemptPolicy before = JCustosServiceResolver.loginAttemptPolicy();
+
+    JCustosServiceResolver.resetAll();
+
+    assertNotSame(before, JCustosServiceResolver.loginAttemptPolicy());
   }
 
   // ── ClientAddressResolver (JS-SEC-061) ─────────────────────────
@@ -668,5 +684,130 @@ class JCustosServiceResolverTest {
     assertTrue(ctx.findJCustosAuditService().isEmpty(),
         "a fresh NoopJCustosAuditService must not read as a configured audit service");
     assertTrue(ctx.securityAuditService() instanceof NoopJCustosAuditService);
+  }
+
+  // ── LoginAttemptPolicy default and opt-out (JS-SEC-124) ─────────
+
+  @Test
+  @DisplayName("JS-SEC-124: an isolated context without SPI locks out after the configured number of failures")
+  void isolatedContextThrottlesByDefault() {
+    JCustosContext ctx = new JCustosContext();
+    RecordingAuditService audit = new RecordingAuditService();
+    ctx.setJCustosAuditService(audit);
+    LoginAttemptPolicy policy = ctx.loginAttemptPolicy();
+    int threshold = LoginAttemptConfiguration.defaults().failureThreshold();
+
+    for (int i = 0; i < threshold; i++) {
+      LoginAttemptContext attempt = LoginAttemptContext.now("victim", "10.0.0.1", null);
+      assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(attempt),
+          "attempt " + (i + 1) + " is still below the threshold");
+      policy.recordFailure(attempt);
+    }
+
+    assertTrue(policy.beforeAttempt(LoginAttemptContext.now("victim", "10.0.0.1", null))
+            instanceof LoginAttemptDecision.LockedOut,
+        "the sixth guess must be refused without any policy having been registered");
+    assertTrue(ctx.findLoginAttemptPolicy().isEmpty(),
+        "the default is not a registration - diagnostics must still see 'nothing configured'");
+    assertFalse(ctx.isLoginThrottlingDisabled());
+    assertEquals(threshold, audit.events.stream()
+            .filter(event -> event instanceof eu.jsentinel.jcustos.audit.LoginFailed).count(),
+        "the default policy audits through its own context");
+    assertEquals(1, audit.events.stream()
+        .filter(event -> event instanceof eu.jsentinel.jcustos.audit.BruteForceLimitReached)
+        .count());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: the default of one context is not the default of another")
+  void defaultPolicyIsPerContext() {
+    JCustosContext one = new JCustosContext();
+    JCustosContext other = new JCustosContext();
+    assertNotSame(one.loginAttemptPolicy(), other.loginAttemptPolicy());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: an explicitly registered Noop is honoured, announced exactly once and reported as disabled")
+  void explicitNoopLoginAttemptPolicyIsAnnouncedOnce() {
+    JCustosContext.resetNoopLoginAttemptPolicyWarning();
+    JCustosContext ctx = new JCustosContext();
+    assertEquals(0, JCustosContext.noopLoginAttemptPolicyWarnings());
+    ctx.loginAttemptPolicy();
+    assertEquals(0, JCustosContext.noopLoginAttemptPolicyWarnings(),
+        "the throttling default is nothing to warn about");
+
+    // a fresh instance, as META-INF/services or a bootstrap constructs it: type, not identity
+    ctx.setLoginAttemptPolicy(new NoopLoginAttemptPolicy());
+
+    assertEquals(1, JCustosContext.noopLoginAttemptPolicyWarnings(), "announced when registered");
+    assertTrue(ctx.loginAttemptPolicy() instanceof NoopLoginAttemptPolicy, "the opt-out is honoured");
+    assertTrue(ctx.loginAttemptPolicy() instanceof NoopLoginAttemptPolicy);
+    assertEquals(1, JCustosContext.noopLoginAttemptPolicyWarnings(),
+        "... and not again on every lookup");
+    assertTrue(ctx.isLoginThrottlingDisabled());
+    assertTrue(ctx.findLoginAttemptPolicy().isEmpty(), "a Noop is not a configured throttle");
+
+    JCustosContext second = new JCustosContext();
+    second.setLoginAttemptPolicy(NoopLoginAttemptPolicy.INSTANCE);
+    assertEquals(1, JCustosContext.noopLoginAttemptPolicyWarnings(), "once per JVM");
+
+    // with the opt-out, failures are indeed unlimited
+    LoginAttemptPolicy noop = ctx.loginAttemptPolicy();
+    for (int i = 0; i < 50; i++) {
+      LoginAttemptContext attempt = LoginAttemptContext.now("victim", "10.0.0.1", null);
+      assertEquals(LoginAttemptDecision.allowed(), noop.beforeAttempt(attempt));
+      noop.recordFailure(attempt);
+    }
+    JCustosContext.resetNoopLoginAttemptPolicyWarning();
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: a registered throttling policy wins over the default and is reported as configured")
+  void registeredPolicyReplacesDefault() {
+    JCustosContext ctx = new JCustosContext();
+    LoginAttemptPolicy defaulted = ctx.loginAttemptPolicy();
+    BlockEverything blocker = new BlockEverything();
+
+    ctx.setLoginAttemptPolicy(blocker);
+
+    assertSame(blocker, ctx.loginAttemptPolicy());
+    assertSame(blocker, ctx.findLoginAttemptPolicy().orElseThrow());
+    assertNotSame(defaulted, ctx.loginAttemptPolicy());
+    assertFalse(ctx.isLoginThrottlingDisabled());
+  }
+
+  // ── LogoutService fallback (JS-SEC-124) ─────────────────────────
+
+  @Test
+  @DisplayName("JS-SEC-124: logoutService falls back to Noop exactly once with a warning; find reports nothing configured")
+  void logoutFallsBackToNoopWithOneWarning() {
+    JCustosContext ctx = new JCustosContext();
+    JCustosContext.resetNoopLogoutFallbackWarning();
+    assertEquals(0, JCustosContext.noopLogoutFallbackWarnings());
+
+    LogoutService first = ctx.logoutService();
+    assertTrue(first instanceof NoopLogoutService, "no SPI -> Noop");
+    assertEquals(1, JCustosContext.noopLogoutFallbackWarnings(), "the fallback is announced exactly once");
+    assertTrue(ctx.findLogoutService().isEmpty(), "the fallback is not a configuration");
+
+    assertSame(first, ctx.logoutService());
+    assertEquals(1, JCustosContext.noopLogoutFallbackWarnings(), "a repeated fallback does not warn again");
+
+    // the negative result is not cemented - a service set later is picked up
+    RecordingLogoutService late = new RecordingLogoutService();
+    ctx.setLogoutService(late);
+    assertSame(late, ctx.logoutService());
+    assertSame(late, ctx.findLogoutService().orElseThrow());
+    JCustosContext.resetNoopLogoutFallbackWarning();
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: an explicitly set NoopLogoutService is detected by type, not identity")
+  void explicitNoopLogoutCountsAsUnconfigured() {
+    JCustosContext ctx = new JCustosContext();
+    ctx.setLogoutService(new NoopLogoutService());
+    assertTrue(ctx.findLogoutService().isEmpty(),
+        "a fresh NoopLogoutService must not read as a configured logout service");
+    assertTrue(ctx.logoutService() instanceof NoopLogoutService);
   }
 }

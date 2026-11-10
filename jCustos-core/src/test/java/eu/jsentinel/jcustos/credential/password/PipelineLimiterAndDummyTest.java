@@ -55,7 +55,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PipelineLimiterAndDummyTest {
@@ -201,12 +203,13 @@ class PipelineLimiterAndDummyTest {
   }
 
   @Test
-  @DisplayName("Limiter rejection is mapped to generic INVALID_CREDENTIALS + KDF_LIMIT audit")
-  void limiterRejectionMapsToGenericFailure() throws InterruptedException {
+  @DisplayName("JS-SEC-126: limiter rejection is TEMPORARILY_UNAVAILABLE + KDF_LIMIT audit, never INVALID_CREDENTIALS")
+  void limiterRejectionMapsToTemporarilyUnavailable() throws InterruptedException {
     SemaphoreKdfExecutionLimiter limiter = new SemaphoreKdfExecutionLimiter(
         new KdfResourceBudget(1, Duration.ofMillis(50)));
     CountingDummyService dummy = newCountingDummy();
     DefaultPasswordHashingService service = buildService(limiter, dummy);
+    PasswordHashResult stored = service.hash("hunter2".toCharArray());
 
     CountDownLatch holderAcquired = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
@@ -225,16 +228,51 @@ class PipelineLimiterAndDummyTest {
     holder.start();
     assertTrue(holderAcquired.await(2, TimeUnit.SECONDS));
 
+    // the CORRECT password against its own hash: shed load must not read as "wrong"
     CredentialVerificationResult result = service.verify(
-        "x".toCharArray(), "anything");
+        "hunter2".toCharArray(), stored.encodedHash());
     CredentialVerificationResult.Failed f = assertInstanceOf(
         CredentialVerificationResult.Failed.class, result);
-    assertEquals(PublicFailureType.INVALID_CREDENTIALS, f.publicFailureType());
+    assertEquals(PublicFailureType.TEMPORARILY_UNAVAILABLE, f.publicFailureType());
     assertEquals(InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT,
         f.internalAuditEventType());
+    assertTrue(result.temporarilyUnavailable());
+
+    // the unknown-user path is shed the same way - the outcome does not depend on the account
+    CredentialVerificationResult.Failed unknownUser = assertInstanceOf(
+        CredentialVerificationResult.Failed.class,
+        service.verifyAgainstNothing("hunter2".toCharArray()));
+    assertEquals(PublicFailureType.TEMPORARILY_UNAVAILABLE, unknownUser.publicFailureType());
+    assertEquals(InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT,
+        unknownUser.internalAuditEventType());
+    assertEquals(0, dummy.callsFor(DummyVerificationContext.UNKNOWN_USER),
+        "a shed call runs no KDF at all");
 
     release.countDown();
     holder.join(1000);
+
+    // with the permit back the same call is evaluated: right password verifies, wrong one is
+    // INVALID_CREDENTIALS and not "unavailable"
+    assertInstanceOf(CredentialVerificationResult.Verified.class,
+        service.verify("hunter2".toCharArray(), stored.encodedHash()));
+    CredentialVerificationResult wrong = service.verify("nope".toCharArray(), stored.encodedHash());
+    assertEquals(PublicFailureType.INVALID_CREDENTIALS,
+        assertInstanceOf(CredentialVerificationResult.Failed.class, wrong).publicFailureType());
+    assertFalse(wrong.temporarilyUnavailable());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-126: throwIfUnavailable turns a shed result into the third outcome and passes every other result")
+  void throwIfUnavailable() {
+    CredentialVerificationUnavailableException.throwIfUnavailable(
+        new CredentialVerificationResult.Failed(PublicFailureType.INVALID_CREDENTIALS,
+            InternalAuditEventType.VERIFICATION_FAILED_MISMATCH));
+    CredentialVerificationUnavailableException thrown = assertThrows(
+        CredentialVerificationUnavailableException.class,
+        () -> CredentialVerificationUnavailableException.throwIfUnavailable(
+            new CredentialVerificationResult.Failed(PublicFailureType.TEMPORARILY_UNAVAILABLE,
+                InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT)));
+    assertEquals("credential verification is temporarily unavailable", thrown.getMessage());
   }
 
   @Test

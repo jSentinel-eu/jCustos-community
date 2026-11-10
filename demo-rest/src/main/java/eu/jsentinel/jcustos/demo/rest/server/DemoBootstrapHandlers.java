@@ -102,7 +102,10 @@ public final class DemoBootstrapHandlers {
       return;
     }
 
+    // JS-SEC-123: the allowed attempt is a reservation - every path that ends without a
+    // verdict on the token gives it back, otherwise it would hold a slot until it lapses.
     if (!(request instanceof BodyRestRequest bodyRequest)) {
+      bootstrapAttemptPolicy.abandonAttempt(attempt);
       writeJson(response, HttpStatus.BAD_REQUEST.code(), Map.of("error", "bad_request"));
       return;
     }
@@ -110,6 +113,7 @@ public final class DemoBootstrapHandlers {
     try {
       body = DemoJson.decodeObject(bodyRequest.bodyAsUtf8());
     } catch (RuntimeException e) {
+      bootstrapAttemptPolicy.abandonAttempt(attempt);
       writeJson(response, HttpStatus.BAD_REQUEST.code(), Map.of("error", "bad_request"));
       return;
     }
@@ -119,6 +123,7 @@ public final class DemoBootstrapHandlers {
     String displayName = string(body, "displayName");
     String email = string(body, "email");
     if (token == null || username == null || password == null) {
+      bootstrapAttemptPolicy.abandonAttempt(attempt);
       writeJson(response, HttpStatus.BAD_REQUEST.code(), Map.of("error", "bad_request"));
       return;
     }
@@ -132,6 +137,8 @@ public final class DemoBootstrapHandlers {
       // only token-rejection counts toward brute-force throttling.
       // policy violations / bad usernames are operator errors, not attacks.
       bootstrapAttemptPolicy.recordFailure(attempt);
+    } else {
+      bootstrapAttemptPolicy.abandonAttempt(attempt);
     }
 
     int status = STATUS_MAPPER.statusFor(result);

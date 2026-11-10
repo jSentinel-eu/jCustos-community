@@ -76,9 +76,20 @@ import java.util.Optional;
  * &quot;user does not exist&quot;, &quot;envelope is malformed&quot;
  * and &quot;provider is missing&quot; collapse onto the same
  * observable timing profile (CWE-203, CWE-208). Every public failure
- * collapses onto {@link PublicFailureType#INVALID_CREDENTIALS}; the
- * differentiated {@link InternalAuditEventType} is preserved for audit
- * sinks.</p>
+ * of an evaluated credential collapses onto
+ * {@link PublicFailureType#INVALID_CREDENTIALS}; the differentiated
+ * {@link InternalAuditEventType} is preserved for audit sinks.</p>
+ *
+ * <p><strong>Load shedding is not a wrong password</strong> (JS-SEC-126,
+ * CWE-703, CWE-645): when the {@link KdfExecutionLimiter} grants no
+ * permit, nothing was evaluated, and the result is
+ * {@link PublicFailureType#TEMPORARILY_UNAVAILABLE} with
+ * {@link InternalAuditEventType#VERIFICATION_REJECTED_KDF_LIMIT}. Until
+ * 00.83.00 it was {@code INVALID_CREDENTIALS}, so a flood of anonymous
+ * requests that kept the permits busy made correct logins count as
+ * failures and locked the accounts behind them. Callers must not record
+ * such a result as a failed attempt; see
+ * {@link CredentialVerificationResult#temporarilyUnavailable()}.</p>
  *
  * <p><strong>Cost floor (JS-SEC-009, closed in 00.82.00):</strong> the dummy
  * KDF runs the <em>preferred</em> algorithm, so a stored hash on a different
@@ -155,7 +166,7 @@ public final class DefaultPasswordHashingService implements PasswordHashingServi
     Objects.requireNonNull(password, "password");
     Optional<KdfExecutionLimiter.Lease> lease = limiter.acquire();
     if (lease.isEmpty()) {
-      return failed(InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT);
+      return shed();
     }
     try (KdfExecutionLimiter.Lease l = lease.get()) {
       return verifyUnderLease(password, encodedHash);
@@ -167,7 +178,7 @@ public final class DefaultPasswordHashingService implements PasswordHashingServi
     Objects.requireNonNull(password, "password");
     Optional<KdfExecutionLimiter.Lease> lease = limiter.acquire();
     if (lease.isEmpty()) {
-      return failed(InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT);
+      return shed();
     }
     try (KdfExecutionLimiter.Lease l = lease.get()) {
       dummyService.runDummyKdf(password, DummyVerificationContext.UNKNOWN_USER);
@@ -295,6 +306,16 @@ public final class DefaultPasswordHashingService implements PasswordHashingServi
         PublicFailureType.INVALID_CREDENTIALS, internal);
   }
 
+  /**
+   * JS-SEC-126 (CWE-703, CWE-645): no permit, so no verdict. The outcome says "try again", not
+   * "wrong password", and it is the same whatever the supplied credential was.
+   */
+  private static CredentialVerificationResult.Failed shed() {
+    return new CredentialVerificationResult.Failed(
+        PublicFailureType.TEMPORARILY_UNAVAILABLE,
+        InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT);
+  }
+
   private Optional<PepperReference> resolveActivePepper() {
     Optional<String> activeKey = pepperService.activeKeyId();
     if (activeKey.isEmpty()) {
@@ -315,8 +336,8 @@ public final class DefaultPasswordHashingService implements PasswordHashingServi
 
   /**
    * Thrown by {@link #hash(char[])} when the limiter is saturated.
-   * Verification paths translate this into a generic credential failure
-   * instead of throwing.
+   * Verification paths do not throw; they return a
+   * {@link PublicFailureType#TEMPORARILY_UNAVAILABLE} result instead.
    */
   public static final class KdfLimitExceededException extends RuntimeException {
     public KdfLimitExceededException() {

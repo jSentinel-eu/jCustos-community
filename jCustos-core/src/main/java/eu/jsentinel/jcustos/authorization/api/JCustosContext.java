@@ -28,6 +28,8 @@ import eu.jsentinel.jcustos.authentication.PasswordHasher;
 import eu.jsentinel.jcustos.authentication.Pbkdf2PasswordHasher;
 import eu.jsentinel.jcustos.authorization.api.roles.NoopRoleHierarchy;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptConfiguration;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
@@ -45,6 +47,7 @@ import eu.jsentinel.jcustos.session.JCustosVersionStore;
 import eu.jsentinel.jcustos.session.SessionPolicy;
 import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 
+import java.time.Clock;
 import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -97,8 +100,18 @@ public final class JCustosContext {
       new AtomicReference<>();
   private final AtomicReference<ActionAuthorizationService<?>> actionAuthServiceRef =
       new AtomicReference<>();
+  /** JS-SEC-124: one warning per JVM when login throttling is explicitly switched off. */
+  private static final AtomicBoolean NOOP_LOGIN_ATTEMPT_WARNED = new AtomicBoolean(false);
+  /** Diagnostics: how many times that warning was actually written. */
+  private static final AtomicInteger NOOP_LOGIN_ATTEMPT_WARNINGS = new AtomicInteger();
+  /** JS-SEC-124: one warning per JVM when the logout service silently falls back to Noop. */
+  private static final AtomicBoolean NOOP_LOGOUT_WARNED = new AtomicBoolean(false);
+  /** Diagnostics: how many times that warning was actually written. */
+  private static final AtomicInteger NOOP_LOGOUT_WARNINGS = new AtomicInteger();
   private final AtomicReference<LoginAttemptPolicy> loginAttemptPolicyRef =
       new AtomicReference<>();
+  /** JS-SEC-124: the policy {@link #loginAttemptPolicy()} created as its secure default, if any. */
+  private volatile LoginAttemptPolicy defaultedLoginAttemptPolicy;
   /** JS-SEC-065: the policy {@link #sessionPolicy()} created as its secure default, if any. */
   private volatile SessionPolicy<?> defaultedSessionPolicy;
   private final AtomicReference<SessionPolicy<?>> sessionPolicyRef =
@@ -443,61 +456,163 @@ public final class JCustosContext {
   // ── LoginAttemptPolicy ─────────────────────────────────────────
 
   /**
-   * Returns the registered {@link LoginAttemptPolicy}, or
-   * {@link NoopLoginAttemptPolicy#INSTANCE} if no SPI implementation is
-   * configured. Like {@link #securityAuditService()}, this method
-   * <strong>never</strong> throws — brute-force throttling is optional
-   * infrastructure.
+   * Returns the registered {@link LoginAttemptPolicy}, or the secure default - an
+   * {@link InMemoryLoginAttemptPolicy} with {@link LoginAttemptConfiguration#defaults()}
+   * (JS-SEC-124) - if no SPI implementation is configured. This method
+   * <strong>never</strong> throws.
    *
    * @return the resolved policy, never {@code null}
    */
   public LoginAttemptPolicy loginAttemptPolicy() {
     LoginAttemptPolicy cached = loginAttemptPolicyRef.get();
-    if (cached != null) {
-      return cached;
+    if (cached == null) {
+      LoginAttemptPolicy loaded = findSingleService(
+          LoginAttemptPolicy.class,
+          ServiceLoader.load(LoginAttemptPolicy.class))
+          .orElse(null);
+      if (loaded != null) {
+        loginAttemptPolicyRef.compareAndSet(null, loaded);
+        cached = loginAttemptPolicyRef.get();
+      } else {
+        cached = secureDefaultLoginAttemptPolicy();
+      }
     }
+    announceDisabledLoginThrottling(cached);
+    return cached;
+  }
 
-    LoginAttemptPolicy loaded = findSingleService(
-        LoginAttemptPolicy.class,
-        ServiceLoader.load(LoginAttemptPolicy.class))
-        .orElse(NoopLoginAttemptPolicy.INSTANCE);
+  /**
+   * JS-SEC-124 (CWE-1188, CWE-307): the resolver default is a throttling
+   * {@link InMemoryLoginAttemptPolicy} - five failures in fifteen minutes lock the key for
+   * fifteen minutes, doubling up to four hours - not the inert
+   * {@link NoopLoginAttemptPolicy} it was until 00.83.00. An application that never thought
+   * about brute force used to run without any limit and without a word in the log.
+   * {@link #findLoginAttemptPolicy()} still reports the default as "not configured", so
+   * diagnostics can tell a default from a registration; registering
+   * {@link NoopLoginAttemptPolicy} explicitly remains the opt-out and is announced.
+   *
+   * <p>Created under the context's monitor so that two first callers cannot end up with two
+   * defaults, one of which would then pass for a registration. The default publishes its audit
+   * events through this context, not through the process-wide one.
+   */
+  private LoginAttemptPolicy secureDefaultLoginAttemptPolicy() {
+    synchronized (loginAttemptPolicyRef) {
+      LoginAttemptPolicy current = loginAttemptPolicyRef.get();
+      if (current != null) {
+        return current;
+      }
+      LoginAttemptPolicy created = new InMemoryLoginAttemptPolicy(
+          LoginAttemptConfiguration.defaults(), Clock.systemUTC(), contextAuditService());
+      defaultedLoginAttemptPolicy = created;
+      if (!loginAttemptPolicyRef.compareAndSet(null, created)) {
+        defaultedLoginAttemptPolicy = null;
+      }
+      return loginAttemptPolicyRef.get();
+    }
+  }
 
-    loginAttemptPolicyRef.compareAndSet(null, loaded);
-    return loginAttemptPolicyRef.get();
+  /** An audit sink that resolves this context's service on every event. */
+  private JCustosAuditService contextAuditService() {
+    return new JCustosAuditService() {
+      @Override
+      public void publish(eu.jsentinel.jcustos.audit.AuditEvent event) {
+        securityAuditService().publish(event);
+      }
+
+      @Override
+      public java.util.List<eu.jsentinel.jcustos.audit.AuditEvent> query(
+          eu.jsentinel.jcustos.audit.AuditQuery query) {
+        return securityAuditService().query(query);
+      }
+    };
+  }
+
+  /**
+   * JS-SEC-124 (CWE-1188): switching the throttle off is allowed, but never silent. Detected by
+   * type, not identity, so a fresh {@code new NoopLoginAttemptPolicy()} counts as well.
+   */
+  private static void announceDisabledLoginThrottling(LoginAttemptPolicy policy) {
+    if (policy instanceof NoopLoginAttemptPolicy
+        && NOOP_LOGIN_ATTEMPT_WARNED.compareAndSet(false, true)) {
+      NOOP_LOGIN_ATTEMPT_WARNINGS.incrementAndGet();
+      HasLogger.staticLogger().warn("bruteforce/noop-policy: NoopLoginAttemptPolicy is registered; "
+          + "failed logins are neither counted nor throttled. Remove the registration to get the "
+          + "default InMemoryLoginAttemptPolicy, or register a throttling LoginAttemptPolicy.");
+    }
+  }
+
+  /**
+   * Diagnostics hook: how often the {@code bruteforce/noop-policy} warning was written.
+   *
+   * @return the number of warnings since start-up or the last re-arm
+   */
+  static int noopLoginAttemptPolicyWarnings() {
+    return NOOP_LOGIN_ATTEMPT_WARNINGS.get();
+  }
+
+  /** Test hook: re-arms the one-time {@code bruteforce/noop-policy} warning. */
+  static void resetNoopLoginAttemptPolicyWarning() {
+    NOOP_LOGIN_ATTEMPT_WARNED.set(false);
+    NOOP_LOGIN_ATTEMPT_WARNINGS.set(0);
   }
 
   /**
    * Returns the registered {@link LoginAttemptPolicy}, or empty if none
-   * is configured. Use {@link #loginAttemptPolicy()} for the noop
-   * fallback.
+   * is configured. The secure default of {@link #loginAttemptPolicy()} and an
+   * explicitly registered {@link NoopLoginAttemptPolicy} both count as
+   * "not configured" (JS-SEC-124: detected by type, not identity).
    *
    * @return the SPI-registered policy, or empty
    */
   public Optional<LoginAttemptPolicy> findLoginAttemptPolicy() {
     LoginAttemptPolicy cached = loginAttemptPolicyRef.get();
-    if (cached != null && cached != NoopLoginAttemptPolicy.INSTANCE) {
-      return Optional.of(cached);
-    }
-    if (cached == NoopLoginAttemptPolicy.INSTANCE) {
-      return Optional.empty();
+    if (cached != null) {
+      boolean configured = !(cached instanceof NoopLoginAttemptPolicy)
+          && cached != defaultedLoginAttemptPolicy;
+      return configured ? Optional.of(cached) : Optional.empty();
     }
 
     Optional<LoginAttemptPolicy> loaded = findSingleService(
         LoginAttemptPolicy.class,
         ServiceLoader.load(LoginAttemptPolicy.class));
     loaded.ifPresent(policy -> loginAttemptPolicyRef.compareAndSet(null, policy));
-    return loaded;
+    return loaded.filter(policy -> !(policy instanceof NoopLoginAttemptPolicy));
+  }
+
+  /**
+   * Whether login throttling has been switched off by registering a
+   * {@link NoopLoginAttemptPolicy} - through {@code META-INF/services} or
+   * {@link #setLoginAttemptPolicy(LoginAttemptPolicy)}. Unlike
+   * {@link #loginAttemptPolicy()} this neither creates the default nor logs.
+   *
+   * @return {@code true} when the effective policy is the no-op
+   * @since 00.84.00
+   */
+  public boolean isLoginThrottlingDisabled() {
+    LoginAttemptPolicy cached = loginAttemptPolicyRef.get();
+    if (cached != null) {
+      return cached instanceof NoopLoginAttemptPolicy;
+    }
+    return findSingleService(
+        LoginAttemptPolicy.class,
+        ServiceLoader.load(LoginAttemptPolicy.class))
+        .filter(NoopLoginAttemptPolicy.class::isInstance)
+        .isPresent();
   }
 
   /**
    * Replaces the cached {@link LoginAttemptPolicy}. Intended for tests
    * and for applications that prefer programmatic wiring over SPI.
+   * Passing a {@link NoopLoginAttemptPolicy} switches throttling off and is
+   * announced once as {@code bruteforce/noop-policy} (JS-SEC-124).
    *
    * @param policy the policy, or {@code null} to clear
    */
   public void setLoginAttemptPolicy(LoginAttemptPolicy policy) {
     loginAttemptPolicyRef.set(policy);
+    announceDisabledLoginThrottling(policy);
   }
+
 
   // ── ClientAddressResolver ──────────────────────────────────────
 
@@ -798,10 +913,38 @@ public final class JCustosContext {
     LogoutService loaded = findSingleService(
         LogoutService.class,
         ServiceLoader.load(LogoutService.class))
-        .orElse(NoopLogoutService.INSTANCE);
+        .orElse(null);
+    if (loaded == null) {
+      // JS-SEC-124 (CWE-1188): a logout that does nothing must never be silent. Same shape as
+      // JS-SEC-080 for the audit service: announced once per JVM, findLogoutService() keeps
+      // reporting "nothing configured", and the Noop is deliberately NOT cached, so a service
+      // that becomes visible later, or is set through the resolver, is picked up.
+      if (NOOP_LOGOUT_WARNED.compareAndSet(false, true)) {
+        NOOP_LOGOUT_WARNINGS.incrementAndGet();
+        HasLogger.staticLogger().warn("logout/noop-fallback: no LogoutService is registered "
+            + "(META-INF/services or JCustosServiceResolver.setLogoutService); logout requests "
+            + "are discarded and sessions stay valid until one is configured.");
+      }
+      return NoopLogoutService.INSTANCE;
+    }
 
     logoutServiceRef.compareAndSet(null, loaded);
     return logoutServiceRef.get();
+  }
+
+  /**
+   * Diagnostics hook: how often the {@code logout/noop-fallback} warning was written.
+   *
+   * @return the number of warnings since start-up or the last re-arm
+   */
+  static int noopLogoutFallbackWarnings() {
+    return NOOP_LOGOUT_WARNINGS.get();
+  }
+
+  /** Test hook: re-arms the one-time {@code logout/noop-fallback} warning. */
+  static void resetNoopLogoutFallbackWarning() {
+    NOOP_LOGOUT_WARNED.set(false);
+    NOOP_LOGOUT_WARNINGS.set(0);
   }
 
   /**
@@ -812,10 +955,12 @@ public final class JCustosContext {
    */
   public Optional<LogoutService> findLogoutService() {
     LogoutService cached = logoutServiceRef.get();
-    if (cached != null && cached != NoopLogoutService.INSTANCE) {
+    // JS-SEC-124: any Noop - the shared INSTANCE or a fresh one - means "no logout
+    // configured"; detection by type, not identity.
+    if (cached != null && !(cached instanceof NoopLogoutService)) {
       return Optional.of(cached);
     }
-    if (cached == NoopLogoutService.INSTANCE) {
+    if (cached instanceof NoopLogoutService) {
       return Optional.empty();
     }
 
@@ -823,7 +968,7 @@ public final class JCustosContext {
         LogoutService.class,
         ServiceLoader.load(LogoutService.class));
     loaded.ifPresent(service -> logoutServiceRef.compareAndSet(null, service));
-    return loaded;
+    return loaded.filter(service -> !(service instanceof NoopLogoutService));
   }
 
   /**
@@ -1307,6 +1452,7 @@ public final class JCustosContext {
     auditServiceRef.set(null);
     actionAuthServiceRef.set(null);
     loginAttemptPolicyRef.set(null);
+    defaultedLoginAttemptPolicy = null;
     sessionPolicyRef.set(null);
     defaultedSessionPolicy = null;
     passwordHasherRef.set(null);

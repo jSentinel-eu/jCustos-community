@@ -16,19 +16,21 @@
  */
 package eu.jsentinel.jcustos.bruteforce;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.BruteForceLimitReached;
 import eu.jsentinel.jcustos.audit.LoginFailed;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.util.CapacityBound;
+import eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer;
 
 import java.time.Clock;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 /**
  * In-memory {@link LoginAttemptPolicy} suitable for single-node demos
@@ -36,18 +38,41 @@ import java.util.concurrent.ConcurrentMap;
  * <p>
  * Counts failures per (username, clientAddress) pair plus an additional
  * username-only counter so an attacker cannot cycle clients to evade the
- * combined counter. Username and clientAddress are normalised
- * (lower-cased + trimmed) before use as map keys.
+ * combined counter. The username passes through the configured
+ * {@link SubjectKeyCanonicalizer} (default: NFKC, lower-case, trimmed), the
+ * client address is trimmed and lower-cased, before either is used as a key.
  * <p>
  * After {@link LoginAttemptConfiguration#failureThreshold()} failures
  * inside {@link LoginAttemptConfiguration#window()} the key is locked
  * for {@link LoginAttemptConfiguration#initialLockout()}. Repeated
  * breaches double the lockout up to
  * {@link LoginAttemptConfiguration#maxLockout()} (progressive backoff).
- * A successful {@link #recordSuccess(LoginAttemptContext) recordSuccess}
- * resets the combined counter; the username-only counter is reset on
- * the next successful login by the same user even from a different
- * client.
+ * A successful login resets both counters - unless a lockout is in force,
+ * which a success never lifts (see {@link #confirmSuccess}).
+ *
+ * <h2>Attempts in flight (JS-SEC-123, CWE-367)</h2>
+ *
+ * <p>{@link #beforeAttempt} does not merely read. Under the policy's monitor
+ * it checks the lockouts, counts the attempt as in flight on both keys and
+ * allows it only while {@code failures + inFlight} stays below the
+ * threshold. The report that follows - {@link #recordFailure},
+ * {@link #confirmSuccess}/{@link #recordSuccess} or {@link #abandonAttempt} -
+ * releases the reservation. Fifty requests that arrive together therefore
+ * get at most {@code failureThreshold} evaluations; the others receive
+ * {@link LoginAttemptDecision.LockedOut} with the time until a slot frees up.
+ * A reservation whose report never comes lapses after
+ * {@link #ATTEMPT_RESERVATION_TTL}.
+ *
+ * <h2>Capacity (JS-SEC-122, CWE-307, CWE-770)</h2>
+ *
+ * <p>Each of the two maps holds at most {@code maxEntries} keys - a hard
+ * bound. A key that is locked or has an attempt in flight is never evicted.
+ * State that has expired (failures older than the window, a lockout that
+ * ended more than {@code maxLockout} ago) is dropped on the next call via an
+ * expiry index. When room is still needed the unprotected entry written
+ * longest ago goes; when every entry is protected, an attempt on a new key
+ * is denied with {@link LoginAttemptDecision.LockedOut} until the first
+ * lockout ends, and {@code bruteforce/capacity-exhausted} is logged.
  *
  * <h2>Audit</h2>
  *
@@ -65,14 +90,29 @@ import java.util.concurrent.ConcurrentMap;
  * <p>Audit-sink failures are swallowed — they must never break the
  * security flow that emitted them.
  */
-public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy {
+public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, HasLogger {
+
+  /**
+   * How long an allowed attempt counts as in flight when no report follows. Long enough for a
+   * memory-hard KDF behind a saturated limiter or a remote identity provider, short enough that
+   * a caller which loses a report does not hold the slot for the length of a lockout.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration ATTEMPT_RESERVATION_TTL = Duration.ofSeconds(30);
+
+  /** At most one {@code bruteforce/capacity-exhausted} line per this interval. */
+  private static final Duration CAPACITY_WARNING_INTERVAL = Duration.ofMinutes(1);
 
   private final LoginAttemptConfiguration config;
   private final Clock clock;
   private final JCustosAuditService auditService;
+  private final SubjectKeyCanonicalizer canonicalizer;
   private final int maxEntries;
-  private final ConcurrentMap<String, State> byCombinedKey = new ConcurrentHashMap<>();
-  private final ConcurrentMap<String, State> byUsername = new ConcurrentHashMap<>();
+  private final Object monitor = new Object();
+  private final BoundedAttemptTable<CombinedKey, State> byCombinedKey;
+  private final BoundedAttemptTable<String, State> byUsername;
+  private Instant lastCapacityWarning;
 
   /** Defaults — suitable for single-node demos. */
   public InMemoryLoginAttemptPolicy() {
@@ -94,9 +134,9 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy {
   /**
    * JS-SEC-048 (CWE-770): additionally bound the per-key maps. Both maps are keyed on
    * attacker-controlled username / client address, so a spray of distinct throwaway usernames would
-   * otherwise grow the heap without limit (a one-shot key at {@code failures=1} is reclaimed only by
-   * a valid {@code recordSuccess}). When a map is at capacity, a new key evicts a non-locked entry —
-   * never an in-force lockout (the RF01 invariant), so the throttle cannot be sprayed away.
+   * otherwise grow the heap without limit. JS-SEC-122 (CWE-307, CWE-770): the bound is hard, and an
+   * in-force lockout is never evicted (the RF01 invariant) - see the type description for what
+   * happens when only lockouts remain.
    *
    * @param maxEntries per-map key cap (shared default {@link CapacityBound#DEFAULT_MAX_ENTRIES})
    */
@@ -104,108 +144,335 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy {
                                     Clock clock,
                                     JCustosAuditService auditService,
                                     int maxEntries) {
+    this(config, clock, auditService, maxEntries, SubjectKeyCanonicalizer.defaults());
+  }
+
+  /**
+   * JS-SEC-123 (CWE-178): the canonicaliser decides which spellings of a user name are the same
+   * account. Hand the same instance to the credential store, otherwise two accounts share one
+   * counter or one account gets several.
+   *
+   * @param canonicalizer maps a user name onto its throttle key; non-null
+   * @since 00.84.00
+   */
+  public InMemoryLoginAttemptPolicy(LoginAttemptConfiguration config,
+                                    Clock clock,
+                                    JCustosAuditService auditService,
+                                    int maxEntries,
+                                    SubjectKeyCanonicalizer canonicalizer) {
     this.config = Objects.requireNonNull(config, "config");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.auditService = auditService;
+    this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
     this.maxEntries = CapacityBound.requirePositiveCapacity(maxEntries);
+    this.byCombinedKey = new BoundedAttemptTable<>(maxEntries, null);
+    this.byUsername = new BoundedAttemptTable<>(maxEntries, null);
   }
 
   /** Package-visible for tests: number of tracked combined-key entries (JS-SEC-048 bound). */
   int trackedCombinedKeyCount() {
-    return byCombinedKey.size();
+    synchronized (monitor) {
+      return byCombinedKey.size();
+    }
+  }
+
+  /** Package-visible for tests: number of tracked username entries (JS-SEC-122 bound). */
+  int trackedUsernameCount() {
+    synchronized (monitor) {
+      return byUsername.size();
+    }
   }
 
   @Override
   public LoginAttemptDecision beforeAttempt(LoginAttemptContext context) {
     Objects.requireNonNull(context, "context");
     Instant now = Instant.now(clock);
+    CombinedKey combinedKey = combinedKey(context);
+    String usernameKey = combinedKey.username();
 
-    State combined = byCombinedKey.get(combinedKey(context));
-    LoginAttemptDecision combinedDecision = lockoutDecision(combined, now);
-    if (combinedDecision != null) {
-      return combinedDecision;
-    }
+    boolean capacityExhausted = false;
+    LoginAttemptDecision decision;
+    synchronized (monitor) {
+      State combined = byCombinedKey.get(combinedKey, now);
+      State user = byUsername.get(usernameKey, now);
 
-    State user = byUsername.get(usernameKey(context));
-    LoginAttemptDecision userDecision = lockoutDecision(user, now);
-    if (userDecision != null) {
-      return userDecision;
+      LoginAttemptDecision locked = firstLockout(combined, user, now);
+      if (locked != null) {
+        return locked;
+      }
+
+      // JS-SEC-123 (CWE-367): the check and the reservation are one step. Requests that arrive
+      // together see each other's attempts in flight instead of all reading "below threshold".
+      combined = prepare(combined, now);
+      user = prepare(user, now);
+      LoginAttemptDecision saturated = saturation(combined, now);
+      if (saturated == null) {
+        saturated = saturation(user, now);
+      }
+      if (saturated != null) {
+        return saturated;
+      }
+
+      Instant reservedUntil = plus(now, ATTEMPT_RESERVATION_TTL);
+      combined.reserve(reservedUntil);
+      if (!store(byCombinedKey, combinedKey, combined, now)) {
+        decision = capacityRefusal(byCombinedKey, now);
+        capacityExhausted = true;
+      } else {
+        user.reserve(reservedUntil);
+        if (!store(byUsername, usernameKey, user, now)) {
+          combined.release(now);
+          store(byCombinedKey, combinedKey, combined, now);
+          decision = capacityRefusal(byUsername, now);
+          capacityExhausted = true;
+        } else {
+          decision = LoginAttemptDecision.allowed();
+        }
+      }
+      if (capacityExhausted) {
+        capacityExhausted = capacityWarningDue(now);
+      }
     }
-    return LoginAttemptDecision.allowed();
+    if (capacityExhausted) {
+      // JS-SEC-122 (CWE-770): never silent - the throttle is refusing accounts it does not track.
+      logger().warn("bruteforce/capacity-exhausted: all {} tracked login keys are locked or have an "
+          + "attempt in flight; attempts on further keys are denied until the first lockout ends.",
+          maxEntries);
+    }
+    return decision;
   }
 
-  private static LoginAttemptDecision lockoutDecision(State state, Instant now) {
-    if (state == null || !state.isLocked(now)) {
-      return null;
+  @Override
+  public LoginAttemptDecision peek(LoginAttemptContext context) {
+    Objects.requireNonNull(context, "context");
+    Instant now = Instant.now(clock);
+    CombinedKey combinedKey = combinedKey(context);
+    synchronized (monitor) {
+      LoginAttemptDecision locked = firstLockout(
+          byCombinedKey.get(combinedKey, now), byUsername.get(combinedKey.username(), now), now);
+      return locked != null ? locked : LoginAttemptDecision.allowed();
     }
-    Duration remaining = Duration.between(now, state.lockedUntil());
-    if (remaining.isNegative()) {
-      remaining = Duration.ZERO;
-    }
-    return LoginAttemptDecision.lockedOut(remaining, state.totalFailuresObserved());
   }
 
   @Override
   public void recordSuccess(LoginAttemptContext context) {
+    confirmSuccess(context);
+  }
+
+  @Override
+  public LoginAttemptDecision confirmSuccess(LoginAttemptContext context) {
     Objects.requireNonNull(context, "context");
-    byCombinedKey.remove(combinedKey(context));
-    byUsername.remove(usernameKey(context));
+    Instant now = Instant.now(clock);
+    CombinedKey combinedKey = combinedKey(context);
+    String usernameKey = combinedKey.username();
+
+    synchronized (monitor) {
+      State combined = byCombinedKey.get(combinedKey, now);
+      State user = byUsername.get(usernameKey, now);
+      if (combined != null) {
+        combined.release(now);
+      }
+      if (user != null) {
+        user.release(now);
+      }
+      LoginAttemptDecision locked = firstLockout(combined, user, now);
+      if (locked != null) {
+        // JS-SEC-123 (CWE-307): the key was locked while this attempt was being checked. The
+        // lockout stays, and the caller is told to deny the login.
+        restore(byCombinedKey, combinedKey, combined, now);
+        restore(byUsername, usernameKey, user, now);
+        return locked;
+      }
+      if (combined != null) {
+        combined.clear();
+        store(byCombinedKey, combinedKey, combined, now);
+      }
+      if (user != null) {
+        user.clear();
+        store(byUsername, usernameKey, user, now);
+      }
+      return LoginAttemptDecision.allowed();
+    }
+  }
+
+  @Override
+  public void abandonAttempt(LoginAttemptContext context) {
+    Objects.requireNonNull(context, "context");
+    Instant now = Instant.now(clock);
+    CombinedKey combinedKey = combinedKey(context);
+    String usernameKey = combinedKey.username();
+
+    // JS-SEC-126 (CWE-703): the check produced no verdict - release the slot, count nothing.
+    synchronized (monitor) {
+      State combined = byCombinedKey.get(combinedKey, now);
+      if (combined != null) {
+        combined.release(now);
+        store(byCombinedKey, combinedKey, combined, now);
+      }
+      State user = byUsername.get(usernameKey, now);
+      if (user != null) {
+        user.release(now);
+        store(byUsername, usernameKey, user, now);
+      }
+    }
   }
 
   @Override
   public void recordFailure(LoginAttemptContext context) {
     Objects.requireNonNull(context, "context");
     Instant now = Instant.now(clock);
+    CombinedKey combinedKey = combinedKey(context);
+    String usernameKey = combinedKey.username();
 
-    State combined = recordOn(byCombinedKey, combinedKey(context), now);
-    State user = recordOn(byUsername, usernameKey(context), now);
+    State justLocked;
+    Instant lockedUntil;
+    int totalFailures;
+    synchronized (monitor) {
+      State combined = recordOn(byCombinedKey, combinedKey, now);
+      State user = recordOn(byUsername, usernameKey, now);
+      justLocked = combined.justLocked ? combined : user.justLocked ? user : null;
+      lockedUntil = justLocked == null ? null : justLocked.lockedUntil;
+      totalFailures = justLocked == null ? 0 : justLocked.totalFailuresObserved;
+    }
 
     auditLoginFailed(context);
-    State justLocked = combined.justLocked() ? combined : user.justLocked() ? user : null;
     if (justLocked != null) {
-      auditBruteForceLimitReached(context, justLocked, now);
+      auditBruteForceLimitReached(context, lockedUntil, totalFailures, now);
     }
   }
 
-  private State recordOn(ConcurrentMap<String, State> map, String key, Instant now) {
-    enforceBound(map, key, now);
-    return map.compute(key, (k, current) -> {
-      State state = current == null ? State.empty() : current.expireOldFailures(now, config.window());
-      return state.addFailure(now, config);
-    });
+  private <K> State recordOn(BoundedAttemptTable<K, State> table, K key, Instant now) {
+    State state = prepare(table.get(key, now), now);
+    state.release(now);
+    state.addFailure(now, config);
+    store(table, key, state, now);
+    return state;
+  }
+
+  /** Returns a state ready for this call: outdated failures dropped, lapsed reservations gone. */
+  private State prepare(State state, Instant now) {
+    if (state == null) {
+      return new State();
+    }
+    state.justLocked = false;
+    if (state.firstFailureAt != null && now.isAfter(plus(state.firstFailureAt, config.window()))) {
+      state.failures = 0;
+      state.firstFailureAt = null;
+    }
+    state.pruneReservations(now);
+    return state;
+  }
+
+  private static LoginAttemptDecision firstLockout(State combined, State user, Instant now) {
+    LoginAttemptDecision decision = lockoutDecision(combined, now);
+    return decision != null ? decision : lockoutDecision(user, now);
+  }
+
+  private static LoginAttemptDecision lockoutDecision(State state, Instant now) {
+    if (state == null || !state.isLocked(now)) {
+      return null;
+    }
+    return LoginAttemptDecision.lockedOut(nonNegative(now, state.lockedUntil),
+        state.totalFailuresObserved);
+  }
+
+  /** Denies when the failures counted plus the attempts in flight have used up the threshold. */
+  private LoginAttemptDecision saturation(State state, Instant now) {
+    if (state.failures + state.inFlight() < config.failureThreshold()) {
+      return null;
+    }
+    return LoginAttemptDecision.lockedOut(
+        nonNegative(now, state.earliestReservationEnd()), state.totalFailuresObserved);
   }
 
   /**
-   * JS-SEC-048 (CWE-770) + RF01 invariant: when {@code map} is at capacity and {@code incomingKey}
-   * is new, evict entries that are NOT currently locked, back under the bound. An in-force lockout
-   * is never evicted (a distinct-username spray must not push a victim's lock out of the map); if
-   * every remaining entry is a live lockout a transient soft overshoot is accepted — locks are
-   * time-bounded and self-reclaim.
+   * JS-SEC-122 (CWE-770): the map is full of lockouts and attempts in flight. The new key is
+   * denied until the first of them ends - the map neither grows nor gives up a lockout.
    */
-  private void enforceBound(ConcurrentMap<String, State> map, String incomingKey, Instant now) {
-    if (map.size() < maxEntries || map.containsKey(incomingKey)) {
-      return;
+  private static LoginAttemptDecision capacityRefusal(BoundedAttemptTable<?, State> table,
+                                                      Instant now) {
+    Instant retryAt = table.earliestProtectionEnd().orElse(now);
+    return LoginAttemptDecision.lockedOut(nonNegative(now, retryAt), 0);
+  }
+
+  private boolean capacityWarningDue(Instant now) {
+    if (lastCapacityWarning != null
+        && now.isBefore(plus(lastCapacityWarning, CAPACITY_WARNING_INTERVAL))
+        && !now.isBefore(lastCapacityWarning)) {
+      return false;
     }
-    var it = map.entrySet().iterator();
-    while (map.size() >= maxEntries && it.hasNext()) {
-      var entry = it.next();
-      if (entry.getKey().equals(incomingKey) || entry.getValue().isLocked(now)) {
-        continue;
-      }
-      it.remove();
+    lastCapacityWarning = now;
+    return true;
+  }
+
+  /**
+   * Writes {@code state} back with the deadlines that follow from its content; a state that
+   * holds nothing any more is removed.
+   *
+   * @return {@code false} when the key is new and the table refused it
+   */
+  private <K> boolean store(BoundedAttemptTable<K, State> table, K key, State state, Instant now) {
+    Instant reservedUntil = state.latestReservationEnd();
+    Instant lockEnds = state.isLocked(now) ? state.lockedUntil : null;
+    // failures count up to and including the instant the window ends, see prepare(...)
+    Instant failuresEnd = state.firstFailureAt == null
+        ? null
+        : plus(plus(state.firstFailureAt, config.window()), Duration.ofNanos(1));
+    // the lockout level is remembered for one maxLockout after the lockout ended, so that a
+    // repeat offender still escalates while the map does not keep every key for ever
+    Instant levelEnds = state.lockedUntil == null
+        ? null
+        : plus(state.lockedUntil, config.maxLockout());
+    Instant expiresAt = latest(latest(failuresEnd, levelEnds), reservedUntil);
+    if (expiresAt == null || !expiresAt.isAfter(now)) {
+      table.remove(key);
+      return true;
+    }
+    return table.put(key, state, expiresAt, latest(lockEnds, reservedUntil), now);
+  }
+
+  private <K> void restore(BoundedAttemptTable<K, State> table, K key, State state, Instant now) {
+    if (state != null) {
+      store(table, key, state, now);
     }
   }
 
-  private String combinedKey(LoginAttemptContext context) {
-    return normalise(context.username()) + "|" + normalise(context.clientAddress());
+  private CombinedKey combinedKey(LoginAttemptContext context) {
+    return new CombinedKey(canonicalUsername(context.username()),
+        normaliseAddress(context.clientAddress()));
   }
 
-  private String usernameKey(LoginAttemptContext context) {
-    return normalise(context.username());
+  private String canonicalUsername(String value) {
+    return value == null ? "" : canonicalizer.canonicalize(value);
   }
 
-  private static String normalise(String value) {
+  private static String normaliseAddress(String value) {
     return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+  }
+
+  private static Duration nonNegative(Instant from, Instant to) {
+    if (to == null || !to.isAfter(from)) {
+      return Duration.ZERO;
+    }
+    return Duration.between(from, to);
+  }
+
+  private static Instant latest(Instant a, Instant b) {
+    if (a == null) {
+      return b;
+    }
+    if (b == null) {
+      return a;
+    }
+    return a.isAfter(b) ? a : b;
+  }
+
+  private static Instant plus(Instant instant, Duration duration) {
+    try {
+      return instant.plus(duration);
+    } catch (DateTimeException | ArithmeticException overflow) {
+      return Instant.MAX;
+    }
   }
 
   private void auditLoginFailed(LoginAttemptContext context) {
@@ -222,21 +489,15 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy {
   }
 
   private void auditBruteForceLimitReached(
-      LoginAttemptContext context, State state, Instant now) {
+      LoginAttemptContext context, Instant lockedUntil, int totalFailures, Instant now) {
     JCustosAuditService sink = sink();
-    Duration lockoutRemaining = state.lockedUntil() == null
-        ? Duration.ZERO
-        : Duration.between(now, state.lockedUntil());
-    if (lockoutRemaining.isNegative()) {
-      lockoutRemaining = Duration.ZERO;
-    }
     try {
       sink.publish(new BruteForceLimitReached(
           Instant.now(clock),
           context.username() == null ? "" : context.username(),
           context.clientAddress(),
-          state.totalFailuresObserved(),
-          lockoutRemaining));
+          totalFailures,
+          nonNegative(now, lockedUntil)));
     } catch (RuntimeException auditFailure) {
       // never block a security decision because the audit sink failed
     }
@@ -251,47 +512,96 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy {
   // ── State ─────────────────────────────────────────────────────
 
   /**
-   * Per-key throttling state. Immutable so it can be CAS-updated through
-   * {@link ConcurrentMap#compute(Object, java.util.function.BiFunction)}.
-   * {@link #totalFailuresObserved()} is the lifetime failure count for
-   * the key — what the {@link LoginAttemptDecision.LockedOut#failedAttempts()}
-   * field reports.
+   * The (user, client) key. A record instead of a joined string, so a separator inside a user
+   * name cannot make two different pairs collide.
    */
-  private record State(int failures, Instant firstFailureAt, Instant lockedUntil,
-                       int lockoutLevel, boolean justLocked, int totalFailuresObserved) {
+  private record CombinedKey(String username, String clientAddress) {
+  }
 
-    static State empty() {
-      return new State(0, null, null, 0, false, 0);
-    }
+  /**
+   * Per-key throttling state; only touched under the policy's monitor.
+   * {@link #totalFailuresObserved} is the failure count since the key was last cleared - what the
+   * {@link LoginAttemptDecision.LockedOut#failedAttempts()} field reports.
+   */
+  private static final class State {
+    private int failures;
+    private Instant firstFailureAt;
+    private Instant lockedUntil;
+    private int lockoutLevel;
+    private boolean justLocked;
+    private int totalFailuresObserved;
+    /** End of each attempt in flight, oldest first; {@code null} while there is none. */
+    private ArrayDeque<Instant> reservations;
 
-    boolean isLocked(Instant now) {
+    private boolean isLocked(Instant now) {
       return lockedUntil != null && now.isBefore(lockedUntil);
     }
 
-    /**
-     * If the failure window has elapsed without breach, drop old failures.
-     * Lockout state is preserved — callers check {@link #isLocked(Instant)}.
-     */
-    State expireOldFailures(Instant now, Duration window) {
-      if (firstFailureAt != null && now.isAfter(firstFailureAt.plus(window))) {
-        return new State(0, null, lockedUntil, lockoutLevel, false, totalFailuresObserved);
+    private void addFailure(Instant now, LoginAttemptConfiguration config) {
+      failures++;
+      totalFailuresObserved++;
+      if (firstFailureAt == null) {
+        firstFailureAt = now;
       }
-      return new State(failures, firstFailureAt, lockedUntil, lockoutLevel, false,
-          totalFailuresObserved);
+      if (failures >= config.failureThreshold()) {
+        lockoutLevel++;
+        lockedUntil = plus(now, lockoutDuration(lockoutLevel, config));
+        failures = 0;
+        firstFailureAt = null;
+        justLocked = true;
+      }
     }
 
-    State addFailure(Instant now, LoginAttemptConfiguration config) {
-      int nextFailures = failures + 1;
-      Instant first = firstFailureAt == null ? now : firstFailureAt;
-      int nextTotal = totalFailuresObserved + 1;
+    /** A successful login: everything but the attempts still in flight is forgotten. */
+    private void clear() {
+      failures = 0;
+      firstFailureAt = null;
+      lockedUntil = null;
+      lockoutLevel = 0;
+      justLocked = false;
+      totalFailuresObserved = 0;
+    }
 
-      if (nextFailures >= config.failureThreshold()) {
-        int level = lockoutLevel + 1;
-        Duration duration = lockoutDuration(level, config);
-        Instant until = now.plus(duration);
-        return new State(0, null, until, level, true, nextTotal);
+    private int inFlight() {
+      return reservations == null ? 0 : reservations.size();
+    }
+
+    private void reserve(Instant until) {
+      if (reservations == null) {
+        reservations = new ArrayDeque<>(2);
       }
-      return new State(nextFailures, first, lockedUntil, lockoutLevel, false, nextTotal);
+      reservations.addLast(until);
+    }
+
+    /** Drops lapsed reservations, then the oldest one that is still running. */
+    private void release(Instant now) {
+      pruneReservations(now);
+      if (reservations != null) {
+        reservations.pollFirst();
+        if (reservations.isEmpty()) {
+          reservations = null;
+        }
+      }
+    }
+
+    private void pruneReservations(Instant now) {
+      if (reservations == null) {
+        return;
+      }
+      while (!reservations.isEmpty() && !reservations.peekFirst().isAfter(now)) {
+        reservations.pollFirst();
+      }
+      if (reservations.isEmpty()) {
+        reservations = null;
+      }
+    }
+
+    private Instant earliestReservationEnd() {
+      return reservations == null ? null : reservations.peekFirst();
+    }
+
+    private Instant latestReservationEnd() {
+      return reservations == null ? null : reservations.peekLast();
     }
 
     private static Duration lockoutDuration(int level, LoginAttemptConfiguration config) {

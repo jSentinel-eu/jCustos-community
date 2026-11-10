@@ -966,6 +966,70 @@ metadata.authorizationResponseIssParameterSupported())`; a custom callback adapt
 into `CallbackParams`, and a persistent `StateStore` has to keep `StateEntry.extra`. Code that
 relied on the `…-capacity-exceeded` exception no longer sees it.
 
+## Login lockouts survive capacity pressure; the bound is hard (SA22, JS-SEC-122, CWE-307, CWE-770)
+
+`InMemoryLoginAttemptStore` evicted the entry with the oldest failure without knowing whether it was
+a live lockout, so a spray of new user names pushed a victim's lockout out of the store and
+`StoreBackedLoginAttemptPolicy` let the account be guessed again. `InMemoryLoginAttemptPolicy`
+spared locked entries but then had no bound at all once only locked entries remained. Both now sit
+on one bounded table: a key that is locked or has an attempt in flight is never evicted, expired
+state is removed through an expiry index on the next call, and the number of tracked keys never
+exceeds `maxEntries`. When the table is full of live lockouts, an attempt on a further key is denied
+with `LockedOut` until the first lockout ends, and `bruteforce/capacity-exhausted` is logged.
+`LoginAttemptStore` gained four atomic attempt operations as `default` methods; the in-memory store
+and the Eclipse-Store adapter implement them, the latter without a change to the stored format.
+**Behaviour:** the store-backed policy now forgets a counter after a full `window()` without
+failures, and the in-memory policy forgets a lockout level one `maxLockout` after the lockout ended.
+
+## The login lockout is one atomic step; one key per account (SA23, JS-SEC-123, CWE-367, CWE-307, CWE-178)
+
+`beforeAttempt` only read the counter and the failure was counted after the credential check, so
+fifty parallel guesses at a threshold of five were all evaluated, and a late `recordSuccess` removed
+a lockout that had set in meanwhile. The shipped policies now reserve the attempt when they allow
+it: at most `failureThreshold` attempts are in flight per key, the report releases the reservation,
+and one that is never reported lapses after 30 seconds. `LoginAttemptPolicy` gained `confirmSuccess`
+(answers `LockedOut` instead of lifting a live lockout), `abandonAttempt` (no verdict, nothing
+counted) and `peek` (look without reserving), all as `default` methods. The new
+`SubjectKeyCanonicalizer` (NFKC, lower-case, trimmed by default) is used by both login policies and
+by `InMemoryCredentialStore`, so `alice` and `ALICE` can no longer be two accounts sharing one
+failure counter. **Migration:** every allowed `beforeAttempt` must be followed by exactly one of
+`confirmSuccess`/`recordSuccess`, `recordFailure` or `abandonAttempt`; code that used
+`beforeAttempt` merely to display a lockout switches to `peek`; `InMemoryCredentialStore` rejects a
+second registration that differs only in spelling unless it is built with
+`SubjectKeyCanonicalizer.exact()`.
+
+## Login throttling is on by default; switching it off is announced (SA24, JS-SEC-124, CWE-1188, CWE-307)
+
+**Behaviour change for every application that registered no `LoginAttemptPolicy`:**
+`JCustosServiceResolver.loginAttemptPolicy()` no longer falls back to `NoopLoginAttemptPolicy` but
+to an `InMemoryLoginAttemptPolicy` with the default thresholds — five failures within fifteen
+minutes lock the key for fifteen minutes, doubling up to four hours. Until now such an application
+ran without any limit on password guessing and without a line in the log. `findLoginAttemptPolicy()`
+still reports the default as "not configured". Consumers who relied on no throttling must register
+`NoopLoginAttemptPolicy` explicitly; doing so logs one WARN `bruteforce/noop-policy` and makes the
+DX bootstrap report `bruteforce/noop-policy` — a WARNING, an ERROR in PRODUCTION and STRICT. The
+`NoopLogoutService` fallback is announced once as `logout/noop-fallback` and is no longer cached,
+and the bootstrap reports `logout/missing-service` with the same severities. **STRICT consumers:** a
+STRICT bootstrap without `.logout(...)` or a registered `LogoutService` now fails at `install()`.
+
+## "Could not verify" is no longer "wrong" (SA26, JS-SEC-126, CWE-703, CWE-645, CWE-636)
+
+When the KDF limiter shed a verification, `DefaultPasswordHashingService` reported
+`INVALID_CREDENTIALS`: a flood of anonymous requests that kept the permits busy made correct logins
+count as failed attempts and locked the accounts behind them. Shed verifications now return
+`TEMPORARILY_UNAVAILABLE`, which the type had reserved for exactly this and never produced.
+`CredentialVerificationResult.temporarilyUnavailable()` and
+`CredentialVerificationUnavailableException` carry the outcome through boolean contracts;
+`StandaloneLoginFlow` gives the attempt back to the policy, records no failure, writes no
+`LoginFailed` and lets the exception reach the caller, who answers "try again later".
+`PasswordHistoryService` counted every result that was not `Verified` as "not reused", so a
+saturated limiter or a retired algorithm switched the history off; the new `check(...)` returns
+`Indeterminate` for such entries and `evaluate(...)` rejects the change instead of allowing it.
+**Migration:** callers of `verify(...)` that record a failed attempt for every non-`Verified` result
+must exclude `temporarilyUnavailable()`; after an algorithm or pepper migration a history entry that
+can no longer be verified blocks a password change through `evaluate(...)` until it is resolved —
+`check(...)` exposes the reason.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

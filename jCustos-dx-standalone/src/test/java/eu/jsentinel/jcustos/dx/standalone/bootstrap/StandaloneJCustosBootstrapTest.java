@@ -15,6 +15,7 @@ import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.logout.SubjectClearingLogoutService;
 import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.standalone.ThreadLocalSubjectStore;
@@ -110,10 +111,12 @@ class StandaloneJCustosBootstrapTest {
         .authentication(FakeAuthenticationService.forType(String.class))
         .authorization(new FakeAuthorizationService<String>())
         .audit(a -> a.logging()) // JS-SEC-080: without an audit trail the bootstrap now reports audit/noop-fallback
+        // JS-SEC-124: without a LogoutService the bootstrap now reports logout/missing-service
+        .logout(new SubjectClearingLogoutService<>(SubjectStores.subjectStore(), String.class))
         .install();
 
     assertNotNull(runtime);
-    assertTrue(runtime.warnings().isEmpty());
+    assertTrue(runtime.warnings().isEmpty(), runtime.warnings().toString());
   }
 
   // ── V00.74 A2.3 threadPropagation / interactiveLogin ───────────

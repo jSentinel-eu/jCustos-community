@@ -17,8 +17,15 @@
 package eu.jsentinel.jcustos.bruteforce;
 
 /**
- * Default {@link LoginAttemptPolicy} — never throttles, never records.
- * Used as the resolver fallback when no SPI implementation is registered.
+ * {@link LoginAttemptPolicy} that never throttles and never records.
+ * <p>
+ * JS-SEC-124 (CWE-1188): until 00.83.00 this was what the resolver handed
+ * out when no policy was registered. The resolver default is now a
+ * throttling {@link InMemoryLoginAttemptPolicy}; this class remains as the
+ * <strong>explicit opt-out</strong> for applications that throttle
+ * elsewhere. Registering it — through {@code META-INF/services}, the
+ * resolver or the bootstrap — is announced once as
+ * {@code bruteforce/noop-policy} and reported by the DX bootstrap.
  */
 public final class NoopLoginAttemptPolicy implements LoginAttemptPolicy {
 

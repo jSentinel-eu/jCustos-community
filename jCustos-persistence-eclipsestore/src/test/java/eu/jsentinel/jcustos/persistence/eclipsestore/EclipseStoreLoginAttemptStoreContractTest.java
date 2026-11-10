@@ -17,11 +17,11 @@
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
-import eu.jsentinel.jcustos.persistence.testkit.LoginAttemptStoreContract;
+import eu.jsentinel.jcustos.persistence.testkit.AtomicLoginAttemptStoreContract;
 
 class EclipseStoreLoginAttemptStoreContractTest
     extends EclipseStoreContractTestBase
-    implements LoginAttemptStoreContract {
+    implements AtomicLoginAttemptStoreContract {
 
   @Override
   public LoginAttemptStore newStore() {

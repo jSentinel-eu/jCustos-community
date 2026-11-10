@@ -16,39 +16,124 @@
  */
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptStore;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptKey;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
 import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosRoot.LoginAttemptLedger;
+import eu.jsentinel.jcustos.util.CapacityBound;
 
 import java.time.Instant;
+import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link LoginAttemptStore}. */
+/**
+ * Eclipse-Store-backed {@link LoginAttemptStore}.
+ *
+ * <p>JS-SEC-122 (CWE-307, CWE-770) and JS-SEC-123 (CWE-367): the adapter
+ * implements the atomic attempt operations. The decisions are taken by an
+ * {@link InMemoryLoginAttemptStore} that the storage root holds as its
+ * working state ({@link WorkingState}); what Eclipse Store persists is, as
+ * before, counter and last-failure instant per key. Every operation runs
+ * under the storage's write lock, asks the working state, and then copies
+ * the outcome for the key — and every key the working state dropped on the
+ * way — into the persistent map.</p>
+ *
+ * <ul>
+ *   <li><strong>Lockouts</strong> follow from counter, last failure and the
+ *       limits of the calling policy, so they survive a restart without a
+ *       field of their own — the persisted record is unchanged.</li>
+ *   <li><strong>Attempts in flight</strong> are working state only; a
+ *       restart forgets them, which is correct, as no request survives it
+ *       either.</li>
+ *   <li><strong>Bound</strong>: at most
+ *       {@link CapacityBound#DEFAULT_MAX_ENTRIES} keys. Expired counters are
+ *       removed from the persistent map as well; a live lockout is never
+ *       evicted; a store full of live lockouts refuses new keys.</li>
+ * </ul>
+ */
 final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
 
   private final EclipseStoreJCustosStorage storage;
+  private final int maxEntries;
 
   EclipseStoreLoginAttemptStore(EclipseStoreJCustosStorage storage) {
-    this.storage = storage;
+    this(storage, CapacityBound.DEFAULT_MAX_ENTRIES);
   }
+
+  /**
+   * Test seam for the bound. The working state is shared by every adapter instance of one
+   * storage, so the bound that counts is the one of the instance that touches the storage first.
+   */
+  EclipseStoreLoginAttemptStore(EclipseStoreJCustosStorage storage, int maxEntries) {
+    this.storage = storage;
+    this.maxEntries = CapacityBound.requirePositiveCapacity(maxEntries);
+  }
+
+  /**
+   * The working state of the login-attempt store: the deciding in-memory store and the keys it
+   * has dropped since the adapter last looked. Not persisted - the root keeps it in a
+   * {@code transient} field and it is rebuilt from the persistent map after a restart.
+   */
+  static final class WorkingState {
+    private final Set<LoginAttemptKey> dropped = new LinkedHashSet<>();
+    private final InMemoryLoginAttemptStore live;
+
+    WorkingState(int maxEntries) {
+      this.live = new InMemoryLoginAttemptStore(maxEntries, dropped::add);
+    }
+  }
+
+  // ── atomic attempt operations (JS-SEC-122, JS-SEC-123) ─────────────
+
+  @Override
+  public AttemptStatus tryBeginAttempt(LoginAttemptKey key, Instant now, AttemptLimits limits) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(now, "now must not be null");
+    requireNonNull(limits, "limits must not be null");
+    return mutate(key, live -> live.tryBeginAttempt(key, now, limits));
+  }
+
+  @Override
+  public AttemptStatus completeFailure(LoginAttemptKey key, Instant now, AttemptLimits limits) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(now, "now must not be null");
+    requireNonNull(limits, "limits must not be null");
+    return mutate(key, live -> live.completeFailure(key, now, limits));
+  }
+
+  @Override
+  public AttemptStatus completeSuccess(LoginAttemptKey key, Instant now, AttemptLimits limits) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(now, "now must not be null");
+    requireNonNull(limits, "limits must not be null");
+    return mutate(key, live -> live.completeSuccess(key, now, limits));
+  }
+
+  @Override
+  public void abandonAttempt(LoginAttemptKey key, Instant now) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(now, "now must not be null");
+    mutate(key, live -> {
+      live.abandonAttempt(key, now);
+      return null;
+    });
+  }
+
+  // ── counter primitives ─────────────────────────────────────────────
 
   @Override
   public void recordFailure(LoginAttemptKey key, Instant at) {
     requireNonNull(key, "key must not be null");
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      LoginAttemptLedger prev = storage.root().loginAttempts.get(key);
-      LoginAttemptLedger next = prev == null
-          ? new LoginAttemptLedger(1, at)
-          : new LoginAttemptLedger(prev.count() + 1, at);
-      storage.root().loginAttempts.put(key, next);
-      storage.manager().store(storage.root().loginAttempts);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    mutate(key, live -> {
+      live.recordFailure(key, at);
+      return null;
+    });
   }
 
   @Override
@@ -78,13 +163,76 @@ final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
   @Override
   public void reset(LoginAttemptKey key) {
     requireNonNull(key, "key must not be null");
+    mutate(key, live -> {
+      live.reset(key);
+      return null;
+    });
+  }
+
+  // ── working state and its persistent copy ──────────────────────────
+
+  /**
+   * Runs one operation on the working state under the write lock and brings the persistent map
+   * up to date: the key the operation was about, and every key the working state dropped because
+   * it expired or had to make room.
+   */
+  private <R> R mutate(LoginAttemptKey key, Function<InMemoryLoginAttemptStore, R> operation) {
     storage.lock().writeLock().lock();
     try {
-      if (storage.root().loginAttempts.remove(key) != null) {
-        storage.manager().store(storage.root().loginAttempts);
+      WorkingState runtime = runtime();
+      R result = operation.apply(runtime.live);
+      Map<LoginAttemptKey, LoginAttemptLedger> persistent = storage.root().loginAttempts;
+      boolean changed = removeDropped(runtime, persistent);
+
+      int failures = runtime.live.failureCount(key);
+      Optional<Instant> lastFailureAt = runtime.live.lastFailureAt(key);
+      if (failures > 0 && lastFailureAt.isPresent()) {
+        LoginAttemptLedger current = new LoginAttemptLedger(failures, lastFailureAt.get());
+        if (!current.equals(persistent.get(key))) {
+          persistent.put(key, current);
+          changed = true;
+        }
+      } else if (persistent.remove(key) != null) {
+        // a key that only has an attempt in flight holds nothing worth persisting
+        changed = true;
       }
+      if (changed) {
+        storage.manager().store(persistent);
+      }
+      return result;
     } finally {
       storage.lock().writeLock().unlock();
     }
+  }
+
+  /** Returns the working state, building it from the persistent map on first use. */
+  private WorkingState runtime() {
+    EclipseStoreJCustosRoot root = storage.root();
+    WorkingState runtime = root.loginAttemptRuntime;
+    if (runtime == null) {
+      runtime = new WorkingState(maxEntries);
+      for (Map.Entry<LoginAttemptKey, LoginAttemptLedger> entry : root.loginAttempts.entrySet()) {
+        runtime.live.restore(entry.getKey(), entry.getValue().count(),
+            entry.getValue().lastFailureAt());
+      }
+      // a storage written before the bound existed can hold more keys than the bound allows
+      if (removeDropped(runtime, root.loginAttempts)) {
+        storage.manager().store(root.loginAttempts);
+      }
+      root.loginAttemptRuntime = runtime;
+    }
+    return runtime;
+  }
+
+  private static boolean removeDropped(WorkingState runtime,
+                                       Map<LoginAttemptKey, LoginAttemptLedger> persistent) {
+    boolean changed = false;
+    for (LoginAttemptKey dropped : runtime.dropped) {
+      if (persistent.remove(dropped) != null) {
+        changed = true;
+      }
+    }
+    runtime.dropped.clear();
+    return changed;
   }
 }

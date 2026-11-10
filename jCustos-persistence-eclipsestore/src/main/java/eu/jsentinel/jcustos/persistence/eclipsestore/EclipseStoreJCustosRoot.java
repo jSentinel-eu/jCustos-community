@@ -71,6 +71,15 @@ final class EclipseStoreJCustosRoot {
   /** login attempt key → (failureCount, lastFailureAt). */
   final Map<LoginAttemptKey, LoginAttemptLedger> loginAttempts = new LinkedHashMap<>();
 
+  /**
+   * JS-SEC-122 / JS-SEC-123: the login-attempt store's working state - attempts in flight, the
+   * expiry index, which entries are live lockouts. {@code transient}: Eclipse Store does not
+   * persist it and the stored format is unchanged; after a restart it is {@code null} and
+   * {@code EclipseStoreLoginAttemptStore} rebuilds it from {@link #loginAttempts}. Guarded by the
+   * storage's write lock.
+   */
+  transient EclipseStoreLoginAttemptStore.WorkingState loginAttemptRuntime;
+
   /** role assignment key → role set. */
   final Map<RoleAssignmentKey, LinkedHashSet<RoleName>> roleAssignments = new LinkedHashMap<>();
 

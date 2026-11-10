@@ -45,6 +45,11 @@ public sealed interface PasswordHistoryDecision
   /**
    * The candidate password matched one of the retained historical
    * verifiers and must be rejected.
+   *
+   * <p>JS-SEC-126 (CWE-636): also the answer when a retained verifier
+   * could not be verified at all, so that "could not tell" is rejected
+   * rather than let through. {@link PasswordHistoryService#check} keeps
+   * the two cases apart ({@link PasswordHistoryCheck.Indeterminate}).</p>
    */
   record Reused() implements PasswordHistoryDecision {
     public static final Reused INSTANCE = new Reused();

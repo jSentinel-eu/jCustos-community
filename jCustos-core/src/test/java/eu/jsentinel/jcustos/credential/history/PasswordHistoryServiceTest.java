@@ -25,7 +25,11 @@ package eu.jsentinel.jcustos.credential.history;
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.credential.InternalAuditEventType;
+import eu.jsentinel.jcustos.credential.password.limiter.KdfExecutionLimiter;
+import eu.jsentinel.jcustos.credential.password.limiter.KdfResourceBudget;
 import eu.jsentinel.jcustos.credential.password.limiter.NoLimitKdfExecutionLimiter;
+import eu.jsentinel.jcustos.credential.password.limiter.SemaphoreKdfExecutionLimiter;
 import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2ParameterNames;
 import eu.jsentinel.jcustos.credential.password.policy.DefaultPasswordHashPolicy;
 import eu.jsentinel.jcustos.credential.password.policy.PasswordHashPolicy;
@@ -33,11 +37,16 @@ import eu.jsentinel.jcustos.credential.secret.SecretValue;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -182,5 +191,86 @@ class PasswordHistoryServiceTest {
     assertThrows(IllegalArgumentException.class,
         () -> store.appendAndTrim("alice",
             new PasswordHistoryEntry("h", T0), 0));
+  }
+
+  // ── JS-SEC-126 (CWE-636): "could not verify" is not "not reused" ──
+
+  @Test
+  @DisplayName("JS-SEC-126: saturated KDF limiter + old password -> Indeterminate (transient), never Allowed")
+  void saturatedLimiterDoesNotLetAnOldPasswordThrough() {
+    SemaphoreKdfExecutionLimiter limiter = new SemaphoreKdfExecutionLimiter(
+        new KdfResourceBudget(1, Duration.ofMillis(50)));
+    PasswordHashingService hashing = PasswordHashingServices.defaults(fastTestPolicy(), limiter);
+    InMemoryPasswordHistoryStore store = new InMemoryPasswordHistoryStore();
+    PasswordHistoryService service = new PasswordHistoryService(store, hashing);
+    PasswordHistoryPolicy policy = PasswordHistoryPolicy.retain(3);
+    service.recordNew("alice", hashing.hash("hunter222".toCharArray()).encodedHash(), T0, policy);
+    assertSame(PasswordHistoryCheck.Reused.INSTANCE,
+        service.check("alice", SecretValue.ofString("hunter222"), policy), "idle limiter: detected");
+
+    // one concurrent login holds the only permit while the user re-submits the old password
+    try (KdfExecutionLimiter.Lease held = limiter.acquire().orElseThrow()) {
+      PasswordHistoryCheck.Indeterminate indeterminate = assertInstanceOf(
+          PasswordHistoryCheck.Indeterminate.class,
+          service.check("alice", SecretValue.ofString("hunter222"), policy));
+      assertEquals(InternalAuditEventType.VERIFICATION_REJECTED_KDF_LIMIT, indeterminate.reason());
+      assertTrue(indeterminate.transientCondition());
+
+      assertNotSame(PasswordHistoryDecision.Allowed.INSTANCE,
+          service.evaluate("alice", SecretValue.ofString("hunter222"), policy),
+          "the two-valued form must fail closed");
+      assertSame(PasswordHistoryDecision.Reused.INSTANCE,
+          service.evaluate("alice", SecretValue.ofString("hunter222"), policy));
+    }
+
+    // permit back: the reuse is detected again, a new password passes
+    assertSame(PasswordHistoryDecision.Reused.INSTANCE,
+        service.evaluate("alice", SecretValue.ofString("hunter222"), policy));
+    assertSame(PasswordHistoryCheck.NotReused.INSTANCE,
+        service.check("alice", SecretValue.ofString("brand-new-1"), policy));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-126: a history entry that can no longer be verified -> Indeterminate (lasting), never Allowed")
+  void unverifiableEntryDoesNotCountAsMiss() {
+    Fixture f = new Fixture();
+    PasswordHistoryPolicy policy = PasswordHistoryPolicy.retain(3);
+    // what a migration leaves behind: an envelope whose provider is not registered any more
+    String orphaned = f.hashingService.hash("hunter222".toCharArray()).encodedHash().replace(
+        "$prov=" + Pbkdf2ParameterNames.PROVIDER_ID + "$", "$prov=retired-provider$");
+    f.store.appendAndTrim("alice", new PasswordHistoryEntry(orphaned, T0), 3);
+
+    PasswordHistoryCheck.Indeterminate indeterminate = assertInstanceOf(
+        PasswordHistoryCheck.Indeterminate.class,
+        f.service.check("alice", SecretValue.ofString("hunter222"), policy));
+    assertEquals(InternalAuditEventType.VERIFICATION_FAILED_UNKNOWN_PROVIDER, indeterminate.reason());
+    assertFalse(indeterminate.transientCondition());
+    assertSame(PasswordHistoryDecision.Reused.INSTANCE,
+        f.service.evaluate("alice", SecretValue.ofString("hunter222"), policy));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-126: a definite reuse wins over an unverifiable entry; a clean history still allows")
+  void definiteAnswersAreUnchanged() {
+    Fixture f = new Fixture();
+    PasswordHistoryPolicy policy = PasswordHistoryPolicy.retain(3);
+    String orphaned = f.hashingService.hash("other-pass-1".toCharArray()).encodedHash().replace(
+        "$prov=" + Pbkdf2ParameterNames.PROVIDER_ID + "$", "$prov=retired-provider$");
+    f.store.appendAndTrim("alice", new PasswordHistoryEntry(orphaned, T0), 3);
+    f.service.recordNew("alice",
+        f.hashingService.hash("hunter222".toCharArray()).encodedHash(), T0.plusSeconds(1), policy);
+
+    assertSame(PasswordHistoryCheck.Reused.INSTANCE,
+        f.service.check("alice", SecretValue.ofString("hunter222"), policy),
+        "the verifiable entry proves the reuse whatever the orphaned one says");
+
+    f.service.recordNew("bob",
+        f.hashingService.hash("hunter222".toCharArray()).encodedHash(), T0, policy);
+    assertSame(PasswordHistoryCheck.NotReused.INSTANCE,
+        f.service.check("bob", SecretValue.ofString("brand-new-1"), policy));
+    assertSame(PasswordHistoryDecision.Allowed.INSTANCE,
+        f.service.evaluate("bob", SecretValue.ofString("brand-new-1"), policy));
+    assertSame(PasswordHistoryCheck.NotReused.INSTANCE,
+        f.service.check("bob", SecretValue.ofString("hunter222"), PasswordHistoryPolicy.disabled()));
   }
 }

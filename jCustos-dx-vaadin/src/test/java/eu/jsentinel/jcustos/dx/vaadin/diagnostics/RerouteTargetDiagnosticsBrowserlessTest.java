@@ -29,6 +29,7 @@ import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
 import eu.jsentinel.jcustos.dx.vaadin.bootstrap.VaadinJCustosBootstrap;
 import eu.jsentinel.jcustos.dx.vaadin.bootstrap.VaadinSecurity;
+import eu.jsentinel.jcustos.logout.SubjectClearingLogoutService;
 import eu.jsentinel.jcustos.test.FakeAuthenticationService;
 import eu.jsentinel.jcustos.test.FakeAuthorizationService;
 import eu.jsentinel.jcustos.test.InMemorySubjectStore;
@@ -227,6 +228,8 @@ class RerouteTargetDiagnosticsBrowserlessTest extends BrowserlessTest {
         .authentication(FakeAuthenticationService.forType(String.class))
         .authorization(new FakeAuthorizationService<String>())
         .audit(a -> a.logging())
+        // JS-SEC-124: without a LogoutService the bootstrap reports logout/missing-service
+        .logout(new SubjectClearingLogoutService<>(new InMemorySubjectStore(), String.class))
         .denyByDefault(true)
         .discoverSecureRoutes(new NoRoutesDiscovery())
         .loginRoute(loginRoute);

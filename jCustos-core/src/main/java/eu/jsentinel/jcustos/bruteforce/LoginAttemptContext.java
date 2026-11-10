@@ -23,9 +23,10 @@ import java.util.Objects;
  * Adapter-neutral input to a {@link LoginAttemptPolicy} decision.
  * <p>
  * The username and client address are normalised before throttling — the
- * caller is expected to pass them as-is, the policy does the lower-casing
- * and trimming so identical user / client pairs collapse into the same
- * counter.
+ * caller is expected to pass them as-is; the policy applies its
+ * {@link eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer} to the
+ * username and trims and lower-cases the client address, so identical
+ * user / client pairs collapse into the same counter.
  *
  * @param username      the username being attempted; may be {@code null}
  *                      if not yet known (e.g. raw form submission)
