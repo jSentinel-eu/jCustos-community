@@ -831,6 +831,27 @@ expect `BcryptInputTooLongException` for a legacy password of exactly 72 bytes, 
 by this release cannot be verified by an earlier one, so a rollback after users have logged in locks
 those users out.
 
+## `SecuredUi.component(...)` hides a denied component without `HasEnabled` (SA53, JS-SEC-153, CWE-636, CWE-200)
+
+In the default HIDE mode `SecuredVisibility.apply` called `setVisible(false)` and then
+`setEnabled(true)`, and for a component without `HasEnabled` the builder mapped "enabled" to
+`setVisible(true)`. A denied `Composite`, custom `@Tag` component or `Icon` therefore stayed visible
+to every visitor, with its content and server-side listeners. Enabling such a component is now a
+no-op and disabling hides it, and the HIDE branch calls `setVisible(false)` last. Verified for a
+`Composite`, a custom `@Tag` component and an `Icon`: hidden for anonymous visitors and subjects
+without the role in every mode, visible for an authorised subject.
+
+## An empty role or permission list no longer means "everyone" (SA35, JS-SEC-135, CWE-636, CWE-863)
+
+`SecuredUi.requiresRole()` and `requiresPermission()` accepted an empty array — typically read from
+configuration — and produced an empty requirement, which `SecuredVisibility` admitted for every
+visitor, anonymous ones included. Both methods now reject an empty array with
+`IllegalArgumentException`, and `SecuredVisibility.apply` denies every requirement when no subject
+is bound. An empty `Requirement` passed directly to a secured component still admits any
+authenticated subject. **Consumers:** an affordance meant for everyone needs no secured component;
+code that passed an empty array now fails when the component is built instead of silently opening
+it.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

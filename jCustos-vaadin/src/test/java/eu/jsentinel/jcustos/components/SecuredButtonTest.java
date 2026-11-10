@@ -81,6 +81,40 @@ class SecuredButtonTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-135: empty requirement, no security view → HIDE hides the button")
+  void emptyRequirement_anonymous_hidden() {
+    SecuredButton btn = new SecuredButton("Delete",
+        SecuredVisibility.Requirement.none(),
+        SecuredVisibilityMode.HIDE,
+        Optional::empty);
+    assertFalse(btn.isVisible(),
+        "an empty requirement must not show the button to an anonymous visitor");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-135: empty requirement, no security view → DISABLE disables the button")
+  void emptyRequirement_anonymous_disabled() {
+    SecuredButton btn = new SecuredButton("Delete",
+        new SecuredVisibility.Requirement(Set.of(), Set.of()),
+        SecuredVisibilityMode.DISABLE,
+        Optional::empty);
+    assertTrue(btn.isVisible());
+    assertFalse(btn.isEnabled(),
+        "an empty requirement must not give an anonymous visitor a clickable button");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-135: empty requirement, authenticated subject → button usable")
+  void emptyRequirement_authenticated_usable() {
+    SecuredButton btn = new SecuredButton("Delete",
+        SecuredVisibility.Requirement.none(),
+        SecuredVisibilityMode.DISABLE,
+        () -> view(Set.of(), Set.of()));
+    assertTrue(btn.isVisible());
+    assertTrue(btn.isEnabled());
+  }
+
+  @Test
   @DisplayName("refresh() recomputes from the current security view")
   void refreshRecomputes() {
     java.util.concurrent.atomic.AtomicReference<Optional<SecuredVisibility.JCustosView>> ref =

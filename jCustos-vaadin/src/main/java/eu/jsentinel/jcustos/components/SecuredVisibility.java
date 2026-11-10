@@ -62,15 +62,19 @@ import static java.util.Objects.requireNonNull;
  *       permissions), AND</li>
  *   <li>All required roles are present (AND across roles).</li>
  * </ul>
- * An empty {@link Requirement} is always admitted — apps that need
+ * An empty {@link Requirement} admits every <em>authenticated</em>
+ * subject and nobody else — apps that need
  * "any of these roles" semantics compose the affordance with a
  * narrower wrapper or use one of the dedicated
  * {@code @RequiresAnyPermission}-style annotations on a
  * higher-level guard.
  *
  * <p>If no subject is bound or the security SPIs are not wired,
- * the helper denies the affordance. UI components must never grant
- * by default when authentication is unknown.
+ * the helper denies the affordance - whatever the requirement, an
+ * empty one included (JS-SEC-135, CWE-636, CWE-863). UI components
+ * must never grant by default when authentication is unknown. Until
+ * 00.84.00 an empty requirement was shown to anonymous visitors; an
+ * affordance that is meant for everyone needs no secured component.
  */
 @ExperimentalJCustosApi
 public final class SecuredVisibility {
@@ -111,6 +115,8 @@ public final class SecuredVisibility {
 
     /**
      * The empty requirement: no role and no permission constraint.
+     * {@link SecuredVisibility#apply apply(...)} admits any authenticated
+     * subject for it and denies a visitor without a subject (JS-SEC-135).
      *
      * @return a requirement that {@link #isEmpty()} reports as empty
      * @since 00.84.00
@@ -144,6 +150,11 @@ public final class SecuredVisibility {
    * Computes admission from the requirement against the supplied
    * role and permission views. Both arguments may be {@code null}
    * (treated as empty).
+   * <p>
+   * This is the comparison for a subject the caller has already
+   * resolved: an empty requirement compares as admitted. Whether a
+   * subject is bound at all is decided by {@link #apply apply(...)},
+   * which denies every requirement without one (JS-SEC-135).
    *
    * @param requirement non-null
    * @param roles       caller's role view; may be {@code null}
@@ -171,7 +182,8 @@ public final class SecuredVisibility {
 
   /**
    * Resolves the current subject and applies the requirement to
-   * {@code target} according to {@code mode}.
+   * {@code target} according to {@code mode}. Without a resolvable
+   * subject the requirement is denied, an empty one included.
    *
    * @param target      Vaadin component to toggle; non-null
    * @param requirement what the component requires; non-null
@@ -203,8 +215,12 @@ public final class SecuredVisibility {
     requireNonNull(mode, "mode must not be null");
     requireNonNull(viewSupplier, "viewSupplier must not be null");
     Optional<JCustosView> view = viewSupplier.get();
+    // JS-SEC-135 (CWE-636, CWE-863): without a security view - no subject bound, or the
+    // SPIs not wired - every requirement is denied. `.orElse(requirement.isEmpty())` used
+    // to show an affordance with an empty requirement (e.g. an empty role array read from
+    // configuration) to anonymous visitors.
     boolean allowed = view.map(v -> isAllowed(requirement, v.roles(), v.permissions()))
-        .orElse(requirement.isEmpty());
+        .orElse(false);
     if (allowed) {
       target.setVisible(true);
       target.setEnabled(true);
@@ -212,8 +228,10 @@ public final class SecuredVisibility {
     }
     switch (mode) {
       case HIDE -> {
-        target.setVisible(false);
+        // JS-SEC-153 (CWE-636, CWE-200): setVisible(false) comes last. A target whose
+        // enabled-state is backed by visibility must not be able to undo the hiding.
         target.setEnabled(true);
+        target.setVisible(false);
       }
       case DISABLE -> {
         target.setVisible(true);

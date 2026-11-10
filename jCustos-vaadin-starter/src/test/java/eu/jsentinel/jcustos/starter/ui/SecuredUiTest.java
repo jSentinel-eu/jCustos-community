@@ -111,4 +111,50 @@ class SecuredUiTest {
     org.junit.jupiter.api.Assertions.assertSame(div, bound,
         "bind() must return the same component for chaining");
   }
+
+  // ── JS-SEC-135: an empty role / permission array is rejected ─────
+
+  @Test
+  void requiresRoleWithoutRoles_throws() {
+    // JS-SEC-135 (CWE-636, CWE-863): used to yield an empty requirement that
+    // admitted every visitor, anonymous ones included.
+    assertThrows(IllegalArgumentException.class,
+        () -> SecuredUi.button("X").requiresRole());
+  }
+
+  @Test
+  void requiresPermissionWithoutPermissions_throws() {
+    assertThrows(IllegalArgumentException.class,
+        () -> SecuredUi.button("X").requiresPermission());
+  }
+
+  @Test
+  void emptyRoleArrayFromConfiguration_throwsOnEveryBuilder() {
+    String[] rolesFromConfiguration = new String[0];
+    assertThrows(IllegalArgumentException.class,
+        () -> SecuredUi.button("Delete").requiresRole(rolesFromConfiguration));
+    assertThrows(IllegalArgumentException.class,
+        () -> SecuredUi.link().requiresRole(rolesFromConfiguration));
+    assertThrows(IllegalArgumentException.class,
+        () -> SecuredUi.component(new com.vaadin.flow.component.html.Div())
+            .requiresRole(rolesFromConfiguration));
+    assertThrows(IllegalArgumentException.class,
+        () -> SecuredUi.component(new com.vaadin.flow.component.html.Div())
+            .requiresPermission(rolesFromConfiguration));
+  }
+
+  @Test
+  void rejectedEmptyArrayDoesNotCountAsRequirement() {
+    // The rejected call must not leave a requirement behind: build() still fails
+    // for "no requirement", and a real requirement can still be set afterwards.
+    SecuredUi.SecuredComponentBuilder<com.vaadin.flow.component.html.Div> builder =
+        SecuredUi.component(new com.vaadin.flow.component.html.Div());
+    assertThrows(IllegalArgumentException.class, builder::requiresRole);
+    assertThrows(IllegalStateException.class, builder::bind);
+
+    SecuredUi.SecuredComponentBuilder<com.vaadin.flow.component.html.Div> second =
+        SecuredUi.component(new com.vaadin.flow.component.html.Div());
+    assertThrows(IllegalArgumentException.class, second::requiresPermission);
+    org.junit.jupiter.api.Assertions.assertNotNull(second.requiresRole("ADMIN").bind());
+  }
 }

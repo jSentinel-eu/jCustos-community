@@ -136,7 +136,7 @@ class SecuredVisibilityTest {
   }
 
   @Test
-  @DisplayName("apply: missing security view → non-empty requirement denies, empty requirement allows")
+  @DisplayName("apply: missing security view → a non-empty requirement is denied")
   void missingViewDeniesNonEmpty() {
     RecordingTarget t = new RecordingTarget();
     SecuredVisibility.apply(t,
@@ -144,14 +144,85 @@ class SecuredVisibilityTest {
         SecuredVisibilityMode.HIDE,
         Optional::empty);
     assertFalse(t.visible);
+  }
 
-    RecordingTarget t2 = new RecordingTarget();
-    SecuredVisibility.apply(t2,
+  @Test
+  @DisplayName("JS-SEC-135: missing security view → an empty requirement is denied too (HIDE)")
+  void missingViewDeniesEmptyRequirement_hide() {
+    RecordingTarget t = new RecordingTarget();
+    SecuredVisibility.apply(t,
         new SecuredVisibility.Requirement(Set.of(), Set.of()),
         SecuredVisibilityMode.HIDE,
         Optional::empty);
-    assertTrue(t2.visible);
-    assertTrue(t2.enabled);
+    assertFalse(t.visible,
+        "an empty requirement must not mean 'everyone, including anonymous visitors'");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-135: missing security view → an empty requirement is denied too (DISABLE)")
+  void missingViewDeniesEmptyRequirement_disable() {
+    RecordingTarget t = new RecordingTarget();
+    SecuredVisibility.apply(t,
+        SecuredVisibility.Requirement.none(),
+        SecuredVisibilityMode.DISABLE,
+        Optional::empty);
+    assertTrue(t.visible);
+    assertFalse(t.enabled,
+        "an anonymous visitor must not get an enabled affordance from an empty requirement");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-135: an empty requirement admits an authenticated subject")
+  void emptyRequirementAdmitsAuthenticatedSubject() {
+    RecordingTarget t = new RecordingTarget();
+    t.visible = false;
+    t.enabled = false;
+    SecuredVisibility.apply(t,
+        SecuredVisibility.Requirement.none(),
+        SecuredVisibilityMode.HIDE,
+        () -> Optional.of(view(Set.of(), Set.of())));
+    assertTrue(t.visible, "empty requirement = any authenticated subject");
+    assertTrue(t.enabled);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-153: HIDE on denial calls setVisible(false) last")
+  void hideOnDenial_setVisibleFalseComesLast() {
+    java.util.List<String> calls = new java.util.ArrayList<>();
+    SecuredVisibility.Target ordered = new SecuredVisibility.Target() {
+      @Override public void setVisible(boolean v) { calls.add("visible=" + v); }
+      @Override public boolean isVisible() { return false; }
+      @Override public void setEnabled(boolean e) { calls.add("enabled=" + e); }
+      @Override public boolean isEnabled() { return true; }
+    };
+
+    SecuredVisibility.apply(ordered,
+        SecuredVisibility.Requirement.role(ADMIN),
+        SecuredVisibilityMode.HIDE,
+        () -> Optional.of(view(Set.of(EDITOR), Set.of())));
+
+    assertEquals(List.of("enabled=true", "visible=false"), calls,
+        "a target that backs 'enabled' with visibility must not be able to undo the hiding");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-153: HIDE on denial keeps a target hidden whose enabled-state is backed by visibility")
+  void hideOnDenial_visibilityBackedTargetStaysHidden() {
+    // The shape of the pre-fix ComponentTarget for a component without HasEnabled.
+    boolean[] visible = {true};
+    SecuredVisibility.Target visibilityBacked = new SecuredVisibility.Target() {
+      @Override public void setVisible(boolean v) { visible[0] = v; }
+      @Override public boolean isVisible() { return visible[0]; }
+      @Override public void setEnabled(boolean e) { visible[0] = e; }
+      @Override public boolean isEnabled() { return visible[0]; }
+    };
+
+    SecuredVisibility.apply(visibilityBacked,
+        SecuredVisibility.Requirement.role(ADMIN),
+        SecuredVisibilityMode.HIDE,
+        Optional::empty);
+
+    assertFalse(visible[0]);
   }
 
   @Test

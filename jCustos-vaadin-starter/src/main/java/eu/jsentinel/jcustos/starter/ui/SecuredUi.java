@@ -37,6 +37,10 @@ import java.util.Set;
  * <ul>
  *   <li>Exactly one of {@code requiresRole}, {@code requiresPermission}
  *       or {@code requiresPolicy} must be set before {@code build()}.</li>
+ *   <li>{@code requiresRole} and {@code requiresPermission} need at least
+ *       one name. An empty array - typically read from configuration -
+ *       is rejected with {@link IllegalArgumentException} instead of
+ *       meaning "everyone, including anonymous visitors" (JS-SEC-135).</li>
  *   <li>Exactly one of {@code hideWhenDenied()} or
  *       {@code disableWhenDenied()} may be set.</li>
  *   <li>Single-use: a second {@code build()} throws.</li>
@@ -107,8 +111,22 @@ public final class SecuredUi {
       return (B) this;
     }
 
+    /**
+     * Requires every listed role.
+     *
+     * @param roleNames at least one role name
+     * @return this builder
+     * @throws IllegalArgumentException if no role name is given (JS-SEC-135)
+     */
     public B requiresRole(String... roleNames) {
       Objects.requireNonNull(roleNames, "roleNames");
+      // JS-SEC-135 (CWE-636, CWE-863): an empty array used to yield an empty requirement,
+      // which admitted every visitor - anonymous ones included.
+      if (roleNames.length == 0) {
+        throw new IllegalArgumentException(
+            "requiresRole(...) needs at least one role; an empty requirement would not "
+                + "restrict the component at all (JS-SEC-135)");
+      }
       assertNoCheckYet();
       Set<RoleName> tmp = new LinkedHashSet<>();
       for (String r : roleNames) {
@@ -118,8 +136,21 @@ public final class SecuredUi {
       return self();
     }
 
+    /**
+     * Requires every listed permission.
+     *
+     * @param permissionNames at least one permission name
+     * @return this builder
+     * @throws IllegalArgumentException if no permission name is given (JS-SEC-135)
+     */
     public B requiresPermission(String... permissionNames) {
       Objects.requireNonNull(permissionNames, "permissionNames");
+      // JS-SEC-135 (CWE-636, CWE-863): see requiresRole.
+      if (permissionNames.length == 0) {
+        throw new IllegalArgumentException(
+            "requiresPermission(...) needs at least one permission; an empty requirement "
+                + "would not restrict the component at all (JS-SEC-135)");
+      }
       assertNoCheckYet();
       Set<PermissionName> tmp = new LinkedHashSet<>();
       for (String p : permissionNames) {
@@ -155,7 +186,14 @@ public final class SecuredUi {
       }
       // V00.73: policy path is handled by PolicyVisibility; only the
       // role/permission path uses SecuredVisibility.Requirement.
-      return new SecuredVisibility.Requirement(roles, permissions);
+      SecuredVisibility.Requirement requirement = new SecuredVisibility.Requirement(roles, permissions);
+      // JS-SEC-135 (CWE-636, CWE-863): the role/permission path never hands out an empty
+      // requirement - the setters reject an empty array, this is the second line.
+      if (!isPolicyMode() && requirement.isEmpty()) {
+        throw new IllegalStateException(
+            "requiresRole / requiresPermission must name at least one role or permission");
+      }
+      return requirement;
     }
 
     /** @return {@code true} when {@code requiresPolicy(...)} was set. */
@@ -307,7 +345,9 @@ public final class SecuredUi {
    * <p>If the component implements {@link com.vaadin.flow.component.HasEnabled}
    * (most do), {@code disableWhenDenied()} flips
    * {@code setEnabled(false)}. Otherwise the disabled-mode falls back
-   * to hide.
+   * to hide. A denied component without {@code HasEnabled} - a
+   * {@code Composite}, a custom {@code @Tag} component, an {@code Icon} -
+   * is hidden in both modes (JS-SEC-153).
    *
    * @param <C> concrete component type — preserved through {@code bind()}
    *
@@ -344,8 +384,11 @@ public final class SecuredUi {
    * Adapts an arbitrary Vaadin {@link Component} to the
    * {@link SecuredVisibility.Target} contract. Visibility goes
    * through {@code Component.setVisible}; enabled-state goes through
-   * {@code HasEnabled.setEnabled} where the component supports it,
-   * otherwise falls back to visibility.
+   * {@code HasEnabled.setEnabled} where the component supports it.
+   * A component without {@code HasEnabled} cannot be disabled, so
+   * disabling hides it - and enabling does nothing, because
+   * "enabled" must never make a hidden component visible again
+   * (JS-SEC-153).
    */
   private static final class ComponentTarget implements SecuredVisibility.Target {
     private final Component component;
@@ -368,8 +411,12 @@ public final class SecuredUi {
     public void setEnabled(boolean enabled) {
       if (component instanceof com.vaadin.flow.component.HasEnabled he) {
         he.setEnabled(enabled);
-      } else {
-        component.setVisible(enabled);
+      } else if (!enabled) {
+        // JS-SEC-153 (CWE-636, CWE-200): the only way to "disable" a component without
+        // HasEnabled is to hide it. setEnabled(true) is deliberately a no-op: it used to
+        // call setVisible(true) and thereby undid the setVisible(false) of the HIDE mode,
+        // so a denied Composite / @Tag component / Icon stayed visible to every visitor.
+        component.setVisible(false);
       }
     }
 
