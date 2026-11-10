@@ -27,6 +27,7 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.replay.api.JtiStore;
 
 import java.text.ParseException;
@@ -81,6 +82,20 @@ public final class NimbusDpopProofValidator implements DpopProofValidator {
   @Override
   public Result<ValidatedDpopProof, DpopValidationError> validate(DpopValidationRequest request) {
     Objects.requireNonNull(request, "request");
+
+    // JS-SEC-148 (CWE-770): the DPoP header is an unauthenticated value that embeds a JWK. Cap it
+    // with the limit every other JOSE parser applies (JS-SEC-053) BEFORE SignedJWT.parse — the
+    // proof parser lived in another module and had been left out.
+    if (request.proofCompact().length() > JoseLimits.MAX_COMPACT_BYTES) {
+      return fail(new DpopValidationError.ProofMalformed("proof exceeds the size cap"));
+    }
+    // JS-SEC-148 (CWE-345): an access token without the thumbprint it is bound to cannot be
+    // checked for its key binding. Fail closed rather than validate half a binding — this is what
+    // the deprecated four-argument boundTo(...) produces.
+    if (request.accessToken().isPresent() && request.expectedJkt().isEmpty()) {
+      return fail(new DpopValidationError.KeyBindingMismatch(
+          "access token supplied without the expected key thumbprint (cnf.jkt)"));
+    }
 
     SignedJWT jws;
     try {
@@ -167,9 +182,23 @@ public final class NimbusDpopProofValidator implements DpopProofValidator {
     if (jti == null || jti.isBlank()) {
       return fail(new DpopValidationError.ProofMalformed("missing jti"));
     }
+    // JS-SEC-148 (CWE-770): the jti is chosen by the sender and is kept in the JtiStore for the
+    // freshness window. A legitimate jti is a UUID or 96+ random bits; reject anything longer
+    // before it is recorded, so that a store entry cannot be inflated.
+    if (jti.length() > JoseLimits.MAX_JTI_CHARS) {
+      return fail(new DpopValidationError.ProofMalformed("jti exceeds the length cap"));
+    }
     // Compute the thumbprint (the last fallible step) BEFORE recording the jti, so a
     // thumbprint failure cannot consume a one-time jti and still fail the proof.
     JwkThumbprint thumbprint = thumbprintOf(headerJwk);
+    // JS-SEC-148 (CWE-345, RFC 9449 §6.1): the proof must be signed with the key the access
+    // token is bound to. Compared in constant time and BEFORE the jti is recorded, so a proof
+    // signed with a foreign key neither succeeds nor burns the legitimate holder's jti.
+    if (request.expectedJkt().isPresent()
+        && !constantTimeEquals(thumbprint.value(), request.expectedJkt().get().value())) {
+      return fail(new DpopValidationError.KeyBindingMismatch(
+          "proof key does not match the key the access token is bound to"));
+    }
     Instant expiresAt = issuedAt.plus(maxAge).plus(maxFutureSkew);
     boolean recorded = jtiStore.record(jti, expiresAt).isSuccess();
     if (!recorded) {
@@ -178,9 +207,12 @@ public final class NimbusDpopProofValidator implements DpopProofValidator {
     return Result.success(new ValidatedDpopProof(thumbprint, htm, request.httpUri(), jti, issuedAt));
   }
 
-  /** JS-SEC-029 (CWE-326): accepted RSA proof-key modulus bounds. */
-  private static final int MIN_RSA_MODULUS_BITS = 2048;
-  private static final int MAX_RSA_MODULUS_BITS = 8192;
+  /**
+   * JS-SEC-029 (CWE-326): accepted RSA proof-key modulus bounds. JS-SEC-149: the values have their
+   * single home in the core API so that the JWKS path applies the same floor.
+   */
+  private static final int MIN_RSA_MODULUS_BITS = JoseLimits.MIN_RSA_MODULUS_BITS;
+  private static final int MAX_RSA_MODULUS_BITS = JoseLimits.MAX_RSA_MODULUS_BITS;
 
   private static JWSVerifier verifierFor(JWK jwk) throws Exception {
     if (jwk instanceof RSAKey rsa) {

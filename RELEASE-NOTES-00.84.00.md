@@ -902,6 +902,34 @@ the call site moves to `new DefaultLogoutTokenValidator(jwtValidator, issuer, cl
 jtiStore])`; a warning `logout-token/no-expectations-configured` is logged at construction. Logout
 tokens without `exp` or `iat` are no longer accepted.
 
+## DPoP: bounded proof and `jti`, and the key binding is part of the validation (SA48, JS-SEC-148, CWE-770, CWE-345)
+
+The DPoP proof parser was the one JOSE parser without a size limit, and a sender-chosen `jti` of any
+length was kept in clear text in the `JtiStore`, whose capacity counts entries, not bytes.
+`NimbusDpopProofValidator` now applies the shared 100 kB limit before parsing — the constants moved
+to the new `eu.jsentinel.jcustos.jwt.api.JoseLimits` — and rejects a `jti` longer than 128
+characters; `InMemoryJtiStore` records the SHA-256 of a `jti`, never the value. The validation also
+covers the key binding: `DpopValidationRequest.boundTo(proof, method, uri, accessToken,
+expectedJkt)` names the `cnf.jkt` of the access token, and a proof signed with any other key fails
+with the new `KeyBindingMismatch` before its `jti` is recorded. Before, `boundTo` checked `ath`
+only, so a thief of a DPoP-bound token could sign a proof with a key of his own. **Consumers:** the
+four-argument `boundTo` is deprecated and fails closed; an exhaustive `switch` over
+`DpopValidationError` needs a branch for `KeyBindingMismatch`; implementations of `JtiStore` must
+keep entries of bounded size.
+
+## JWKS: bounded trust in stale keys, key hygiene, and a `Result` for every signed token (SA49, JS-SEC-149, CWE-672, CWE-326, CWE-476)
+
+`HttpJwksClient` kept serving the keys it held for as long as refreshes failed, so a key the issuer
+had withdrawn stayed trusted while the endpoint answered with an error. It now remembers the last
+successful fetch and drops the key set after 24 hours without one (configurable through a new
+constructor); validation then reports `jwt/unknown-kid` and `jwks/stale-keys-dropped` is logged
+once. Keys are taken from the document only if they may verify signatures: a key with a `use` other
+than `sig`, with `key_ops` lacking `verify`, or an RSA key below 2048 bit is skipped, and a key that
+declares an `alg` verifies only tokens of that algorithm. `NimbusJwtValidator` refuses an RSA key
+below 2048 bit from any `JwksClient`, drops JSON `null` claims instead of throwing a
+`NullPointerException`, and turns any late `RuntimeException` into `MalformedJwt`. **Consumers:** an
+issuer that publishes only weak or encryption keys no longer validates.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

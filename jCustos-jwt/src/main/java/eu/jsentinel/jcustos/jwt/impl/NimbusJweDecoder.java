@@ -46,6 +46,7 @@ import com.nimbusds.jose.JWEObject;
 import com.nimbusds.jose.crypto.RSADecrypter;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.jwt.api.JweAlgorithmAllowList;
 import eu.jsentinel.jcustos.jwt.api.JweDecoder;
 import eu.jsentinel.jcustos.jwt.api.JweDecodingError;

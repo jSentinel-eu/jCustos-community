@@ -88,4 +88,33 @@ class ReplayStoresTest {
     // jti-short was evicted → it records fresh again.
     assertTrue(store.record("jti-short", now.get().plusSeconds(10)).toOptional().isPresent());
   }
+
+  @Test
+  @DisplayName("JS-SEC-148: a 50 000-character jti is recorded as a digest — replay still detected, no long string kept")
+  void longJtiIsStoredAsDigest() {
+    InMemoryJtiStore store = new InMemoryJtiStore(100, now::get);
+    String huge = "j".repeat(50_000);
+    Instant exp = now.get().plusSeconds(60);
+
+    assertTrue(store.record(huge, exp).toOptional().isPresent(), "first record succeeds");
+    assertEquals("replay/jti-already-seen", store.record(huge, exp).fold(ok -> null, e -> e).code(),
+        "the second record of the same jti is still a replay");
+    // a jti that differs only in its last character is a different jti
+    assertTrue(store.record("j".repeat(49_999) + "k", exp).toOptional().isPresent());
+
+    // constant entry size: SHA-256, base64url without padding = 43 characters, whatever came in
+    assertEquals(2, store.trackedKeys().size());
+    for (String key : store.trackedKeys()) {
+      assertEquals(43, key.length(), "the store must keep the digest, not the jti");
+    }
+    assertFalse(store.trackedKeys().contains(huge));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-148: a short jti is not kept in clear text either")
+  void shortJtiIsNotStoredInClearText() {
+    InMemoryJtiStore store = new InMemoryJtiStore(100, now::get);
+    store.record("jti-plain", now.get().plusSeconds(60)).toOptional().orElseThrow();
+    assertFalse(store.trackedKeys().contains("jti-plain"));
+  }
 }

@@ -29,6 +29,15 @@ import java.time.Instant;
  * fails with {@link ReplayError}. Default impl is in-memory; production consumers
  * plug a shared store (JDBC / Redis). Implementations MUST be thread-safe.
  *
+ * <p><strong>Size contract (JS-SEC-148, CWE-770):</strong> a {@code jti} is chosen by the party
+ * that presents the token, so its length is not under the control of the store's owner. An
+ * implementation MUST therefore keep an entry of bounded size whatever the length of the
+ * {@code jti} — the reference implementation records the SHA-256 digest (32 bytes) and never the
+ * value itself; a JDBC / Redis implementation should do the same or declare a fixed-width key
+ * column. Callers bound the value as well: the DPoP validator rejects a {@code jti} longer than
+ * {@link eu.jsentinel.jcustos.jwt.api.JoseLimits#MAX_JTI_CHARS} characters before it reaches the
+ * store. A capacity bound that counts entries is not a memory bound unless both hold.
+ *
  * @since 00.79.10
  */
 @ExperimentalJCustosApi
@@ -37,7 +46,8 @@ public interface JtiStore {
   /**
    * Atomically records {@code jti} as seen until {@code expiresAt}.
    *
-   * @param jti       the one-time identifier
+   * @param jti       the one-time identifier; of any length — the implementation must not let
+   *                  the stored entry grow with it (see the size contract above)
    * @param expiresAt when this {@code jti} may be evicted (its proof's iat + skew)
    * @return success if newly recorded, or {@link ReplayError} if already seen
    */

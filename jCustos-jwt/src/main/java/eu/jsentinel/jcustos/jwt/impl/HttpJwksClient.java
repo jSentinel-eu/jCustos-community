@@ -29,7 +29,10 @@ import eu.jsentinel.jcustos.util.BoundedHttpBody;
 import com.nimbusds.jose.jwk.AsymmetricJWK;
 import com.nimbusds.jose.jwk.JWK;
 import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.KeyOperation;
+import com.nimbusds.jose.jwk.KeyUse;
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.jwt.api.JwksClient;
 import eu.jsentinel.jcustos.jwt.api.JwksRefreshResult;
 import eu.jsentinel.jcustos.jwt.api.JwsAlgorithm;
@@ -41,6 +44,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.PublicKey;
+import java.security.interfaces.RSAPublicKey;
 import java.text.ParseException;
 import java.time.Duration;
 import java.time.Instant;
@@ -75,6 +79,23 @@ import java.util.regex.Pattern;
  * {@code http://} so local dev and test stubs work; the DX bootstrap keeps its
  * own STRICT {@code jwks/uri-not-https} rule for defense in depth.
  *
+ * <p><strong>JS-SEC-149 — bounded trust in a stale key set (CWE-672):</strong> while a refresh
+ * fails the client keeps serving the keys it already holds, so that a short outage of the issuer
+ * does not reject every token. That grace is bounded: once the last <em>successful</em> fetch is
+ * older than the maximum staleness (24 hours by default, see {@link #DEFAULT_MAX_STALE}) the key
+ * set is dropped, {@link #findKey} returns empty (the validator reports {@code jwt/unknown-kid})
+ * and {@code jwks/stale-keys-dropped} is logged once. Without the bound a key the issuer had
+ * withdrawn stayed trusted for as long as the endpoint answered with an error — a state an
+ * attacker holding the withdrawn key has every reason to prolong. The next successful fetch
+ * restores normal operation.
+ *
+ * <p><strong>JS-SEC-149 — key hygiene (CWE-326):</strong> a key is taken from the document only if
+ * it may verify signatures: a key with a {@code use} other than {@code sig}, or with
+ * {@code key_ops} that do not contain {@code verify}, is skipped (an encryption key must never
+ * become a signature key — a decryption oracle on it would be a signing oracle), and so is an RSA
+ * key below {@link JoseLimits#MIN_RSA_MODULUS_BITS} bits. A key that declares an {@code alg} is
+ * served only for a token whose header names that very algorithm.
+ *
  * @since 00.76.00
  */
 public final class HttpJwksClient implements JwksClient, HasLogger {
@@ -89,13 +110,21 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
   private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
   /** RF01: a JWKS document is a few KB; a larger body is a hostile / MITM'd endpoint. */
   private static final int MAX_JWKS_BYTES = 1 << 20;
+  /**
+   * JS-SEC-149 (CWE-672): how long the last successfully fetched key set stays trusted while
+   * refreshes fail — the default of {@link #HttpJwksClient(URI, HttpClient, Supplier, Duration)}.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration DEFAULT_MAX_STALE = Duration.ofHours(24);
 
   private final URI jwksUri;
   private final HttpClient httpClient;
   private final Supplier<Instant> clock;
+  private final Duration maxStale;
 
   private final ReentrantLock lock = new ReentrantLock();
-  private volatile State state = new State(Map.of(), Instant.EPOCH, Instant.EPOCH);
+  private volatile State state = new State(Map.of(), Instant.EPOCH, Instant.EPOCH, Instant.EPOCH);
   private CompletableFuture<JwksRefreshResult> inFlight;
 
   public HttpJwksClient(URI jwksUri) {
@@ -103,9 +132,26 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
   }
 
   public HttpJwksClient(URI jwksUri, HttpClient httpClient, Supplier<Instant> clock) {
+    this(jwksUri, httpClient, clock, DEFAULT_MAX_STALE);
+  }
+
+  /**
+   * @param jwksUri    the JWKS endpoint (https, or http on loopback)
+   * @param httpClient the HTTP client
+   * @param clock      the clock
+   * @param maxStale   JS-SEC-149 (CWE-672): how long the last successfully fetched key set stays
+   *                   trusted while refreshes fail; after that the keys are dropped. Must be
+   *                   positive. A value below the cache lifetime also caps the cache lifetime.
+   * @since 00.84.00
+   */
+  public HttpJwksClient(URI jwksUri, HttpClient httpClient, Supplier<Instant> clock, Duration maxStale) {
     this.jwksUri = requireHttpsOrLoopback(Objects.requireNonNull(jwksUri, "jwksUri"));
     this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.maxStale = Objects.requireNonNull(maxStale, "maxStale");
+    if (maxStale.isZero() || maxStale.isNegative()) {
+      throw new IllegalArgumentException("jwks/max-stale-not-positive: maxStale must be positive");
+    }
   }
 
   // JS-SEC-018 (CWE-319): the JWKS is the public-key trust root; loading it over
@@ -146,22 +192,67 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
     Instant now = clock.get();
     boolean fresh = now.isBefore(snapshot.expiry);
     if (fresh && snapshot.keys.containsKey(kid)) {
-      return Optional.ofNullable(snapshot.keys.get(kid));
+      return select(snapshot, kid, alg);
     }
     // stale, or a kid miss (hot rotation): refresh once — unless we are inside a
-    // negative-cache window, in which case serve whatever we still hold.
+    // negative-cache window, in which case serve whatever we still hold, but only
+    // for as long as the last successful fetch is recent enough (JS-SEC-149).
     if (now.isBefore(snapshot.negativeUntil)) {
-      return Optional.ofNullable(snapshot.keys.get(kid));
+      return select(withinMaxStale(now), kid, alg);
     }
     refreshOnce();
-    PublicKey key = state.keys.get(kid);
-    if (key == null) {
+    State refreshed = withinMaxStale(clock.get());
+    if (!refreshed.keys.containsKey(kid)) {
       // JS-SEC-001 (CWE-770): the refresh did not resolve this kid — it is
       // genuinely unknown, not a hot rotation. Open a short throttle window so a
       // stream of distinct unknown kids cannot each force a network refresh.
       openUnknownKidThrottle();
     }
-    return Optional.ofNullable(key);
+    return select(refreshed, kid, alg);
+  }
+
+  /**
+   * JS-SEC-149 (CWE-326): a key that declares a JWK {@code alg} is bound to that algorithm; it is
+   * not served for a token whose header names another one (RFC 7517 §4.4).
+   */
+  private static Optional<PublicKey> select(State snapshot, String kid, JwsAlgorithm alg) {
+    CachedKey cached = snapshot.keys.get(kid);
+    if (cached == null) {
+      return Optional.empty();
+    }
+    if (cached.alg().isPresent() && (alg == null || !cached.alg().get().equals(alg.name()))) {
+      return Optional.empty();
+    }
+    return Optional.of(cached.key());
+  }
+
+  /**
+   * JS-SEC-149 (CWE-672): returns the current state, after dropping its keys when the last
+   * successful fetch is older than {@link #maxStale}. Only reached on the paths that serve keys
+   * <em>without</em> a successful refresh — the negative-cache window and a failed refresh — so a
+   * client that was merely idle is not affected: its next lookup refreshes first.
+   */
+  private State withinMaxStale(Instant now) {
+    State current = state;
+    if (current.keys.isEmpty() || !now.isAfter(current.lastSuccess.plus(maxStale))) {
+      return current;
+    }
+    lock.lock();
+    try {
+      State s = state;
+      if (s.keys.isEmpty() || !now.isAfter(s.lastSuccess.plus(maxStale))) {
+        return s;
+      }
+      // Logged once per drop: the key set is empty afterwards, so the guard above holds until
+      // the next successful fetch.
+      logger().warn("jwks/stale-keys-dropped: no successful refresh since {} (limit {}); "
+          + "{} key(s) are no longer trusted", s.lastSuccess, maxStale, s.keys.size());
+      State dropped = new State(Map.of(), Instant.EPOCH, s.negativeUntil, s.lastSuccess);
+      this.state = dropped;
+      return dropped;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /** Opens (or extends) the unknown-kid refresh-throttle window (JS-SEC-001). */
@@ -171,7 +262,7 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
     try {
       State s = state;
       Instant neg = s.negativeUntil.isAfter(until) ? s.negativeUntil : until;
-      this.state = new State(s.keys, s.expiry, neg);
+      this.state = new State(s.keys, s.expiry, neg, s.lastSuccess);
     } finally {
       lock.unlock();
     }
@@ -228,7 +319,7 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
         return new FetchOutcome(new JwksRefreshResult(0, now, NEGATIVE_TTL,
             Optional.of("OversizedBody")), null);
       }
-      Map<String, PublicKey> keys = parse(new String(bytes, StandardCharsets.UTF_8));
+      Map<String, CachedKey> keys = parse(new String(bytes, StandardCharsets.UTF_8));
       return new FetchOutcome(
           new JwksRefreshResult(keys.size(), now, ttlFrom(response), Optional.empty()), keys);
     } catch (RuntimeException | IOException | ParseException e) {
@@ -246,26 +337,55 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
   private void apply(FetchOutcome outcome) {
     Instant now = outcome.result().fetchedAt();
     if (outcome.keys() != null) {
-      this.state = new State(outcome.keys(), now.plus(outcome.result().ttl()), Instant.EPOCH);
+      // JS-SEC-149 (CWE-672): remember when the keys were last confirmed by the issuer, and never
+      // treat them as fresh for longer than they may be served stale.
+      Duration ttl = outcome.result().ttl().compareTo(maxStale) > 0 ? maxStale : outcome.result().ttl();
+      this.state = new State(outcome.keys(), now.plus(ttl), Instant.EPOCH, now);
     } else {
-      // keep the old keys, open a negative-cache window so we do not hammer the IDP.
-      this.state = new State(state.keys, state.expiry, now.plus(NEGATIVE_TTL));
+      // keep the old keys (bounded by maxStale, see withinMaxStale), open a negative-cache
+      // window so we do not hammer the IDP.
+      this.state = new State(state.keys, state.expiry, now.plus(NEGATIVE_TTL), state.lastSuccess);
     }
   }
 
-  private static Map<String, PublicKey> parse(String body) throws ParseException {
+  private Map<String, CachedKey> parse(String body) throws ParseException {
     JWKSet set = JWKSet.parse(body);
-    Map<String, PublicKey> keys = new LinkedHashMap<>();
+    Map<String, CachedKey> keys = new LinkedHashMap<>();
     for (JWK jwk : set.getKeys()) {
-      if (jwk.getKeyID() != null && jwk instanceof AsymmetricJWK asym) {
-        try {
-          keys.put(jwk.getKeyID(), asym.toPublicKey());
-        } catch (com.nimbusds.jose.JOSEException ignored) {
-          // skip a key we cannot materialise as a JDK PublicKey
+      if (jwk.getKeyID() == null || !(jwk instanceof AsymmetricJWK asym)) {
+        continue;
+      }
+      // JS-SEC-149 (CWE-326): only a key that may verify signatures is a verification key. A key
+      // published for encryption (use=enc) or without the verify operation is skipped.
+      if (!maySignatureVerify(jwk)) {
+        logger().debug("jwks/non-verification-key-skipped: use or key_ops exclude signature verification");
+        continue;
+      }
+      try {
+        PublicKey publicKey = asym.toPublicKey();
+        // JS-SEC-149 (CWE-326): an RSA key below the floor can be factored; the limit is the one
+        // the DPoP path applies to proof keys (JS-SEC-029).
+        if (publicKey instanceof RSAPublicKey rsa
+            && rsa.getModulus().bitLength() < JoseLimits.MIN_RSA_MODULUS_BITS) {
+          logger().warn("jwks/weak-rsa-key-skipped: modulus of {} bits is below the minimum of {}",
+              rsa.getModulus().bitLength(), JoseLimits.MIN_RSA_MODULUS_BITS);
+          continue;
         }
+        Optional<String> declaredAlg =
+            Optional.ofNullable(jwk.getAlgorithm()).map(com.nimbusds.jose.Algorithm::getName);
+        keys.put(jwk.getKeyID(), new CachedKey(publicKey, declaredAlg));
+      } catch (com.nimbusds.jose.JOSEException ignored) {
+        // skip a key we cannot materialise as a JDK PublicKey
       }
     }
     return Map.copyOf(keys);
+  }
+
+  private static boolean maySignatureVerify(JWK jwk) {
+    if (jwk.getKeyUse() != null && !KeyUse.SIGNATURE.equals(jwk.getKeyUse())) {
+      return false;
+    }
+    return jwk.getKeyOperations() == null || jwk.getKeyOperations().contains(KeyOperation.VERIFY);
   }
 
   private static Duration ttlFrom(HttpResponse<?> response) {
@@ -289,11 +409,19 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
     return DEFAULT_TTL;
   }
 
-  /** Immutable cache snapshot for lock-free reads. */
-  private record State(Map<String, PublicKey> keys, Instant expiry, Instant negativeUntil) {
+  /**
+   * Immutable cache snapshot for lock-free reads. {@code lastSuccess} is the instant of the last
+   * successful fetch (JS-SEC-149) — the anchor of the maximum-staleness bound.
+   */
+  private record State(Map<String, CachedKey> keys, Instant expiry, Instant negativeUntil,
+                       Instant lastSuccess) {
+  }
+
+  /** A verification key and the JWK {@code alg} it declares, if any (JS-SEC-149). */
+  private record CachedKey(PublicKey key, Optional<String> alg) {
   }
 
   /** A fetch outcome: the result plus the parsed keys (null on failure). */
-  private record FetchOutcome(JwksRefreshResult result, Map<String, PublicKey> keys) {
+  private record FetchOutcome(JwksRefreshResult result, Map<String, CachedKey> keys) {
   }
 }

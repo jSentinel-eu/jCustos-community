@@ -36,6 +36,7 @@ import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.jwt.api.AlgorithmAllowList;
 import eu.jsentinel.jcustos.jwt.api.ClaimExpectations;
 import eu.jsentinel.jcustos.jwt.api.JoseHeader;
+import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.jwt.api.JwksClient;
 import eu.jsentinel.jcustos.jwt.api.JwsAlgorithm;
 import eu.jsentinel.jcustos.jwt.api.JwtValidationError;
@@ -159,6 +160,14 @@ public final class NimbusJwtValidator implements JwtValidator {
           "jwt/algorithm-confusion-suspected",
           "algorithm family does not match the resolved key type"));
     }
+    // JS-SEC-149 (CWE-326): an RSA key below the floor can be factored, whichever JwksClient
+    // handed it out — HttpJwksClient already skips such a key, this is the back-stop for every
+    // other source (a static key set, a custom client). Same limit as the DPoP path (JS-SEC-029).
+    if (key.get() instanceof RSAPublicKey rsa
+        && rsa.getModulus().bitLength() < JoseLimits.MIN_RSA_MODULUS_BITS) {
+      return Result.failure(new JwtValidationError.SignatureInvalid(
+          "resolved RSA key is below the minimum modulus size"));
+    }
 
     // 6. Signature verification — parse the full JWS (a real signing alg), then
     //    verify. EdDSA uses the JDK's native Ed25519 provider (no Google Tink
@@ -205,23 +214,31 @@ public final class NimbusJwtValidator implements JwtValidator {
     } catch (ParseException e) {
       return Result.failure(new JwtValidationError.MalformedJwt("claims set is not parseable"));
     }
-    Optional<JwtValidationError> claimError = validateClaims(claims);
-    if (claimError.isPresent()) {
-      return Result.failure(claimError.get());
-    }
+    // JS-SEC-149 (CWE-476, CWE-248): the claims come from a signed but otherwise arbitrary JSON
+    // document. Whatever shape they have, the late steps must end in a Result — a
+    // RuntimeException here used to escape validate() and turned a login or a back-channel
+    // logout into an HTTP 500.
+    try {
+      Optional<JwtValidationError> claimError = validateClaims(claims);
+      if (claimError.isPresent()) {
+        return Result.failure(claimError.get());
+      }
 
-    // 7b. F4 (RFC 8725 §3.11): optional typ-header check against cross-JWT-type
-    //     confusion. Only enforced when an expected type is configured; default
-    //     behaviour (no expectedTyp) is unchanged. The typ header is part of the
-    //     signed JOSE header, so it is trusted only after signature verification.
-    Optional<JwtValidationError> typError = validateTyp(typ);
-    if (typError.isPresent()) {
-      return Result.failure(typError.get());
-    }
+      // 7b. F4 (RFC 8725 §3.11): optional typ-header check against cross-JWT-type
+      //     confusion. Only enforced when an expected type is configured; default
+      //     behaviour (no expectedTyp) is unchanged. The typ header is part of the
+      //     signed JOSE header, so it is trusted only after signature verification.
+      Optional<JwtValidationError> typError = validateTyp(typ);
+      if (typError.isPresent()) {
+        return Result.failure(typError.get());
+      }
 
-    // 8. Success.
-    JoseHeader header = new JoseHeader(headerAlg, Optional.ofNullable(kid), Optional.ofNullable(typ));
-    return Result.success(new ValidatedJwt(compactJwt, header, toClaimMap(claims), clock.get()));
+      // 8. Success.
+      JoseHeader header = new JoseHeader(headerAlg, Optional.ofNullable(kid), Optional.ofNullable(typ));
+      return Result.success(new ValidatedJwt(compactJwt, header, toClaimMap(claims), clock.get()));
+    } catch (RuntimeException e) {
+      return Result.failure(new JwtValidationError.MalformedJwt("claims set could not be processed"));
+    }
   }
 
   private Optional<JwtValidationError> validateClaims(JWTClaimsSet claims) {
@@ -353,6 +370,12 @@ public final class NimbusJwtValidator implements JwtValidator {
     Map<String, Object> out = new LinkedHashMap<>();
     for (Map.Entry<String, Object> e : claims.getClaims().entrySet()) {
       Object value = e.getValue();
+      // JS-SEC-149 (CWE-476): a JSON null ("middle_name": null) is an absent claim. ValidatedJwt
+      // holds an immutable copy that rejects null values, so carrying it over threw a
+      // NullPointerException for a validly signed token.
+      if (value == null) {
+        continue;
+      }
       out.put(e.getKey(), value instanceof Date d ? d.toInstant() : value);
     }
     return out;

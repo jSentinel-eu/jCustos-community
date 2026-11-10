@@ -21,10 +21,15 @@ import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.replay.api.JtiStore;
 import eu.jsentinel.jcustos.replay.api.ReplayError;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -43,6 +48,12 @@ import java.util.function.Supplier;
  * fail-closed-reject-on-full alternative is intentionally avoided: it turns the narrow
  * replay window into a trivial full DoS. For a single JVM only — a multi-node deployment
  * needs a shared store. Thread-safe (synchronised).
+ *
+ * <p><strong>JS-SEC-148 (CWE-770):</strong> the store keeps the SHA-256 digest of a {@code jti},
+ * never the {@code jti} itself. The capacity bound counts entries, not bytes, so a caller-chosen
+ * {@code jti} of several thousand characters used to turn 100 000 entries into several hundred
+ * megabytes of heap. Every entry now has the same small size whatever the caller sends, and the
+ * identifier is no longer held in clear text.
  */
 @ExperimentalJCustosApi
 public final class InMemoryJtiStore implements JtiStore {
@@ -52,6 +63,7 @@ public final class InMemoryJtiStore implements JtiStore {
 
   private final int maxEntries;
   private final Supplier<Instant> clock;
+  /** Keyed by the SHA-256 digest of the jti (JS-SEC-148) — never by the jti itself. */
   private final Map<String, Instant> seen = new HashMap<>();
 
   public InMemoryJtiStore() {
@@ -71,15 +83,31 @@ public final class InMemoryJtiStore implements JtiStore {
     Objects.requireNonNull(jti, "jti");
     Objects.requireNonNull(expiresAt, "expiresAt");
     Instant now = clock.get();
-    Instant existing = seen.get(jti);
+    // JS-SEC-148 (CWE-770): constant entry size — record the digest, not the caller-chosen value.
+    String key = digestOf(jti);
+    Instant existing = seen.get(key);
     if (existing != null && existing.isAfter(now)) {
       return Result.failure(ReplayError.replayDetected());
     }
-    if (!seen.containsKey(jti) && seen.size() >= maxEntries) {
+    if (!seen.containsKey(key) && seen.size() >= maxEntries) {
       evictOne(now);
     }
-    seen.put(jti, expiresAt);
+    seen.put(key, expiresAt);
     return Result.success(Boolean.TRUE);
+  }
+
+  /** Package-visible for tests: the keys the store retains (JS-SEC-148 — digests, 43 characters). */
+  synchronized Set<String> trackedKeys() {
+    return Set.copyOf(seen.keySet());
+  }
+
+  private static String digestOf(String jti) {
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256").digest(jti.getBytes(StandardCharsets.UTF_8));
+      return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 is required but unavailable", e);
+    }
   }
 
   private void evictOne(Instant now) {

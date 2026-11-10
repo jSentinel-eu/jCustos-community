@@ -87,4 +87,19 @@ public sealed interface DpopValidationError {
       return "dpop/ath-mismatch";
     }
   }
+
+  /**
+   * The proof is not signed with the key the access token is bound to: the thumbprint of the
+   * proof key differs from the expected {@code cnf.jkt} (RFC 9449 §6.1), or an access token was
+   * supplied without an expected thumbprint, so the binding could not be checked (JS-SEC-148,
+   * CWE-345).
+   *
+   * @since 00.84.00
+   */
+  record KeyBindingMismatch(String detail) implements DpopValidationError {
+    @Override
+    public String code() {
+      return "dpop/key-binding-mismatch";
+    }
+  }
 }

@@ -43,6 +43,7 @@ package eu.jsentinel.jcustos.jwt.impl;
 
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.jwt.api.JweDecoder;
 import eu.jsentinel.jcustos.jwt.api.JweDecodingError;
 import eu.jsentinel.jcustos.jwt.api.JwtValidationError;

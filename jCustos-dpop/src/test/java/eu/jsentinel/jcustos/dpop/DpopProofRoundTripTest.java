@@ -189,10 +189,12 @@ class DpopProofRoundTripTest {
     String token = "access-token-xyz";
     String proof = generator.generate(key, "GET", uri, Optional.of(token));
 
+    // JS-SEC-148: the complete binding names the key the token is bound to (cnf.jkt) as well.
+    JwkThumbprint jkt = new JwkThumbprint(key.computeThumbprint().toString());
     assertTrue(validatorWith(new InMemoryJtiStore(1000, now::get))
-        .validate(DpopValidationRequest.boundTo(proof, "GET", uri, token)).isSuccess());
+        .validate(DpopValidationRequest.boundTo(proof, "GET", uri, token, jkt)).isSuccess());
     assertInstanceOf(AccessTokenHashMismatch.class, validatorWith(new InMemoryJtiStore(1000, now::get))
-        .validate(DpopValidationRequest.boundTo(proof, "GET", uri, "wrong-token")).fold(ok -> null, e -> e));
+        .validate(DpopValidationRequest.boundTo(proof, "GET", uri, "wrong-token", jkt)).fold(ok -> null, e -> e));
   }
 
   @Test
