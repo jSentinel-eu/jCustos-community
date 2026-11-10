@@ -35,6 +35,7 @@ import eu.jsentinel.jcustos.events.api.JCustosEvent;
 import eu.jsentinel.jcustos.events.api.PayloadHashAlgorithm;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelopeBuilder;
+import eu.jsentinel.jcustos.events.api.WellFormedText;
 import eu.jsentinel.jcustos.events.codec.CanonicalJCustosEventPayload;
 import eu.jsentinel.jcustos.events.codec.JCustosEventCanonicalizer;
 import eu.jsentinel.jcustos.events.codec.PayloadCodec;
@@ -52,9 +53,13 @@ import java.util.function.Supplier;
 /**
  * The publish pipeline (Konzept §826): turns a {@link JCustosEvent} into a
  * signed {@link SignedJCustosEventEnvelope}. Stages, in order: complete
- * context, check producer policy, reserve sequence, canonicalize payload,
- * compute payload hash, build envelope, sign, mark replay store, optionally
- * append to the envelope store.
+ * context, check producer policy, canonicalise payload, compute payload hash,
+ * read the signing key, reserve sequence, build envelope, sign, mark replay
+ * store, optionally append to the envelope store.
+ *
+ * <p>The sequence is reserved as late as the signature base allows and handed
+ * back if a later stage fails (JS-SEC-108), so a publish that produces no
+ * envelope does not leave a hole in the producer's sequence.
  *
  * @since 00.75.00
  */
@@ -94,7 +99,10 @@ public final class PublishPipeline {
    *
    * @param event the event to wrap
    * @return the signed envelope
-   * @throws EventPublishException if the producer may not publish this type
+   * @throws EventPublishException if the producer may not publish this type,
+   *     or if the event's id, type, tenant or subject is not well-formed
+   *     UTF-16 (JS-SEC-111) — {@link EventPublishException#reason()} tells
+   *     the two apart
    */
   public SignedJCustosEventEnvelope toEnvelope(JCustosEvent event) {
     Objects.requireNonNull(event, "event");
@@ -106,8 +114,19 @@ public final class PublishPipeline {
           + " for tenant " + tenantId.value());
     }
 
-    EventSequence sequence = reserveSequence(tenantId);
+    // JS-SEC-111 (CWE-176): the four fields the event contributes to the signed
+    // envelope must have exactly one UTF-8 encoding. Checked here, as a typed
+    // rejection the bus reports, rather than left to the envelope constructor.
+    requireWellFormed("eventId", event.eventId().value());
+    requireWellFormed("eventType", event.eventType().value());
+    requireWellFormed("tenantId", tenantId.value());
+    requireWellFormed("subjectId", event.subjectId().value());
 
+    // JS-SEC-108 (CWE-754): everything that can fail without a sequence runs
+    // BEFORE the reservation — canonicalisation, payload encoding, hashing and
+    // the key access. A sequence that was reserved and then lost to an
+    // exception is a hole in the producer's stream, and a strict consumer
+    // rejects every later envelope behind a hole.
     CanonicalJCustosEventPayload payload = canonicalizer.canonicalize(event);
     byte[] canonicalPayload = codec.encode(payload);
     String canonicalPayloadHash = PayloadDigest.hash(hashAlgorithm, canonicalPayload);
@@ -118,32 +137,58 @@ public final class PublishPipeline {
     // rotation between the builder stage and the sign stage can never yield an
     // envelope stamped keyId=OLD but signed with NEW private material.
     SigningKeySnapshot signingKey = signingKeyProvider.signingSnapshot();
-    SignedJCustosEventEnvelopeBuilder builder = SignedJCustosEventEnvelopeBuilder.create()
-        .envelopeId(EventEnvelopeId.random())
-        .eventId(event.eventId())
-        .eventType(event.eventType())
-        .tenantId(tenantId)
-        .subjectId(event.subjectId())
-        .producerId(producerId)
-        .occurredAt(event.occurredAt())
-        .issuedAt(now)
-        .expiresAt(now.plus(ttl))
-        .correlationId(CorrelationId.random())
-        .sequence(sequence)
-        .keyId(signingKey.keyId())
-        .signatureAlgorithm(signingKey.algorithm().id())
-        .payloadContentType(codec.contentType())
-        .payloadHashAlgorithm(hashAlgorithm)
-        .canonicalPayloadHash(canonicalPayloadHash)
-        .canonicalPayload(canonicalPayload)
-        .signature(new byte[]{0});
 
-    byte[] signatureBase = EnvelopeSignatureBase.compute(builder.build());
-    byte[] signature = signingKey.algorithm().sign(signatureBase, signingKey.privateKey());
-    SignedJCustosEventEnvelope envelope = builder.signature(signature).build();
+    EventSequence sequence = reserveSequence(tenantId);
+    try {
+      SignedJCustosEventEnvelopeBuilder builder = SignedJCustosEventEnvelopeBuilder.create()
+          .envelopeId(EventEnvelopeId.random())
+          .eventId(event.eventId())
+          .eventType(event.eventType())
+          .tenantId(tenantId)
+          .subjectId(event.subjectId())
+          .producerId(producerId)
+          .occurredAt(event.occurredAt())
+          .issuedAt(now)
+          .expiresAt(now.plus(ttl))
+          .correlationId(CorrelationId.random())
+          .sequence(sequence)
+          .keyId(signingKey.keyId())
+          .signatureAlgorithm(signingKey.algorithm().id())
+          .payloadContentType(codec.contentType())
+          .payloadHashAlgorithm(hashAlgorithm)
+          .canonicalPayloadHash(canonicalPayloadHash)
+          .canonicalPayload(canonicalPayload)
+          .signature(new byte[]{0});
 
-    replayStore.markSeen(envelope.envelopeId(), envelope.expiresAt());
-    return envelope;
+      byte[] signatureBase = EnvelopeSignatureBase.compute(builder.build());
+      byte[] signature = signingKey.algorithm().sign(signatureBase, signingKey.privateKey());
+      SignedJCustosEventEnvelope envelope = builder.signature(signature).build();
+
+      replayStore.markSeen(envelope.envelopeId(), envelope.expiresAt());
+      return envelope;
+    } catch (RuntimeException failure) {
+      // The sequence is part of the signature base, so it has to be reserved
+      // before signing. If building, signing or the replay mark fails, no
+      // envelope leaves this method — hand the reservation back so the next
+      // publish reuses it (best effort: a concurrent publish that already
+      // reserved a later sequence keeps the hole, see releaseReservation).
+      try {
+        sequenceStore.releaseReservation(tenantId, producerId, sequence);
+      } catch (RuntimeException releaseFailure) {
+        failure.addSuppressed(releaseFailure);
+      }
+      throw failure;
+    }
+  }
+
+  // The message names the field only: the value is caller-supplied and, being
+  // malformed, not printable anyway.
+  private static void requireWellFormed(String field, String value) {
+    if (!WellFormedText.isWellFormed(value)) {
+      throw new EventPublishException("Event field '" + field
+          + "' is not well-formed UTF-16 (unpaired surrogate) and cannot be signed",
+          SelfObservabilityEvents.REASON_MALFORMED_TEXT);
+    }
   }
 
   private EventSequence reserveSequence(TenantId tenantId) {

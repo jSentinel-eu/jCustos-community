@@ -33,6 +33,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("SequenceValidator")
@@ -43,11 +44,88 @@ class SequenceValidatorTest {
   @Test
   @DisplayName("a fresh scope accepts the first sequence as baseline")
   void freshScopeInOrder() {
-    SequenceDecision d = validator.decide(Optional.empty(), EventSequence.of(7),
+    SequenceDecision d = validator.decide(Optional.empty(), EventSequence.FIRST,
         SequenceViolationStrategy.REJECT);
     assertEquals(SequenceState.IN_ORDER, d.state());
     assertEquals(SequenceOutcome.ACCEPT, d.outcome());
     assertTrue(d.accepted());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-105: a fresh scope rejects a baseline above the first sequence")
+  void freshScopeRejectsAnArbitraryBaseline() {
+    for (long poisoned : new long[]{2L, 7L, Long.MAX_VALUE}) {
+      SequenceDecision d = validator.decide(Optional.empty(), EventSequence.of(poisoned),
+          SequenceViolationStrategy.REJECT);
+      assertEquals(SequenceState.GAP, d.state(), "sequence " + poisoned);
+      assertEquals(SequenceOutcome.REJECT, d.outcome(), "sequence " + poisoned);
+      assertFalse(d.accepted(), "sequence " + poisoned);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-105: the accepted baseline of a fresh scope is configurable")
+  void freshScopeBaselineIsConfigurable() {
+    SequenceValidator joining = new SequenceValidator(5_000L,
+        SequenceValidator.DEFAULT_MAX_TOLERABLE_GAP);
+    assertEquals(5_000L, joining.maxInitialSequence());
+    assertTrue(joining.decide(Optional.empty(), EventSequence.of(5_000L),
+        SequenceViolationStrategy.REJECT).accepted());
+    assertFalse(joining.decide(Optional.empty(), EventSequence.of(5_001L),
+        SequenceViolationStrategy.REJECT).accepted());
+    assertThrows(IllegalArgumentException.class, () -> new SequenceValidator(-1L, 0L));
+    assertThrows(IllegalArgumentException.class, () -> new SequenceValidator(1L, -1L));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-105: classification does not overflow at Long.MAX_VALUE")
+  void classificationIsOverflowFree() {
+    Optional<EventSequence> poisoned = Optional.of(EventSequence.of(Long.MAX_VALUE));
+    // previous + 1 wrapped to Long.MIN_VALUE, so every lower sequence was a GAP.
+    assertEquals(SequenceState.ROLLBACK, validator.classify(poisoned, EventSequence.FIRST));
+    assertEquals(SequenceState.ROLLBACK,
+        validator.classify(poisoned, EventSequence.of(Long.MAX_VALUE - 1)));
+    assertEquals(SequenceState.DUPLICATE,
+        validator.classify(poisoned, EventSequence.of(Long.MAX_VALUE)));
+    assertEquals(SequenceState.IN_ORDER,
+        validator.classify(Optional.of(EventSequence.of(Long.MAX_VALUE - 1)),
+            EventSequence.of(Long.MAX_VALUE)));
+    assertEquals(SequenceState.GAP,
+        validator.classify(Optional.of(EventSequence.of(0)), EventSequence.of(Long.MAX_VALUE)));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-108: a gap within the tolerance is accepted with a warning, a wider one is not")
+  void gapToleranceIsBounded() {
+    SequenceValidator tolerant = new SequenceValidator(
+        SequenceValidator.DEFAULT_MAX_INITIAL_SEQUENCE, 2L);
+    Optional<EventSequence> last = Optional.of(EventSequence.of(5));
+
+    SequenceDecision skippedTwo = tolerant.decide(last, EventSequence.of(8),
+        SequenceViolationStrategy.REJECT);
+    assertEquals(SequenceState.GAP, skippedTwo.state());
+    assertEquals(SequenceOutcome.ACCEPT_WITH_WARNING, skippedTwo.outcome());
+
+    SequenceDecision skippedThree = tolerant.decide(last, EventSequence.of(9),
+        SequenceViolationStrategy.REJECT);
+    assertEquals(SequenceOutcome.REJECT, skippedThree.outcome());
+
+    // The tolerance heals gaps only: repeats and roll-backs stay violations,
+    // and a fresh scope does not get a head start from it.
+    assertFalse(tolerant.decide(last, EventSequence.of(5),
+        SequenceViolationStrategy.REJECT).accepted());
+    assertFalse(tolerant.decide(last, EventSequence.of(4),
+        SequenceViolationStrategy.REJECT).accepted());
+    assertFalse(tolerant.decide(Optional.empty(), EventSequence.of(3),
+        SequenceViolationStrategy.REJECT).accepted());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-108: without a configured tolerance every gap stays a violation")
+  void defaultToleratesNoGap() {
+    assertEquals(0L, validator.maxTolerableGap());
+    assertFalse(validator.decide(Optional.of(EventSequence.of(5)), EventSequence.of(7),
+        SequenceViolationStrategy.REJECT).accepted());
   }
 
   @Test

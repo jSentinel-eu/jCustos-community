@@ -27,6 +27,8 @@ package eu.jsentinel.jcustos.events.bus;
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
+import java.util.Objects;
+
 /**
  * Thrown by the publish pipeline when an event cannot be published — e.g. the
  * producer is not allowed to publish the event type (Konzept §835).
@@ -36,7 +38,31 @@ import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 @ExperimentalJCustosApi
 public final class EventPublishException extends RuntimeException {
 
+  private final String reason;
+
   public EventPublishException(String message) {
+    this(message, SelfObservabilityEvents.REASON_PRODUCER_NOT_ALLOWED);
+  }
+
+  /**
+   * @param message the description for the caller
+   * @param reason the structured rejection reason — one of the
+   *     {@code SelfObservabilityEvents.REASON_*} constants; the bus reports
+   *     the rejection with it
+   * @since 00.84.00
+   */
+  public EventPublishException(String message, String reason) {
     super(message);
+    this.reason = Objects.requireNonNull(reason, "reason");
+  }
+
+  /**
+   * @return the structured rejection reason;
+   *     {@link SelfObservabilityEvents#REASON_PRODUCER_NOT_ALLOWED} for an
+   *     exception created without one
+   * @since 00.84.00
+   */
+  public String reason() {
+    return reason;
   }
 }

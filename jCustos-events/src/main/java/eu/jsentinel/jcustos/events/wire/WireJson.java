@@ -25,6 +25,8 @@ package eu.jsentinel.jcustos.events.wire;
  * #L%
  */
 
+import eu.jsentinel.jcustos.events.api.WellFormedText;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -72,7 +74,7 @@ final class WireJson {
         case '\r' -> out.append("\\r");
         case '\t' -> out.append("\\t");
         default -> {
-          if (c < 0x20) {
+          if (mustEscape(c)) {
             out.append(String.format("\\u%04x", (int) c));
           } else {
             out.append(c);
@@ -81,6 +83,17 @@ final class WireJson {
       }
     }
     out.append('"');
+  }
+
+  // JS-SEC-110 (CWE-93): besides the C0 controls JSON requires to be escaped,
+  // DEL, the C1 controls (U+0085 NEXT LINE among them) and the Unicode line and
+  // paragraph separators are written as six-character Unicode escapes. JSON
+  // allows them raw, but a line-oriented consumer that splits on Unicode line
+  // terminators would cut one record into several. The escape is plain JSON —
+  // every decoder, including earlier versions of this one, reads the same
+  // value.
+  private static boolean mustEscape(char c) {
+    return c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x2028 || c == 0x2029;
   }
 
   static Map<String, Object> parseObject(String json) {
@@ -159,7 +172,7 @@ final class WireJson {
         }
         char c = s.charAt(pos++);
         if (c == '"') {
-          return sb.toString();
+          return wellFormed(sb);
         }
         if (c == '\\') {
           if (end()) {
@@ -193,6 +206,17 @@ final class WireJson {
           sb.append(c);
         }
       }
+    }
+
+    // JS-SEC-111 (CWE-176): a lone surrogate — written raw or as a single
+    // Unicode escape such as U+D800 — has no UTF-8 encoding and would enter
+    // the signature base as '?'. Reject it here so the caller gets a decode
+    // error.
+    private static String wellFormed(StringBuilder sb) {
+      if (!WellFormedText.isWellFormed(sb)) {
+        throw new EventWireException("string contains an unpaired surrogate");
+      }
+      return sb.toString();
     }
 
     Long number() {

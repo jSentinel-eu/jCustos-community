@@ -66,7 +66,11 @@ public final class ConsumeFailurePolicy {
     EXPIRED,
     REPLAY_DETECTED,
     SEQUENCE_VIOLATION,
-    PRODUCER_NOT_ALLOWED;
+    PRODUCER_NOT_ALLOWED,
+    /** @since 00.84.00 */
+    KEY_NOT_AUTHORIZED_FOR_PRODUCER,
+    /** @since 00.84.00 */
+    PAYLOAD_METADATA_MISMATCH;
 
     static FailureKind of(JCustosEventVerificationResult failure) {
       return switch (failure) {
@@ -81,6 +85,10 @@ public final class ConsumeFailurePolicy {
         case JCustosEventVerificationResult.ReplayDetected ignored -> REPLAY_DETECTED;
         case JCustosEventVerificationResult.SequenceViolation ignored -> SEQUENCE_VIOLATION;
         case JCustosEventVerificationResult.ProducerNotAllowed ignored -> PRODUCER_NOT_ALLOWED;
+        case JCustosEventVerificationResult.KeyNotAuthorizedForProducer ignored ->
+            KEY_NOT_AUTHORIZED_FOR_PRODUCER;
+        case JCustosEventVerificationResult.PayloadMetadataMismatch ignored ->
+            PAYLOAD_METADATA_MISMATCH;
       };
     }
   }

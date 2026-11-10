@@ -46,6 +46,11 @@ import java.util.Objects;
  * allowing a verifier to check the payload hash first and the full signature
  * base afterwards.
  *
+ * <p>Every textual field must be well-formed UTF-16: a value with an unpaired
+ * surrogate is rejected on construction (JS-SEC-111). Such a character has no
+ * UTF-8 encoding — it would be signed and transported as {@code '?'}, so two
+ * different field values would share one signature.
+ *
  * <p>All fields except {@link #causationId()} are mandatory. The two
  * {@code byte[]} components are defensively copied on construction and on
  * access, and {@link #equals(Object)} / {@link #hashCode()} use value
@@ -98,8 +103,32 @@ public record SignedJCustosEventEnvelope(
     }
     Objects.requireNonNull(canonicalPayload, "canonicalPayload");
     Objects.requireNonNull(signature, "signature");
+    requireWellFormed("envelopeId", envelopeId.value());
+    requireWellFormed("eventId", eventId.value());
+    requireWellFormed("eventType", eventType.value());
+    requireWellFormed("tenantId", tenantId.value());
+    requireWellFormed("subjectId", subjectId.value());
+    requireWellFormed("producerId", producerId.value());
+    requireWellFormed("correlationId", correlationId.value());
+    if (causationId != null) {
+      requireWellFormed("causationId", causationId.value());
+    }
+    requireWellFormed("keyId", keyId.value());
+    requireWellFormed("signatureAlgorithm", signatureAlgorithm.value());
+    requireWellFormed("payloadContentType", payloadContentType.value());
+    requireWellFormed("payloadHashAlgorithm", payloadHashAlgorithm.value());
+    requireWellFormed("canonicalPayloadHash", canonicalPayloadHash);
     canonicalPayload = canonicalPayload.clone();
     signature = signature.clone();
+  }
+
+  // JS-SEC-111 (CWE-176): the message names the field only — the value is
+  // attacker-influenced and not encodable anyway.
+  private static void requireWellFormed(String field, String value) {
+    if (!WellFormedText.isWellFormed(value)) {
+      throw new IllegalArgumentException("envelope field '" + field
+          + "' must be well-formed UTF-16 — it contains an unpaired surrogate");
+    }
   }
 
   /**

@@ -26,6 +26,8 @@ package eu.jsentinel.jcustos.events.keys;
  */
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.events.api.EventProducerId;
 import eu.jsentinel.jcustos.events.api.KeyId;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithm;
 
@@ -48,6 +50,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Rotated-out keys stay {@link KeyStatus#ACCEPTED_FOR_VERIFICATION} so
  * in-flight envelopes still verify during the grace window.
  *
+ * <p>Key-to-producer binding (JS-SEC-101): this manager generates every key
+ * it trusts itself and cannot import a foreign public key, so all of its keys
+ * belong to one party — the process that owns the instance. The two-argument
+ * constructor therefore lets its keys vouch for any producer id. Pass the
+ * producer ids to the three-argument constructor to confine the keys to them.
+ *
  * @since 00.75.00
  */
 @ExperimentalJCustosApi
@@ -65,6 +73,9 @@ public final class InMemoryKeyManagement
   private final Map<KeyId, PublicKey> verificationKeys = new ConcurrentHashMap<>();
   private final Set<KeyId> revoked = ConcurrentHashMap.newKeySet();
 
+  // null = not confined: every key of this single-party manager vouches for
+  // any producer id (see the class Javadoc).
+  private final Set<EventProducerId> boundProducers;
   private volatile CurrentKey current;
 
   /**
@@ -74,8 +85,31 @@ public final class InMemoryKeyManagement
    * @param initialKeyId the id of the initial signing key
    */
   public InMemoryKeyManagement(SignatureAlgorithm algorithm, KeyId initialKeyId) {
+    this(algorithm, initialKeyId, null, false);
+  }
+
+  /**
+   * Creates a manager with a freshly generated initial key pair whose keys —
+   * the initial one and every rotated one — may only vouch for the given
+   * producers.
+   *
+   * @param algorithm the signature algorithm
+   * @param initialKeyId the id of the initial signing key
+   * @param boundProducers the producer ids the keys sign for; an empty set
+   *     binds the keys to no producer, so every envelope is rejected
+   * @since 00.84.00
+   */
+  public InMemoryKeyManagement(SignatureAlgorithm algorithm, KeyId initialKeyId,
+      Set<EventProducerId> boundProducers) {
+    this(algorithm, initialKeyId,
+        Set.copyOf(Objects.requireNonNull(boundProducers, "boundProducers")), true);
+  }
+
+  private InMemoryKeyManagement(SignatureAlgorithm algorithm, KeyId initialKeyId,
+      Set<EventProducerId> boundProducers, boolean confined) {
     this.algorithm = Objects.requireNonNull(algorithm, "algorithm");
     Objects.requireNonNull(initialKeyId, "initialKeyId");
+    this.boundProducers = confined ? boundProducers : null;
     KeyPair pair = algorithm.generateKeyPair();
     verificationKeys.put(initialKeyId, pair.getPublic());
     this.current = new CurrentKey(initialKeyId, pair);
@@ -121,6 +155,17 @@ public final class InMemoryKeyManagement
     return keyId.equals(current.keyId())
         ? KeyStatus.ACTIVE
         : KeyStatus.ACCEPTED_FOR_VERIFICATION;
+  }
+
+  @Override
+  public boolean mayVerify(KeyId keyId, EventProducerId producerId, TenantId tenantId) {
+    Objects.requireNonNull(keyId, "keyId");
+    Objects.requireNonNull(producerId, "producerId");
+    Objects.requireNonNull(tenantId, "tenantId");
+    if (!verificationKeys.containsKey(keyId)) {
+      return false;
+    }
+    return boundProducers == null || boundProducers.contains(producerId);
   }
 
   /**

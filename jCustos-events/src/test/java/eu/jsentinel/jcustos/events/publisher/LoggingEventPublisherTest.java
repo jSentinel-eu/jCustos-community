@@ -27,10 +27,16 @@ package eu.jsentinel.jcustos.events.publisher;
 
 import eu.jsentinel.jcustos.events.api.EventEnvelopeId;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
+import eu.jsentinel.jcustos.logout.SubjectId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Marker;
 import org.slf4j.event.Level;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -102,5 +108,31 @@ class LoggingEventPublisherTest {
     LoggingEventPublisher publisher = new LoggingEventPublisher(throwing);
     assertDoesNotThrow(() -> publisher.onEnvelope(PublisherFixtures.validBuilder().build()));
     assertDoesNotThrow(() -> publisher.onEnvelope(null));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-110: Unicode line and space separators cannot split or extend the EVENT line")
+  void unicodeSeparatorsAreScrubbed() {
+    for (int separator : new int[]{0x2028, 0x2029, 0x0085, 0x00A0, 0x2003, 0x3000}) {
+      RecordingSlf4jLogger logger = new RecordingSlf4jLogger();
+      SignedJCustosEventEnvelope hostile = PublisherFixtures.validBuilder()
+          .subjectId(SubjectId.of("x" + (char) separator + "EVENT type=LoginSucceeded"
+              + (char) separator + "subject=admin"))
+          .build();
+      new LoggingEventPublisher(logger).onEnvelope(hostile);
+
+      String line = logger.firstMessage();
+      List<String> lines = new ArrayList<>();
+      try (Scanner scanner = new Scanner(line)) {
+        while (scanner.hasNextLine()) {
+          lines.add(scanner.nextLine());
+        }
+      }
+      assertEquals(1, lines.size(), "U+" + Integer.toHexString(separator) + " split: " + lines);
+      long subjectFields = Pattern.compile("\\s+", Pattern.UNICODE_CHARACTER_CLASS)
+          .splitAsStream(line).filter(field -> field.startsWith("subject=")).count();
+      assertEquals(1, subjectFields, "exactly one subject= field in: " + line);
+      assertTrue(line.contains("subject=x?EVENT?type=LoginSucceeded?subject=admin"), line);
+    }
   }
 }

@@ -26,6 +26,8 @@ package eu.jsentinel.jcustos.events.keys;
  */
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.events.api.EventProducerId;
 import eu.jsentinel.jcustos.events.api.KeyId;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithm;
 
@@ -41,8 +43,11 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateExpiredException;
 import java.security.cert.CertificateNotYetValidException;
 import java.security.cert.X509Certificate;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * JDK {@code KeyStore}-backed key management (Konzept §599). The simple
@@ -50,6 +55,16 @@ import java.util.Optional;
  * come from the stored certificates, {@code keyId} maps to a store alias, and a
  * designated current alias is used for signing. Rotation is achieved by
  * pointing a new instance at a new current alias — no API break.
+ *
+ * <p>Key-to-producer binding (JS-SEC-101): a key store usually holds the keys
+ * of several producers, so a key must not vouch for a producer other than its
+ * own. Without further configuration the alias <em>is</em> the binding — the
+ * key under alias {@code rest-primary} signs for the producer id
+ * {@code rest-primary} and for no other (exact, case-sensitive comparison).
+ * Where alias and producer id differ, for instance after a rotation to
+ * {@code rest-primary-2027}, state the binding with
+ * {@link #withProducerBinding(KeyId, Set)}; an explicit binding replaces the
+ * alias convention for that key.
  *
  * <p>Non-goals (Konzept §609): full secret management, HSM, Cloud-KMS. Those
  * can follow later behind the same SPI.
@@ -64,6 +79,7 @@ public final class JdkKeyStoreKeyManagement
   private final char[] keyPassword;
   private final KeyId currentAlias;
   private final SignatureAlgorithm algorithm;
+  private final Map<KeyId, Set<EventProducerId>> producerBindings;
 
   /**
    * @param keyStore an already-loaded key store
@@ -77,6 +93,37 @@ public final class JdkKeyStoreKeyManagement
     this.keyPassword = Objects.requireNonNull(keyPassword, "keyPassword").clone();
     this.currentAlias = Objects.requireNonNull(currentAlias, "currentAlias");
     this.algorithm = Objects.requireNonNull(algorithm, "algorithm");
+    this.producerBindings = Map.of();
+  }
+
+  private JdkKeyStoreKeyManagement(JdkKeyStoreKeyManagement source,
+      Map<KeyId, Set<EventProducerId>> producerBindings) {
+    this.keyStore = source.keyStore;
+    this.keyPassword = source.keyPassword;
+    this.currentAlias = source.currentAlias;
+    this.algorithm = source.algorithm;
+    this.producerBindings = Map.copyOf(producerBindings);
+  }
+
+  /**
+   * Returns a copy of this key management in which {@code keyId} vouches for
+   * exactly the given producers instead of the producer named like its alias
+   * (JS-SEC-101). Bindings of other keys are kept; calling it again for the
+   * same key replaces that key's binding.
+   *
+   * @param keyId the key (store alias) to bind
+   * @param producers the producer ids the key may sign for; an empty set
+   *     binds the key to no producer
+   * @return a new instance over the same key store with the added binding
+   * @since 00.84.00
+   */
+  public JdkKeyStoreKeyManagement withProducerBinding(KeyId keyId,
+      Set<EventProducerId> producers) {
+    Objects.requireNonNull(keyId, "keyId");
+    Objects.requireNonNull(producers, "producers");
+    Map<KeyId, Set<EventProducerId>> bindings = new HashMap<>(producerBindings);
+    bindings.put(keyId, Set.copyOf(producers));
+    return new JdkKeyStoreKeyManagement(this, bindings);
   }
 
   /**
@@ -134,6 +181,19 @@ public final class JdkKeyStoreKeyManagement
     } catch (GeneralSecurityException e) {
       throw new KeyAccessException("Cannot read verification key " + keyId.value(), e);
     }
+  }
+
+  @Override
+  public boolean mayVerify(KeyId keyId, EventProducerId producerId, TenantId tenantId) {
+    Objects.requireNonNull(keyId, "keyId");
+    Objects.requireNonNull(producerId, "producerId");
+    Objects.requireNonNull(tenantId, "tenantId");
+    Set<EventProducerId> bound = producerBindings.get(keyId);
+    if (bound != null) {
+      return bound.contains(producerId);
+    }
+    // No explicit binding: the alias names the one producer the key signs for.
+    return keyId.value().equals(producerId.value());
   }
 
   @Override

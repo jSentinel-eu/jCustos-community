@@ -25,9 +25,12 @@ package eu.jsentinel.jcustos.events.bus;
  * #L%
  */
 
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.events.api.EventEnvelopeId;
 import eu.jsentinel.jcustos.events.api.EventSequence;
 import eu.jsentinel.jcustos.events.api.JCustosEvent;
 import eu.jsentinel.jcustos.events.api.JCustosEventSeverity;
+import eu.jsentinel.jcustos.events.api.KeyId;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
 import eu.jsentinel.jcustos.events.types.EnvelopeRejectedEvent;
 import eu.jsentinel.jcustos.events.types.EventBusSelfObservabilityEvent;
@@ -42,9 +45,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
@@ -74,6 +79,10 @@ class SelfObservabilityEventsTest {
     assertEquals("key-expired", SelfObservabilityEvents.REASON_KEY_EXPIRED);
     assertEquals("expired", SelfObservabilityEvents.REASON_EXPIRED);
     assertEquals("producer-not-allowed", SelfObservabilityEvents.REASON_PRODUCER_NOT_ALLOWED);
+    assertEquals("key-not-authorized-for-producer",
+        SelfObservabilityEvents.REASON_KEY_NOT_AUTHORIZED);
+    assertEquals("payload-metadata-mismatch",
+        SelfObservabilityEvents.REASON_PAYLOAD_METADATA_MISMATCH);
   }
 
   static Stream<Arguments> failureCases() {
@@ -106,6 +115,14 @@ class SelfObservabilityEventsTest {
         arguments("ProducerNotAllowed",
             new JCustosEventVerificationResult.ProducerNotAllowed(ENVELOPE.producerId(),
                 ENVELOPE.eventType(), ENVELOPE.tenantId()),
+            EnvelopeRejectedEvent.class, JCustosEventSeverity.ERROR),
+        arguments("KeyNotAuthorizedForProducer",
+            new JCustosEventVerificationResult.KeyNotAuthorizedForProducer(ENVELOPE.keyId(),
+                ENVELOPE.producerId(), ENVELOPE.tenantId()),
+            EnvelopeRejectedEvent.class, JCustosEventSeverity.ERROR),
+        arguments("PayloadMetadataMismatch",
+            new JCustosEventVerificationResult.PayloadMetadataMismatch(ENVELOPE.envelopeId(),
+                ConsumePipeline.FIELD_EVENT_TYPE),
             EnvelopeRejectedEvent.class, JCustosEventSeverity.ERROR));
   }
 
@@ -141,7 +158,14 @@ class SelfObservabilityEventsTest {
             new JCustosEventVerificationResult.Expired(ENVELOPE.expiresAt()), "expired"),
         arguments("ProducerNotAllowed",
             new JCustosEventVerificationResult.ProducerNotAllowed(ENVELOPE.producerId(),
-                ENVELOPE.eventType(), ENVELOPE.tenantId()), "producer-not-allowed"));
+                ENVELOPE.eventType(), ENVELOPE.tenantId()), "producer-not-allowed"),
+        arguments("KeyNotAuthorizedForProducer",
+            new JCustosEventVerificationResult.KeyNotAuthorizedForProducer(ENVELOPE.keyId(),
+                ENVELOPE.producerId(), ENVELOPE.tenantId()),
+            "key-not-authorized-for-producer"),
+        arguments("PayloadMetadataMismatch",
+            new JCustosEventVerificationResult.PayloadMetadataMismatch(ENVELOPE.envelopeId(),
+                ConsumePipeline.FIELD_TENANT_ID), "payload-metadata-mismatch"));
   }
 
   @ParameterizedTest(name = "{0} -> {2}")
@@ -152,24 +176,27 @@ class SelfObservabilityEventsTest {
     EnvelopeRejectedEvent event = (EnvelopeRejectedEvent) SelfObservabilityEvents
         .fromVerification(result, ENVELOPE, NOW).orElseThrow();
     assertEquals(expectedReason, event.reason());
-    assertEquals(ENVELOPE.envelopeId().value(), event.rejectedEnvelopeId());
+    // JS-SEC-104: the id is a fact only once the envelope is authenticated.
+    String id = ENVELOPE.envelopeId().value();
+    assertEquals(result.envelopeAuthenticated() ? id : "unverified:" + id,
+        event.rejectedEnvelopeId());
   }
 
   @Test
-  @DisplayName("InvalidSignature and PayloadHashMismatch both carry the envelope id")
+  @DisplayName("InvalidSignature and PayloadHashMismatch both carry the claimed envelope id, marked unverified")
   void signatureFamilyCarriesEnvelopeId() {
     SignatureInvalidEvent fromSignature = (SignatureInvalidEvent) SelfObservabilityEvents
         .fromVerification(new JCustosEventVerificationResult.InvalidSignature("bad"),
             ENVELOPE, NOW)
         .orElseThrow();
-    assertEquals(ENVELOPE.envelopeId().value(), fromSignature.envelopeId());
+    assertEquals("unverified:" + ENVELOPE.envelopeId().value(), fromSignature.envelopeId());
 
     SignatureInvalidEvent fromHash = (SignatureInvalidEvent) SelfObservabilityEvents
         .fromVerification(
             new JCustosEventVerificationResult.PayloadHashMismatch(ENVELOPE.envelopeId()),
             ENVELOPE, NOW)
         .orElseThrow();
-    assertEquals(ENVELOPE.envelopeId().value(), fromHash.envelopeId());
+    assertEquals("unverified:" + ENVELOPE.envelopeId().value(), fromHash.envelopeId());
   }
 
   @Test
@@ -195,5 +222,98 @@ class SelfObservabilityEventsTest {
     assertEquals(ENVELOPE.producerId().value(), event.producerId());
     assertEquals(4, event.expected());
     assertEquals(2, event.actual());
+  }
+
+  /** The junk of JS-SEC-104: nothing in it is authentic, least of all the tenant. */
+  private static SignedJCustosEventEnvelope claiming(String tenant, String envelopeId) {
+    return BusFixtures.rebuild(ENVELOPE)
+        .tenantId(TenantId.of(tenant))
+        .envelopeId(EventEnvelopeId.of(envelopeId))
+        .keyId(KeyId.of("nope"))
+        .build();
+  }
+
+  private interface FailureOf
+      extends Function<SignedJCustosEventEnvelope, JCustosEventVerificationResult> {
+  }
+
+  static Stream<Arguments> unauthenticatedCases() {
+    return Stream.of(
+        arguments("InvalidSignature", (FailureOf) junk ->
+            new JCustosEventVerificationResult.InvalidSignature("bad")),
+        arguments("PayloadHashMismatch", (FailureOf) junk ->
+            new JCustosEventVerificationResult.PayloadHashMismatch(junk.envelopeId())),
+        arguments("UnknownKey", (FailureOf) junk ->
+            new JCustosEventVerificationResult.UnknownKey(junk.keyId())),
+        arguments("KeyRevoked", (FailureOf) junk ->
+            new JCustosEventVerificationResult.KeyRevoked(junk.keyId())),
+        arguments("KeyExpired", (FailureOf) junk ->
+            new JCustosEventVerificationResult.KeyExpired(junk.keyId())),
+        arguments("KeyNotAuthorizedForProducer", (FailureOf) junk ->
+            new JCustosEventVerificationResult.KeyNotAuthorizedForProducer(junk.keyId(),
+                junk.producerId(), junk.tenantId())));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("unauthenticatedCases")
+  @DisplayName("JS-SEC-104: a rejection before authentication adopts neither tenant nor full envelope id")
+  void unauthenticatedRejectionAdoptsNoEnvelopeField(String name, FailureOf failure) {
+    String longId = "A".repeat(100_000);
+    SignedJCustosEventEnvelope junk = claiming("victim-tenant", longId);
+    JCustosEventVerificationResult result = failure.apply(junk);
+
+    EventBusSelfObservabilityEvent event =
+        SelfObservabilityEvents.fromVerification(result, junk, NOW).orElseThrow();
+
+    assertFalse(result.envelopeAuthenticated(), name);
+    assertEquals(TenantId.DEFAULT, event.tenantId(),
+        name + ": the event must not be raised under the tenant the junk claims");
+    assertTrue(SelfObservabilityEvents.isUnauthenticatedRejection(event), name);
+    String reportedId = event instanceof SignatureInvalidEvent signature
+        ? signature.envelopeId()
+        : ((EnvelopeRejectedEvent) event).rejectedEnvelopeId();
+    assertEquals("unverified:" + "A".repeat(64), reportedId,
+        name + ": the claimed id is marked and clipped to 64 characters");
+  }
+
+  static Stream<Arguments> authenticatedCases() {
+    SignedJCustosEventEnvelope tenantEnvelope = claiming("acme", "env-acme");
+    return Stream.of(
+        arguments("Expired",
+            new JCustosEventVerificationResult.Expired(tenantEnvelope.expiresAt())),
+        arguments("ReplayDetected",
+            new JCustosEventVerificationResult.ReplayDetected(tenantEnvelope.envelopeId())),
+        arguments("SequenceViolation",
+            new JCustosEventVerificationResult.SequenceViolation(tenantEnvelope.tenantId(),
+                tenantEnvelope.producerId(), EventSequence.of(4), EventSequence.of(2))),
+        arguments("ProducerNotAllowed",
+            new JCustosEventVerificationResult.ProducerNotAllowed(tenantEnvelope.producerId(),
+                tenantEnvelope.eventType(), tenantEnvelope.tenantId())),
+        arguments("PayloadMetadataMismatch",
+            new JCustosEventVerificationResult.PayloadMetadataMismatch(
+                tenantEnvelope.envelopeId(), ConsumePipeline.FIELD_SUBJECT_ID)));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("authenticatedCases")
+  @DisplayName("JS-SEC-104: a rejection of an authenticated envelope keeps its tenant")
+  void authenticatedRejectionKeepsTenant(String name, JCustosEventVerificationResult result) {
+    SignedJCustosEventEnvelope tenantEnvelope = claiming("acme", "env-acme");
+
+    EventBusSelfObservabilityEvent event =
+        SelfObservabilityEvents.fromVerification(result, tenantEnvelope, NOW).orElseThrow();
+
+    assertTrue(result.envelopeAuthenticated(), name);
+    assertEquals(TenantId.of("acme"), event.tenantId(), name);
+    assertFalse(SelfObservabilityEvents.isUnauthenticatedRejection(event), name);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-104: unverifiedId clips on code points and never splits a surrogate pair")
+  void unverifiedIdClipsOnCodePoints() {
+    String emoji = new String(Character.toChars(0x1F600));
+    String clipped = SelfObservabilityEvents.unverifiedId(emoji.repeat(100));
+    assertEquals("unverified:" + emoji.repeat(64), clipped);
+    assertEquals("unverified:short", SelfObservabilityEvents.unverifiedId("short"));
   }
 }

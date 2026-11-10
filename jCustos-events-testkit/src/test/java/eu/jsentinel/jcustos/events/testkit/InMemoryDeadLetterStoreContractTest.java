@@ -30,4 +30,5 @@ import eu.jsentinel.jcustos.events.store.JCustosEventDeadLetterStore;
 
 class InMemoryDeadLetterStoreContractTest implements DeadLetterStoreContract {
   public JCustosEventDeadLetterStore newDeadLetterStore() { return new InMemoryDeadLetterStore(); }
+  public JCustosEventDeadLetterStore newDeadLetterStore(int capacity) { return new InMemoryDeadLetterStore(capacity); }
 }

@@ -201,4 +201,59 @@ public interface SequenceStoreContract {
     assertEquals(EventSequence.FIRST,
         store.lastSequence(TenantId.DEFAULT, PRODUCER_A).orElseThrow());
   }
+
+  @Test
+  @DisplayName("JS-SEC-108: releaseReservation hands back the last reservation, so the next reuses it")
+  default void releaseReservationHandsTheSequenceBack() {
+    JCustosEventSequenceStore store = newSequenceStore();
+    store.reserveNext(TenantId.DEFAULT, PRODUCER_A);
+    EventSequence second = store.reserveNext(TenantId.DEFAULT, PRODUCER_A);
+
+    assertTrue(store.releaseReservation(TenantId.DEFAULT, PRODUCER_A, second));
+
+    assertEquals(second, store.reserveNext(TenantId.DEFAULT, PRODUCER_A),
+        "the released sequence is the next one reserved — no hole");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-108: releasing the very first reservation leaves a scope that starts at FIRST")
+  default void releaseOfFirstReservationRestartsAtFirst() {
+    JCustosEventSequenceStore store = newSequenceStore();
+    EventSequence first = store.reserveNext(TenantId.DEFAULT, PRODUCER_A);
+
+    assertTrue(store.releaseReservation(TenantId.DEFAULT, PRODUCER_A, first));
+
+    assertEquals(EventSequence.FIRST, store.reserveNext(TenantId.DEFAULT, PRODUCER_A));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-108: releaseReservation leaves a scope alone once a later sequence was reserved")
+  default void releaseReservationRefusesAnOvertakenSequence() {
+    JCustosEventSequenceStore store = newSequenceStore();
+    EventSequence first = store.reserveNext(TenantId.DEFAULT, PRODUCER_A);
+    EventSequence second = store.reserveNext(TenantId.DEFAULT, PRODUCER_A);
+
+    assertFalse(store.releaseReservation(TenantId.DEFAULT, PRODUCER_A, first),
+        "a later reservation may already be on its way — the hole stays");
+    assertFalse(store.releaseReservation(TenantId.DEFAULT, PRODUCER_B, first),
+        "nothing to release in a scope that never reserved");
+
+    assertEquals(second, store.lastSequence(TenantId.DEFAULT, PRODUCER_A).orElseThrow());
+    assertTrue(store.lastSequence(TenantId.DEFAULT, PRODUCER_B).isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-105: resetSequence makes FIRST the next expected sequence of that scope only")
+  default void resetSequenceRestartsOneScope() {
+    JCustosEventSequenceStore store = newSequenceStore();
+    store.updateSequence(TenantId.DEFAULT, PRODUCER_A, EventSequence.of(Long.MAX_VALUE));
+    store.updateSequence(TenantId.DEFAULT, PRODUCER_B, EventSequence.of(7));
+
+    store.resetSequence(TenantId.DEFAULT, PRODUCER_A);
+
+    assertEquals(EventSequence.FIRST, store.reserveNext(TenantId.DEFAULT, PRODUCER_A),
+        "after the reset the scope starts over");
+    assertEquals(7, store.lastSequence(TenantId.DEFAULT, PRODUCER_B).orElseThrow().value(),
+        "other scopes are untouched");
+  }
 }

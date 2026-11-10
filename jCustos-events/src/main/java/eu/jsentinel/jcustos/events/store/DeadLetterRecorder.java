@@ -26,12 +26,14 @@ package eu.jsentinel.jcustos.events.store;
  */
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.events.api.EventMetadata;
 import eu.jsentinel.jcustos.events.api.JCustosEvent;
 import eu.jsentinel.jcustos.events.api.JCustosEventSeverity;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
 import eu.jsentinel.jcustos.events.bus.EventBusObservabilityPublisher;
+import eu.jsentinel.jcustos.events.bus.SelfObservabilityEvents;
 import eu.jsentinel.jcustos.events.types.DeadLetteredEvent;
 
 import java.time.Instant;
@@ -48,6 +50,13 @@ import java.util.function.Supplier;
  * to the caller. The subsequent event emission is best-effort: an emission
  * failure is logged ({@code events/deadletter-event-failed}) and never masks
  * a successful store.
+ *
+ * <p>The store is asked to fold an identical open rejection
+ * ({@link JCustosEventDeadLetterStore#storeOrMerge}); a repeat produces
+ * neither a second record nor a second event (JS-SEC-109). An envelope that
+ * was never authenticated is still stored as it arrived — that is the forensic
+ * purpose — but the event about it does not adopt its tenant or its
+ * full-length id (JS-SEC-104).
  *
  * <p>Routing policy — <em>which</em> rejections are dead-lettered at all — is
  * deliberately out of scope here; callers decide what to route into
@@ -72,7 +81,11 @@ public final class DeadLetterRecorder implements HasLogger {
   /**
    * Records a rejected envelope: builds the dead letter, stores it, then
    * emits a {@link DeadLetteredEvent} (reason string is
-   * {@link RejectionReason#name()}).
+   * {@link RejectionReason#name()}). Whether the envelope counts as
+   * authenticated is derived from the reason: the cryptographic reasons
+   * ({@code INVALID_SIGNATURE}, {@code UNKNOWN_KEY}, {@code KEY_REVOKED}) do
+   * not. Callers that hold the verification result use
+   * {@link #record(SignedJCustosEventEnvelope, RejectionReason, boolean)}.
    *
    * @param envelope the rejected envelope
    * @param reason why it was rejected
@@ -82,20 +95,57 @@ public final class DeadLetterRecorder implements HasLogger {
    */
   public JCustosEventDeadLetter record(SignedJCustosEventEnvelope envelope,
       RejectionReason reason) {
+    Objects.requireNonNull(reason, "reason");
+    boolean authenticated = reason != RejectionReason.INVALID_SIGNATURE
+        && reason != RejectionReason.UNKNOWN_KEY
+        && reason != RejectionReason.KEY_REVOKED;
+    return record(envelope, reason, authenticated);
+  }
+
+  /**
+   * Records a rejected envelope, see
+   * {@link #record(SignedJCustosEventEnvelope, RejectionReason)}.
+   *
+   * @param envelope the rejected envelope
+   * @param reason why it was rejected
+   * @param envelopeAuthenticated whether the envelope was authenticated when
+   *     it was rejected
+   *     ({@code JCustosEventVerificationResult.envelopeAuthenticated()}); if
+   *     not, the {@link DeadLetteredEvent} is raised under
+   *     {@link SelfObservabilityEvents#UNAUTHENTICATED_TENANT} with the id
+   *     from {@link SelfObservabilityEvents#unverifiedId(String)}
+   * @return the record that stands for the rejection — the newly stored one,
+   *     or the open record this rejection repeats
+   * @throws RuntimeException whatever the store throws — a failed store write
+   *     is never swallowed
+   * @since 00.84.00
+   */
+  public JCustosEventDeadLetter record(SignedJCustosEventEnvelope envelope,
+      RejectionReason reason, boolean envelopeAuthenticated) {
     Objects.requireNonNull(envelope, "envelope");
     Objects.requireNonNull(reason, "reason");
     Instant now = clock.get();
-    JCustosEventDeadLetter deadLetter = JCustosEventDeadLetter.of(envelope, reason, now);
-    store.store(deadLetter);
+    JCustosEventDeadLetter candidate = JCustosEventDeadLetter.of(envelope, reason, now);
+    JCustosEventDeadLetter retained = store.storeOrMerge(candidate);
+    if (!retained.id().equals(candidate.id())) {
+      // A repeat of an open rejection: already stored, already announced.
+      return retained;
+    }
+    String reportedId = envelopeAuthenticated
+        ? envelope.envelopeId().value()
+        : SelfObservabilityEvents.unverifiedId(envelope.envelopeId().value());
     try {
-      EventMetadata metadata = EventMetadata.create(envelope.tenantId(),
+      EventMetadata metadata = EventMetadata.create(
+          envelopeAuthenticated
+              ? envelope.tenantId()
+              : SelfObservabilityEvents.UNAUTHENTICATED_TENANT,
           JCustosEvent.SYSTEM_SUBJECT, now, JCustosEventSeverity.ERROR);
       observability.publishObservability(new DeadLetteredEvent(metadata,
-          envelope.envelopeId().value(), reason.name()));
+          reportedId, reason.name()));
     } catch (RuntimeException failure) {
       logger().warn("events/deadletter-event-failed: DeadLettered emission failed for {} ({})",
-          envelope.envelopeId().value(), failure.toString());
+          LogFieldScrubber.scrub(reportedId), failure.toString());
     }
-    return deadLetter;
+    return retained;
   }
 }

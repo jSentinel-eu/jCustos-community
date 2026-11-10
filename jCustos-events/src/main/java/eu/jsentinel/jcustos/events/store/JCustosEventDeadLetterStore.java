@@ -28,6 +28,7 @@ package eu.jsentinel.jcustos.events.store;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Dead-letter store (Konzept §736): keeps structured records of envelopes that
@@ -42,9 +43,49 @@ public interface JCustosEventDeadLetterStore {
   /**
    * Stores a dead-letter record.
    *
+   * <p>A dead-letter store keeps whole rejected envelopes, and a sender needs
+   * no key to have one rejected. Implementations therefore have to bound the
+   * number of open records they retain (JS-SEC-109, CWE-770) — the shipped
+   * in-memory store evicts the oldest open record once its capacity is
+   * reached.
+   *
    * @param deadLetter the record
    */
   void store(JCustosEventDeadLetter deadLetter);
+
+  /**
+   * Stores a dead-letter record unless an <em>open</em> record for the same
+   * rejection already exists — same envelope content and same reason — and
+   * returns the record that now stands for the rejection (JS-SEC-109). This is
+   * the entry point of the consume path: a captured, validly signed but
+   * expired envelope can be submitted any number of times without a key, and
+   * each submission would otherwise retain one more copy of it.
+   *
+   * <p>Equality is decided on the whole envelope, not on its id: an envelope
+   * id is chosen by the sender, so a forged envelope with the id of a genuine
+   * one must not be able to displace or hide it.
+   *
+   * <p>The {@code default} implementation scans {@link #findOpen(int)} and is
+   * neither atomic nor cheap — it exists so that every implementation
+   * deduplicates. Stores should override it with an indexed, atomic lookup;
+   * the shipped in-memory store does.
+   *
+   * @param deadLetter the candidate record
+   * @return {@code deadLetter} itself if it was stored, otherwise the open
+   *     record it duplicates
+   * @since 00.84.00
+   */
+  default JCustosEventDeadLetter storeOrMerge(JCustosEventDeadLetter deadLetter) {
+    Objects.requireNonNull(deadLetter, "deadLetter");
+    for (JCustosEventDeadLetter open : findOpen(Integer.MAX_VALUE)) {
+      if (open.reason() == deadLetter.reason()
+          && open.envelope().equals(deadLetter.envelope())) {
+        return open;
+      }
+    }
+    store(deadLetter);
+    return deadLetter;
+  }
 
   /**
    * @param limit the maximum number of records to return

@@ -29,6 +29,10 @@ import eu.jsentinel.jcustos.events.api.CausationId;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -45,6 +49,10 @@ import java.nio.charset.StandardCharsets;
  * field set. The base is therefore injective over the field tuple without
  * relying on the value types rejecting the separator (V00.75.10, R005:
  * the previous {@code key=value\n} framing rested on that unenforced invariant).
+ * Injectivity also needs every value to have exactly one UTF-8 encoding: a
+ * value that is not well-formed UTF-16 is refused with an
+ * {@link IllegalArgumentException} rather than encoded lossily (JS-SEC-111).
+ * The bytes for every well-formed value are unchanged.
  *
  * <p><strong>Wire-format note:</strong> this changed the signing base in
  * V00.75.10; signatures produced by V00.75.00 do not verify under it. The event
@@ -79,9 +87,29 @@ final class EnvelopeSignatureBase {
   }
 
   private static void field(ByteArrayOutputStream out, String key, String value) {
-    byte[] v = value.getBytes(StandardCharsets.UTF_8);
+    byte[] v = strictUtf8(key, value);
     out.writeBytes((key + '=' + v.length + ':').getBytes(StandardCharsets.UTF_8));
     out.writeBytes(v);
     out.write('\n');
+  }
+
+  // JS-SEC-111 (CWE-176, CWE-347): String#getBytes(UTF_8) replaces an unpaired
+  // surrogate by '?', so "a?b" and 'a', U+D800, 'b' produced the same base and
+  // a signed '?' could be swapped for a lone surrogate without invalidating the
+  // signature. A reporting encoder turns such a value into an error instead;
+  // every encodable value yields exactly the bytes getBytes produced.
+  static byte[] strictUtf8(String key, String value) {
+    try {
+      ByteBuffer encoded = StandardCharsets.UTF_8.newEncoder()
+          .onMalformedInput(CodingErrorAction.REPORT)
+          .onUnmappableCharacter(CodingErrorAction.REPORT)
+          .encode(CharBuffer.wrap(value));
+      byte[] bytes = new byte[encoded.remaining()];
+      encoded.get(bytes);
+      return bytes;
+    } catch (CharacterCodingException malformed) {
+      throw new IllegalArgumentException("envelope field '" + key
+          + "' is not well-formed UTF-16 and cannot enter the signature base", malformed);
+    }
   }
 }

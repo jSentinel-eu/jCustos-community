@@ -25,18 +25,25 @@ package eu.jsentinel.jcustos.events.bus;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.events.api.EventProducerId;
 import eu.jsentinel.jcustos.events.api.EventSequence;
 import eu.jsentinel.jcustos.events.api.KeyId;
+import eu.jsentinel.jcustos.events.api.PayloadContentType;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
+import eu.jsentinel.jcustos.events.codec.CanonicalJCustosEventPayload;
+import eu.jsentinel.jcustos.events.codec.CanonicalJsonPayloadCodec;
+import eu.jsentinel.jcustos.events.codec.PayloadCodec;
 import eu.jsentinel.jcustos.events.keys.JCustosEventVerificationKeyResolver;
 import eu.jsentinel.jcustos.events.keys.KeyStatus;
 import eu.jsentinel.jcustos.events.producer.JCustosEventProducerPolicy;
 import eu.jsentinel.jcustos.events.replay.JCustosEventReplayStore;
 import eu.jsentinel.jcustos.events.sequence.JCustosEventSequenceStore;
 import eu.jsentinel.jcustos.events.sequence.SequenceDecision;
+import eu.jsentinel.jcustos.events.sequence.SequenceState;
 import eu.jsentinel.jcustos.events.sequence.SequenceValidator;
 import eu.jsentinel.jcustos.events.sequence.SequenceViolationStrategy;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithm;
@@ -44,18 +51,25 @@ import eu.jsentinel.jcustos.events.signature.SignatureAlgorithms;
 
 import java.security.PublicKey;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The consume pipeline (Konzept §849-§871): verifies an incoming envelope and
  * returns a differentiated {@link JCustosEventVerificationResult}. Stages run
  * as read-only gates first — resolve key, check key status, check payload hash,
- * verify signature, check time window, replay {@code hasSeen}, sequence
- * decision, producer policy — and only when every gate passes are the two side
- * effects committed (sequence compare-and-advance first, then replay
- * {@code markSeen}). An envelope is
- * {@link JCustosEventVerificationResult.Valid} only when every gate passes.
+ * verify signature, check the key-to-producer binding, check time window,
+ * replay {@code hasSeen}, sequence decision, producer policy, payload metadata
+ * — and only when every gate passes are the two side effects committed
+ * (sequence compare-and-advance first, then replay {@code markSeen}). An
+ * envelope is {@link JCustosEventVerificationResult.Valid} only when every gate
+ * passes.
  *
  * <p>Committing the side effects last (V00.75.10) means an envelope that fails a
  * later gate never poisons the replay store nor advances the per-producer
@@ -64,10 +78,78 @@ import java.util.Optional;
  * rejected without a replay-store entry, so its later legitimate reprocessing
  * is not misclassified as {@code ReplayDetected}.
  *
+ * <p>Two gates were added in 00.84.00. The <em>key-to-producer binding</em>
+ * (JS-SEC-101) asks the key resolver whether the verifying key may vouch for
+ * the producer the envelope claims; until it passes, nothing in the envelope
+ * is attributable to anyone. The <em>payload metadata check</em> (JS-SEC-107)
+ * decodes the canonical payload with the codec registered for its content
+ * type and compares the fields it repeats — event type, event id, tenant,
+ * subject, time — with the signed envelope, so the producer policy, which is
+ * decided on the envelope, also holds for the payload a consumer acts on.
+ *
  * @since 00.75.00
  */
 @ExperimentalJCustosApi
-public final class ConsumePipeline {
+public final class ConsumePipeline implements HasLogger {
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * no codec is registered for the envelope's payload content type.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_PAYLOAD_CONTENT_TYPE = "payloadContentType";
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * the payload could not be decoded.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_PAYLOAD = "canonicalPayload";
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * the payload's event type differs.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_EVENT_TYPE = "eventType";
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * the payload's event id differs.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_EVENT_ID = "eventId";
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * the payload's tenant differs.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_TENANT_ID = "tenantId";
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * the payload's subject differs.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_SUBJECT_ID = "subjectId";
+
+  /**
+   * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
+   * the payload's business time differs.
+   *
+   * @since 00.84.00
+   */
+  public static final String FIELD_OCCURRED_AT = "occurredAt";
+
+  private record PayloadCheck(CanonicalJCustosEventPayload payload, String mismatch) {
+  }
 
   private final JCustosEventVerificationKeyResolver keyResolver;
   private final SignatureAlgorithms signatureAlgorithms;
@@ -76,11 +158,34 @@ public final class ConsumePipeline {
   private final SequenceValidator sequenceValidator;
   private final SequenceViolationStrategy sequenceStrategy;
   private final JCustosEventProducerPolicy producerPolicy;
+  private final Map<PayloadContentType, PayloadCodec> payloadCodecs;
+  private final AtomicLong acceptedSequenceAnomalies = new AtomicLong();
 
+  /**
+   * Creates a pipeline that decodes payloads with the
+   * {@link CanonicalJsonPayloadCodec} — the codec the publish side uses by
+   * default. An envelope with any other payload content type is rejected.
+   */
   public ConsumePipeline(JCustosEventVerificationKeyResolver keyResolver,
       SignatureAlgorithms signatureAlgorithms, JCustosEventReplayStore replayStore,
       JCustosEventSequenceStore sequenceStore, SequenceValidator sequenceValidator,
       SequenceViolationStrategy sequenceStrategy, JCustosEventProducerPolicy producerPolicy) {
+    this(keyResolver, signatureAlgorithms, replayStore, sequenceStore, sequenceValidator,
+        sequenceStrategy, producerPolicy, List.of(new CanonicalJsonPayloadCodec()));
+  }
+
+  /**
+   * @param payloadCodecs the codecs this consumer decodes payloads with, keyed
+   *     by their {@link PayloadCodec#contentType()}; an envelope whose content
+   *     type has no codec here is rejected (JS-SEC-107)
+   * @throws IllegalArgumentException if two codecs claim the same content type
+   * @since 00.84.00
+   */
+  public ConsumePipeline(JCustosEventVerificationKeyResolver keyResolver,
+      SignatureAlgorithms signatureAlgorithms, JCustosEventReplayStore replayStore,
+      JCustosEventSequenceStore sequenceStore, SequenceValidator sequenceValidator,
+      SequenceViolationStrategy sequenceStrategy, JCustosEventProducerPolicy producerPolicy,
+      Collection<? extends PayloadCodec> payloadCodecs) {
     this.keyResolver = Objects.requireNonNull(keyResolver, "keyResolver");
     this.signatureAlgorithms = Objects.requireNonNull(signatureAlgorithms, "signatureAlgorithms");
     this.replayStore = Objects.requireNonNull(replayStore, "replayStore");
@@ -88,6 +193,27 @@ public final class ConsumePipeline {
     this.sequenceValidator = Objects.requireNonNull(sequenceValidator, "sequenceValidator");
     this.sequenceStrategy = Objects.requireNonNull(sequenceStrategy, "sequenceStrategy");
     this.producerPolicy = Objects.requireNonNull(producerPolicy, "producerPolicy");
+    Objects.requireNonNull(payloadCodecs, "payloadCodecs");
+    Map<PayloadContentType, PayloadCodec> codecs = new HashMap<>();
+    for (PayloadCodec codec : payloadCodecs) {
+      Objects.requireNonNull(codec, "payloadCodec");
+      if (codecs.putIfAbsent(codec.contentType(), codec) != null) {
+        throw new IllegalArgumentException("more than one payload codec for content type "
+            + codec.contentType().value());
+      }
+    }
+    this.payloadCodecs = Map.copyOf(codecs);
+  }
+
+  /**
+   * @return how many envelopes were accepted although their sequence was not
+   *     the next expected one — a gap within the validator's tolerance, or any
+   *     violation under {@link SequenceViolationStrategy#ACCEPT_WITH_WARNING}.
+   *     Each one is also logged as {@code events/sequence-anomaly-accepted}
+   * @since 00.84.00
+   */
+  public long acceptedSequenceAnomalyCount() {
+    return acceptedSequenceAnomalies.get();
   }
 
   /**
@@ -135,7 +261,16 @@ public final class ConsumePipeline {
       return new JCustosEventVerificationResult.InvalidSignature("unsupported signature algorithm");
     }
     SignatureAlgorithm algorithm = maybeAlgorithm.get();
-    byte[] signatureBase = EnvelopeSignatureBase.compute(envelope);
+    byte[] signatureBase;
+    try {
+      signatureBase = EnvelopeSignatureBase.compute(envelope);
+    } catch (IllegalArgumentException malformed) {
+      // JS-SEC-111: a field that is not well-formed UTF-16 has no signature
+      // base. The envelope constructor already refuses such a value; this
+      // covers an envelope that reached the pipeline by another route.
+      return new JCustosEventVerificationResult.InvalidSignature(
+          "envelope metadata is not well-formed text");
+    }
     boolean verified;
     try {
       verified = algorithm.verify(signatureBase, envelope.signature(), publicKey.get());
@@ -146,6 +281,18 @@ public final class ConsumePipeline {
     if (!verified) {
       return new JCustosEventVerificationResult.InvalidSignature(
           "signature does not verify under key " + keyId.value());
+    }
+
+    // JS-SEC-101 (CWE-290, CWE-863): the signature proves that SOME trusted key
+    // signed. The producerId — and with it the scope of the sequence and the
+    // subject of the producer policy below — is written by the signer, so it
+    // only counts once the resolver confirms that this key belongs to that
+    // producer. Without the binding every trusted key signs for every producer.
+    TenantId tenantId = envelope.tenantId();
+    EventProducerId producerId = envelope.producerId();
+    if (!keyResolver.mayVerify(keyId, producerId, tenantId)) {
+      return new JCustosEventVerificationResult.KeyNotAuthorizedForProducer(
+          keyId, producerId, tenantId);
     }
 
     if (envelope.isExpiredAt(now)) {
@@ -161,20 +308,29 @@ public final class ConsumePipeline {
     // Sequence + producer policy are read-only gates here — decide, but record
     // no side effect yet (R003: a rejected envelope must neither poison the
     // replay store nor advance the per-producer sequence).
-    TenantId tenantId = envelope.tenantId();
-    EventProducerId producerId = envelope.producerId();
     Optional<EventSequence> last = sequenceStore.lastSequence(tenantId, producerId);
     SequenceDecision decision = sequenceValidator.decide(last, envelope.sequence(),
         sequenceStrategy);
     if (!decision.accepted()) {
-      EventSequence expected = last.map(EventSequence::next).orElse(EventSequence.FIRST);
       return new JCustosEventVerificationResult.SequenceViolation(
-          tenantId, producerId, expected, envelope.sequence());
+          tenantId, producerId, expectedAfter(last), envelope.sequence());
     }
 
     if (!producerPolicy.mayPublish(producerId, envelope.eventType(), tenantId)) {
       return new JCustosEventVerificationResult.ProducerNotAllowed(
           producerId, envelope.eventType(), tenantId);
+    }
+
+    // JS-SEC-107 (CWE-345, CWE-863): the payload repeats event type, event id,
+    // tenant, subject and time, and it is the payload a consumer acts on. The
+    // hash only proves the payload is the signed one, not that it describes the
+    // event the envelope announces — and the policy above was decided on the
+    // envelope. Last read-only gate: a mismatch leaves sequence and replay
+    // store untouched.
+    PayloadCheck payloadCheck = checkPayload(envelope);
+    if (payloadCheck.mismatch() != null) {
+      return new JCustosEventVerificationResult.PayloadMetadataMismatch(
+          envelope.envelopeId(), payloadCheck.mismatch());
     }
 
     // Every gate passed — now commit the side effects: sequence CAS FIRST,
@@ -191,9 +347,8 @@ public final class ConsumePipeline {
     // next sequence could both pass and both commit (lost update /
     // monotonicity break).
     if (!sequenceStore.compareAndAdvance(tenantId, producerId, last, envelope.sequence())) {
-      EventSequence expected = last.map(EventSequence::next).orElse(EventSequence.FIRST);
       return new JCustosEventVerificationResult.SequenceViolation(
-          tenantId, producerId, expected, envelope.sequence());
+          tenantId, producerId, expectedAfter(last), envelope.sequence());
     }
     // markSeen stays atomic to settle a concurrent duplicate that slipped past
     // the read-only hasSeen check above. Residual crash-window semantics (R04):
@@ -206,6 +361,70 @@ public final class ConsumePipeline {
       return new JCustosEventVerificationResult.ReplayDetected(envelope.envelopeId());
     }
 
-    return new JCustosEventVerificationResult.Valid(envelope);
+    if (decision.state() != SequenceState.IN_ORDER) {
+      reportAcceptedAnomaly(envelope, decision, expectedAfter(last));
+    }
+    return new JCustosEventVerificationResult.Valid(envelope, payloadCheck.payload());
+  }
+
+  // JS-SEC-105 (CWE-190): EventSequence#next throws at Long.MAX_VALUE, and
+  // verify() is documented as total (JS-SEC-054). A stored Long.MAX_VALUE has
+  // no successor — report the stored value itself as the expectation.
+  private static EventSequence expectedAfter(Optional<EventSequence> last) {
+    return last
+        .map(sequence -> sequence.value() == Long.MAX_VALUE ? sequence : sequence.next())
+        .orElse(EventSequence.FIRST);
+  }
+
+  private PayloadCheck checkPayload(SignedJCustosEventEnvelope envelope) {
+    PayloadCodec codec = payloadCodecs.get(envelope.payloadContentType());
+    if (codec == null) {
+      return new PayloadCheck(null, FIELD_PAYLOAD_CONTENT_TYPE);
+    }
+    CanonicalJCustosEventPayload payload;
+    try {
+      payload = codec.decode(envelope.canonicalPayload());
+    } catch (RuntimeException undecodable) {
+      // Fail closed and stay total: whatever the codec throws on hostile bytes.
+      return new PayloadCheck(null, FIELD_PAYLOAD);
+    }
+    if (payload == null) {
+      return new PayloadCheck(null, FIELD_PAYLOAD);
+    }
+    if (!payload.eventType().equals(envelope.eventType().value())) {
+      return new PayloadCheck(null, FIELD_EVENT_TYPE);
+    }
+    if (!payload.eventId().equals(envelope.eventId().value())) {
+      return new PayloadCheck(null, FIELD_EVENT_ID);
+    }
+    if (!payload.tenantId().equals(envelope.tenantId().value())) {
+      return new PayloadCheck(null, FIELD_TENANT_ID);
+    }
+    if (!payload.subjectId().equals(envelope.subjectId().value())) {
+      return new PayloadCheck(null, FIELD_SUBJECT_ID);
+    }
+    // Compared as instants, so a producer that renders the same instant with
+    // trailing zeros still matches.
+    try {
+      if (!Instant.parse(payload.occurredAt()).equals(envelope.occurredAt())) {
+        return new PayloadCheck(null, FIELD_OCCURRED_AT);
+      }
+    } catch (DateTimeParseException unparsable) {
+      return new PayloadCheck(null, FIELD_OCCURRED_AT);
+    }
+    return new PayloadCheck(payload, null);
+  }
+
+  // JS-SEC-108: an envelope accepted across a gap means envelopes were lost (or
+  // withheld) — the stream goes on, but the loss must not go unnoticed.
+  private void reportAcceptedAnomaly(SignedJCustosEventEnvelope envelope,
+      SequenceDecision decision, EventSequence expected) {
+    acceptedSequenceAnomalies.incrementAndGet();
+    logger().warn("events/sequence-anomaly-accepted: producer {} (tenant {}) sent sequence {}"
+            + " but {} was expected ({}) — the envelope was accepted under the configured"
+            + " tolerance. Check the producer and the transport path for lost envelopes.",
+        LogFieldScrubber.scrub(envelope.producerId().value()),
+        LogFieldScrubber.scrub(envelope.tenantId().value()),
+        envelope.sequence().value(), expected.value(), decision.state());
   }
 }

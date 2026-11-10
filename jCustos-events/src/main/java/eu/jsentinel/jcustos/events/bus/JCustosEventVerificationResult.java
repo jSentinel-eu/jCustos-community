@@ -33,6 +33,7 @@ import eu.jsentinel.jcustos.events.api.EventSequence;
 import eu.jsentinel.jcustos.events.api.EventType;
 import eu.jsentinel.jcustos.events.api.KeyId;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
+import eu.jsentinel.jcustos.events.codec.CanonicalJCustosEventPayload;
 
 import java.time.Instant;
 
@@ -51,9 +52,63 @@ public sealed interface JCustosEventVerificationResult {
     return this instanceof Valid;
   }
 
-  /** The envelope passed every verification stage. */
-  record Valid(SignedJCustosEventEnvelope envelope)
+  /**
+   * Tells whether the envelope's metadata is attributable to a producer: the
+   * signature verified under a usable key <em>and</em> that key is bound to
+   * the claimed producer. Until both hold, every envelope field — tenant,
+   * envelope id, producer id — is just what an unknown sender wrote, and must
+   * not be adopted as a fact in alerts, audit entries or log attribution
+   * (JS-SEC-104, CWE-345).
+   *
+   * <p>{@code false} for {@link InvalidSignature}, {@link UnknownKey},
+   * {@link KeyRevoked}, {@link KeyExpired}, {@link PayloadHashMismatch} and
+   * {@link KeyNotAuthorizedForProducer}; {@code true} for every result the
+   * pipeline reaches after those gates, {@link Valid} included.
+   *
+   * @return {@code true} if the result was reached after the envelope was
+   *     authenticated
+   * @since 00.84.00
+   */
+  default boolean envelopeAuthenticated() {
+    return switch (this) {
+      case InvalidSignature ignored -> false;
+      case UnknownKey ignored -> false;
+      case KeyRevoked ignored -> false;
+      case KeyExpired ignored -> false;
+      case PayloadHashMismatch ignored -> false;
+      case KeyNotAuthorizedForProducer ignored -> false;
+      case Valid ignored -> true;
+      case Expired ignored -> true;
+      case ReplayDetected ignored -> true;
+      case SequenceViolation ignored -> true;
+      case ProducerNotAllowed ignored -> true;
+      case PayloadMetadataMismatch ignored -> true;
+    };
+  }
+
+  /**
+   * The envelope passed every verification stage.
+   *
+   * @param envelope the verified envelope
+   * @param payload the canonical payload decoded from the envelope, whose
+   *     event type, event id, tenant, subject and time were checked against
+   *     the signed envelope (JS-SEC-107) — consumers read the event from here
+   *     instead of decoding {@code canonicalPayload} themselves. {@code null}
+   *     only for a result built through the one-argument constructor, which
+   *     the pipeline never uses
+   */
+  record Valid(SignedJCustosEventEnvelope envelope, CanonicalJCustosEventPayload payload)
       implements JCustosEventVerificationResult {
+
+    /**
+     * Result without a decoded payload — kept for callers that build a
+     * {@code Valid} themselves.
+     *
+     * @param envelope the verified envelope
+     */
+    public Valid(SignedJCustosEventEnvelope envelope) {
+      this(envelope, null);
+    }
   }
 
   /** The signature did not verify. */
@@ -104,5 +159,35 @@ public sealed interface JCustosEventVerificationResult {
       EventProducerId producerId,
       EventType eventType,
       TenantId tenantId) implements JCustosEventVerificationResult {
+  }
+
+  /**
+   * The signature verified, but the key is not bound to the producer the
+   * envelope claims — a trusted key was used to sign in another producer's
+   * name (JS-SEC-101).
+   *
+   * @param keyId the key the signature verified under
+   * @param producerId the producer id the envelope claims
+   * @param tenantId the tenant the envelope claims
+   * @since 00.84.00
+   */
+  record KeyNotAuthorizedForProducer(
+      KeyId keyId,
+      EventProducerId producerId,
+      TenantId tenantId) implements JCustosEventVerificationResult {
+  }
+
+  /**
+   * The payload does not describe the event the signed envelope announces:
+   * it could not be decoded with the codec of its content type, or one of the
+   * fields it repeats differs from the envelope (JS-SEC-107).
+   *
+   * @param envelopeId the rejected envelope
+   * @param field the first deviating field — one of the
+   *     {@code ConsumePipeline.FIELD_*} constants, never payload content
+   * @since 00.84.00
+   */
+  record PayloadMetadataMismatch(EventEnvelopeId envelopeId, String field)
+      implements JCustosEventVerificationResult {
   }
 }

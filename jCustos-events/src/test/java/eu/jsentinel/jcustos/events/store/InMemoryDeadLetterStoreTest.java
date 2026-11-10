@@ -25,6 +25,8 @@ package eu.jsentinel.jcustos.events.store;
  * #L%
  */
 
+import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
+import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelopeBuilder;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -32,6 +34,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("InMemoryDeadLetterStore")
@@ -97,5 +100,122 @@ class InMemoryDeadLetterStoreTest {
           StoreFixtures.envelope("e" + i), RejectionReason.EXPIRED, AT));
     }
     assertEquals(3, store.findOpen(3).size());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: an identical rejection is folded into the open record and counted")
+  void identicalRejectionIsStoredOnce() {
+    InMemoryDeadLetterStore store = new InMemoryDeadLetterStore();
+    JCustosEventDeadLetter first = JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("replayed"), RejectionReason.EXPIRED, AT);
+
+    assertEquals(first.id(), store.storeOrMerge(first).id());
+    for (int i = 0; i < 2_999; i++) {
+      JCustosEventDeadLetter repeat = JCustosEventDeadLetter.of(
+          StoreFixtures.envelope("replayed"), RejectionReason.EXPIRED, AT.plusSeconds(i));
+      assertEquals(first.id(), store.storeOrMerge(repeat).id());
+    }
+    // the plain store() path deduplicates too
+    store.store(JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("replayed"), RejectionReason.EXPIRED, AT));
+
+    assertEquals(1, store.retainedRecordCount());
+    assertEquals(3_001L, store.occurrences(first.id()));
+    assertEquals(0L, store.evictedCount());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: a different reason or different content under the same envelope id is a record of its own")
+  void differentContentIsNotFolded() {
+    InMemoryDeadLetterStore store = new InMemoryDeadLetterStore();
+    store.storeOrMerge(JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("same-id"), RejectionReason.EXPIRED, AT));
+    store.storeOrMerge(JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("same-id"), RejectionReason.SEQUENCE_VIOLATION, AT));
+    // same envelope id, forged content: must not hide behind the genuine record
+    SignedJCustosEventEnvelope genuine = StoreFixtures.envelope("same-id");
+    SignedJCustosEventEnvelope forged = SignedJCustosEventEnvelopeBuilder.create()
+        .envelopeId(genuine.envelopeId())
+        .eventId(genuine.eventId())
+        .eventType(genuine.eventType())
+        .tenantId(genuine.tenantId())
+        .subjectId(genuine.subjectId())
+        .producerId(genuine.producerId())
+        .occurredAt(genuine.occurredAt())
+        .issuedAt(genuine.issuedAt())
+        .expiresAt(genuine.expiresAt())
+        .correlationId(genuine.correlationId())
+        .sequence(genuine.sequence())
+        .keyId(genuine.keyId())
+        .signatureAlgorithm(genuine.signatureAlgorithm())
+        .payloadContentType(genuine.payloadContentType())
+        .payloadHashAlgorithm(genuine.payloadHashAlgorithm())
+        .canonicalPayloadHash(genuine.canonicalPayloadHash())
+        .canonicalPayload(new byte[]{'x'})
+        .signature(genuine.signature())
+        .build();
+    store.storeOrMerge(JCustosEventDeadLetter.of(forged, RejectionReason.EXPIRED, AT));
+
+    assertEquals(3, store.retainedRecordCount());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: a rejection that recurs after its record was resolved is stored again")
+  void resolvedRejectionIsStoredAgain() {
+    InMemoryDeadLetterStore store = new InMemoryDeadLetterStore();
+    JCustosEventDeadLetter first = JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("recurring"), RejectionReason.EXPIRED, AT);
+    store.storeOrMerge(first);
+    store.markResolved(first.id());
+    assertEquals(0L, store.occurrences(first.id()));
+
+    JCustosEventDeadLetter again = JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("recurring"), RejectionReason.EXPIRED, AT);
+    assertEquals(again.id(), store.storeOrMerge(again).id());
+
+    assertEquals(1, store.retainedRecordCount());
+    assertEquals(1L, store.occurrences(again.id()));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: 200 000 distinct rejections stay within the capacity, oldest evicted first")
+  void capacityBoundsOpenRecords() {
+    InMemoryDeadLetterStore store = new InMemoryDeadLetterStore();
+    assertEquals(InMemoryDeadLetterStore.DEFAULT_CAPACITY, store.capacity());
+
+    for (int i = 0; i < 200_000; i++) {
+      store.store(JCustosEventDeadLetter.of(
+          StoreFixtures.envelope("flood-" + i), RejectionReason.EXPIRED, AT));
+    }
+
+    int capacity = InMemoryDeadLetterStore.DEFAULT_CAPACITY;
+    assertEquals(capacity, store.retainedRecordCount());
+    assertEquals(200_000L - capacity, store.evictedCount());
+    List<JCustosEventDeadLetter> open = store.findOpen(Integer.MAX_VALUE);
+    assertEquals("flood-" + (200_000 - capacity), open.get(0).envelope().envelopeId().value(),
+        "the oldest retained record is the first one that still fits");
+    assertEquals("flood-199999", open.get(capacity - 1).envelope().envelopeId().value());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: the capacity is configurable and an evicted rejection can be stored anew")
+  void capacityIsConfigurable() {
+    InMemoryDeadLetterStore store = new InMemoryDeadLetterStore(2);
+    JCustosEventDeadLetter a = JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("a"), RejectionReason.EXPIRED, AT);
+    store.store(a);
+    store.store(JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("b"), RejectionReason.EXPIRED, AT));
+    store.store(JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("c"), RejectionReason.EXPIRED, AT));
+
+    assertEquals(2, store.retainedRecordCount());
+    assertEquals(1L, store.evictedCount());
+    assertEquals(0L, store.occurrences(a.id()), "the evicted record is gone");
+    // the evicted rejection is not remembered as a duplicate
+    JCustosEventDeadLetter aAgain = JCustosEventDeadLetter.of(
+        StoreFixtures.envelope("a"), RejectionReason.EXPIRED, AT);
+    assertEquals(aAgain.id(), store.storeOrMerge(aAgain).id());
+    assertThrows(IllegalArgumentException.class, () -> new InMemoryDeadLetterStore(0));
   }
 }

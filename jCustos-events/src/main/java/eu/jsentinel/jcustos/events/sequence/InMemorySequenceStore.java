@@ -85,6 +85,26 @@ public final class InMemorySequenceStore implements JCustosEventSequenceStore {
         .orElseGet(() -> sequences.putIfAbsent(scope, newSequence) == null);
   }
 
+  // JS-SEC-108: hand the reservation back only while it is still the last
+  // value — ConcurrentHashMap#remove(key, value) / #replace(key, old, new) make
+  // the check and the write one atomic step.
+  @Override
+  public boolean releaseReservation(TenantId tenantId, EventProducerId producerId,
+      EventSequence reserved) {
+    Objects.requireNonNull(reserved, "reserved");
+    Scope scope = key(tenantId, producerId);
+    if (reserved.value() <= EventSequence.FIRST.value()) {
+      return reserved.equals(EventSequence.FIRST) && sequences.remove(scope, reserved);
+    }
+    return sequences.replace(scope, reserved, EventSequence.of(reserved.value() - 1));
+  }
+
+  // JS-SEC-105: dropping the entry returns the scope to its fresh state.
+  @Override
+  public void resetSequence(TenantId tenantId, EventProducerId producerId) {
+    sequences.remove(key(tenantId, producerId));
+  }
+
   private static Scope key(TenantId tenantId, EventProducerId producerId) {
     return new Scope(
         Objects.requireNonNull(tenantId, "tenantId"),

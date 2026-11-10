@@ -33,6 +33,7 @@ import eu.jsentinel.jcustos.events.api.EventMetadata;
 import eu.jsentinel.jcustos.events.api.JCustosEvent;
 import eu.jsentinel.jcustos.events.api.JCustosEventSeverity;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
+import eu.jsentinel.jcustos.events.api.WellFormedText;
 import eu.jsentinel.jcustos.events.publisher.SignedEnvelopePublisher;
 import eu.jsentinel.jcustos.events.store.JCustosEventEnvelopeStore;
 import eu.jsentinel.jcustos.events.types.EnvelopeRejectedEvent;
@@ -131,7 +132,7 @@ public final class DefaultJCustosEventBus
     try {
       envelope = publishPipeline.toEnvelope(event);
     } catch (EventPublishException rejection) {
-      reportPublishRejected(event);
+      reportPublishRejected(event, rejection.reason());
       throw rejection;
     }
     if (envelopeStore != null) {
@@ -293,13 +294,18 @@ public final class DefaultJCustosEventBus
 
   // No envelope exists on the publish side — the pipeline rejected before
   // building one — so the event id doubles as the rejectedEnvelopeId (see
-  // SelfObservabilityEvents). The producer-policy denial in
-  // PublishPipeline.toEnvelope is the only publish-side rejection cause,
-  // hence the fixed reason.
-  private void reportPublishRejected(JCustosEvent event) {
-    EventMetadata meta = EventMetadata.create(event.tenantId(),
+  // SelfObservabilityEvents). The reason comes from the exception: the
+  // producer-policy denial, or (JS-SEC-111) a field that is not well-formed
+  // text. In the latter case tenant and id are reported in a form that is
+  // safe to carry on: the malformed value itself must not travel into
+  // listeners that sign or hash the event.
+  private void reportPublishRejected(JCustosEvent event, String reason) {
+    boolean wellFormed = WellFormedText.isWellFormed(event.tenantId().value())
+        && WellFormedText.isWellFormed(event.eventId().value());
+    EventMetadata meta = EventMetadata.create(
+        wellFormed ? event.tenantId() : TenantId.DEFAULT,
         JCustosEvent.SYSTEM_SUBJECT, clock.get(), JCustosEventSeverity.ERROR);
-    publishObservability(new EnvelopeRejectedEvent(meta, event.eventId().value(),
-        SelfObservabilityEvents.REASON_PRODUCER_NOT_ALLOWED));
+    publishObservability(new EnvelopeRejectedEvent(meta,
+        wellFormed ? event.eventId().value() : "malformed", reason));
   }
 }

@@ -29,6 +29,7 @@ import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.events.store.JCustosEventDeadLetter;
 import eu.jsentinel.jcustos.events.store.JCustosEventDeadLetterStore;
 import eu.jsentinel.jcustos.events.store.RejectionReason;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -47,6 +48,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public interface DeadLetterStoreContract {
 
   JCustosEventDeadLetterStore newDeadLetterStore();
+
+  /**
+   * Creates a store that retains at most {@code capacity} open records — the
+   * hook for {@link #capacityBoundsOpenRecords()} (JS-SEC-109). The default
+   * returns {@code null}, which skips that test; an implementation with a
+   * configurable bound overrides it so the bound is actually verified.
+   *
+   * @param capacity the maximum number of open records
+   * @return a bounded store, or {@code null} if the bound cannot be set here
+   * @since 00.84.00
+   */
+  default JCustosEventDeadLetterStore newDeadLetterStore(int capacity) {
+    return null;
+  }
 
   @Test
   @DisplayName("stored dead letters appear in findOpen, oldest first")
@@ -82,5 +97,81 @@ public interface DeadLetterStoreContract {
           TestkitEnvelopes.envelope("e" + i), RejectionReason.EXPIRED, TestkitEnvelopes.AT));
     }
     assertEquals(3, store.findOpen(3).size());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: storeOrMerge folds an identical open rejection into one record")
+  default void storeOrMergeFoldsIdenticalRejection() {
+    JCustosEventDeadLetterStore store = newDeadLetterStore();
+    JCustosEventDeadLetter first = JCustosEventDeadLetter.of(
+        TestkitEnvelopes.envelope("replayed"), RejectionReason.EXPIRED, TestkitEnvelopes.AT);
+
+    assertEquals(first.id(), store.storeOrMerge(first).id(),
+        "the first record is stored and returned as itself");
+    for (int i = 1; i <= 25; i++) {
+      JCustosEventDeadLetter repeat = JCustosEventDeadLetter.of(
+          TestkitEnvelopes.envelope("replayed"), RejectionReason.EXPIRED,
+          TestkitEnvelopes.AT.plusSeconds(i));
+      assertEquals(first.id(), store.storeOrMerge(repeat).id(),
+          "a repeat returns the open record it duplicates");
+    }
+
+    List<JCustosEventDeadLetter> open = store.findOpen(100);
+    assertEquals(1, open.size(), "one replayed envelope retains one record");
+    assertEquals(first.id(), open.get(0).id());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: storeOrMerge keeps a different reason or different content apart")
+  default void storeOrMergeKeepsDifferentRejectionsApart() {
+    JCustosEventDeadLetterStore store = newDeadLetterStore();
+    store.storeOrMerge(JCustosEventDeadLetter.of(
+        TestkitEnvelopes.envelope("same-id"), RejectionReason.EXPIRED, TestkitEnvelopes.AT));
+    store.storeOrMerge(JCustosEventDeadLetter.of(
+        TestkitEnvelopes.envelope("same-id"), RejectionReason.SEQUENCE_VIOLATION,
+        TestkitEnvelopes.AT));
+    // Same envelope id, other content: a forged envelope must not be able to
+    // hide behind — or displace — the record of a genuine one.
+    store.storeOrMerge(JCustosEventDeadLetter.of(
+        TestkitEnvelopes.envelope("same-id", new byte[]{'f', 'o', 'r', 'g', 'e', 'd'}),
+        RejectionReason.EXPIRED, TestkitEnvelopes.AT));
+
+    assertEquals(3, store.findOpen(100).size());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: a rejection that recurs after it was resolved is stored again")
+  default void storeOrMergeStoresAgainAfterResolve() {
+    JCustosEventDeadLetterStore store = newDeadLetterStore();
+    JCustosEventDeadLetter first = JCustosEventDeadLetter.of(
+        TestkitEnvelopes.envelope("recurring"), RejectionReason.EXPIRED, TestkitEnvelopes.AT);
+    store.storeOrMerge(first);
+    store.markResolved(first.id());
+
+    JCustosEventDeadLetter again = JCustosEventDeadLetter.of(
+        TestkitEnvelopes.envelope("recurring"), RejectionReason.EXPIRED, TestkitEnvelopes.AT);
+    assertEquals(again.id(), store.storeOrMerge(again).id());
+
+    List<JCustosEventDeadLetter> open = store.findOpen(100);
+    assertEquals(1, open.size());
+    assertEquals(again.id(), open.get(0).id());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-109: open records are bounded; beyond the capacity the oldest is evicted")
+  default void capacityBoundsOpenRecords() {
+    JCustosEventDeadLetterStore store = newDeadLetterStore(3);
+    Assumptions.assumeTrue(store != null,
+        "override newDeadLetterStore(int) to verify the capacity bound of this store");
+    for (int i = 0; i < 50; i++) {
+      store.storeOrMerge(JCustosEventDeadLetter.of(
+          TestkitEnvelopes.envelope("flood-" + i), RejectionReason.EXPIRED,
+          TestkitEnvelopes.AT));
+    }
+
+    List<JCustosEventDeadLetter> open = store.findOpen(100);
+    assertEquals(3, open.size(), "the store never holds more than its capacity");
+    assertEquals("flood-47", open.get(0).envelope().envelopeId().value());
+    assertEquals("flood-49", open.get(2).envelope().envelopeId().value());
   }
 }

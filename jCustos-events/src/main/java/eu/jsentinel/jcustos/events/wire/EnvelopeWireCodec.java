@@ -27,6 +27,7 @@ package eu.jsentinel.jcustos.events.wire;
 
 import com.svenruppert.functional.result.Result;
 import com.svenruppert.functional.result.functions.CheckedSupplier;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.events.api.CausationId;
@@ -88,6 +89,39 @@ public final class EnvelopeWireCodec {
   private static final String F_CANONICAL_PAYLOAD_HASH = "canonicalPayloadHash";
   private static final String F_CANONICAL_PAYLOAD = "canonicalPayload";
   private static final String F_SIGNATURE = "signature";
+
+  /**
+   * Default upper bound, in UTF-16 code units, for every textual envelope
+   * field on decode (JS-SEC-104, CWE-770). Identifiers are UUIDs, short names
+   * or timestamps; without a bound a single field could fill the whole request
+   * body and travel on into alerts, audit entries and log lines.
+   *
+   * @since 00.84.00
+   */
+  public static final int DEFAULT_MAX_FIELD_LENGTH = 256;
+
+  private final int maxFieldLength;
+
+  /** Creates a codec that decodes with {@link #DEFAULT_MAX_FIELD_LENGTH}. */
+  public EnvelopeWireCodec() {
+    this(DEFAULT_MAX_FIELD_LENGTH);
+  }
+
+  /**
+   * @param maxFieldLength the upper bound, in UTF-16 code units, for every
+   *     textual envelope field on decode — raise it only for installations
+   *     whose identifiers (typically subject ids) are legitimately longer
+   *     than the default; the Base64 payload and signature are not subject
+   *     to it
+   * @since 00.84.00
+   */
+  public EnvelopeWireCodec(int maxFieldLength) {
+    if (maxFieldLength < 1) {
+      throw new IllegalArgumentException(
+          "maxFieldLength must be >= 1, was " + maxFieldLength);
+    }
+    this.maxFieldLength = maxFieldLength;
+  }
 
   /**
    * @param envelope the envelope
@@ -155,17 +189,12 @@ public final class EnvelopeWireCodec {
   }
 
   // JS-SEC-019 (CWE-117): parse-exception messages embed attacker-influenced
-  // wire fragments; strip CR/LF and other control chars so a value cannot forge
-  // extra log lines when a consumer (e.g. the publish endpoint) logs this error.
+  // wire fragments; neutralise everything that can break or reorder a log line
+  // when a consumer (e.g. the publish endpoint) logs this error. JS-SEC-110:
+  // the shared scrubber also covers the Unicode line separators and format
+  // characters the former ISO-control filter let through.
   private static String scrub(String s) {
-    StringBuilder sb = new StringBuilder(s.length());
-    for (int i = 0; i < s.length(); i++) {
-      char c = s.charAt(i);
-      if (!Character.isISOControl(c)) {
-        sb.append(c);
-      }
-    }
-    return sb.toString();
+    return LogFieldScrubber.scrubMessage(s);
   }
 
   private SignedJCustosEventEnvelope decodeOrThrow(String json) {
@@ -187,15 +216,28 @@ public final class EnvelopeWireCodec {
         .payloadContentType(PayloadContentType.of(str(f, F_PAYLOAD_CONTENT_TYPE)))
         .payloadHashAlgorithm(PayloadHashAlgorithm.of(str(f, F_PAYLOAD_HASH_ALGORITHM)))
         .canonicalPayloadHash(str(f, F_CANONICAL_PAYLOAD_HASH))
-        .canonicalPayload(DECODER.decode(str(f, F_CANONICAL_PAYLOAD)))
-        .signature(DECODER.decode(str(f, F_SIGNATURE)));
-    if (f.get(F_CAUSATION_ID) instanceof String causation) {
-      builder.causationId(CausationId.of(causation));
+        .canonicalPayload(DECODER.decode(raw(f, F_CANONICAL_PAYLOAD)))
+        .signature(DECODER.decode(raw(f, F_SIGNATURE)));
+    if (f.get(F_CAUSATION_ID) instanceof String) {
+      builder.causationId(CausationId.of(str(f, F_CAUSATION_ID)));
     }
     return builder.build();
   }
 
-  private static String str(Map<String, Object> f, String key) {
+  // Textual metadata field: present, a string, and within the length bound.
+  // The message carries the field name and the lengths only, never the value.
+  private String str(Map<String, Object> f, String key) {
+    String s = raw(f, key);
+    if (s.length() > maxFieldLength) {
+      throw new EventWireException("field '" + key + "' is too long: " + s.length()
+          + " characters, at most " + maxFieldLength + " are accepted");
+    }
+    return s;
+  }
+
+  // Base64 body field (payload, signature): bounded by the transport's body
+  // limit, not by the identifier bound.
+  private static String raw(Map<String, Object> f, String key) {
     Object value = f.get(key);
     if (!(value instanceof String s)) {
       throw new EventWireException("missing or non-string field '" + key + "'");

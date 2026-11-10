@@ -1161,6 +1161,108 @@ declare `proxybuilder-annotations`, use 00.11.01 and exclude `io.dropwizard.metr
 `com.squareup:javapoet` from it. Builds that relied on the Vaadin pre-release or add-on repositories
 being inherited from the jCustos parent must declare them themselves.
 
+## A trusted key now signs only for the producer it is bound to (SA01, JS-SEC-101, CWE-290, CWE-863)
+
+The consume pipeline resolved the verification key by key id and then applied the producer policy to
+the `producerId` the signer had written into the envelope itself. Any trusted key could therefore
+sign in the name of any producer and any tenant: a UI process holding only its own key could publish
+as the REST service. `JCustosEventVerificationKeyResolver` now has `mayVerify(keyId, producerId,
+tenantId)`, and `ConsumePipeline` asks it directly after the signature verified; an envelope whose
+key is not bound to the claimed producer is rejected as `KeyNotAuthorizedForProducer` without
+touching replay or sequence state. `JdkKeyStoreKeyManagement` binds a key to the producer named like
+its alias, or to the producers given with `withProducerBinding`; `InMemoryKeyManagement` can be
+confined with a new constructor. **Consumers:** name keystore aliases after the producer id or
+declare the binding explicitly. A custom key resolver inherits the default "key id equals producer
+id" and rejects everything else until it overrides `mayVerify`. Code that switches exhaustively over
+`JCustosEventVerificationResult` has to handle the new variant.
+
+## Rejections of unauthenticated envelopes no longer adopt the envelope's claims and are throttled (SA04, JS-SEC-104, CWE-345, CWE-770, CWE-778)
+
+A rejection that needs no key at all — unknown key, invalid signature, payload hash mismatch —
+raised an ERROR event under the tenant the envelope claimed and with its full envelope id, once per
+request. Anyone allowed to submit envelopes could fill alert channels and audit stores in a foreign
+tenant's name. Such events are now raised under the system tenant, carry the claimed id as
+`unverified:` plus at most 64 characters, and are limited to 20 per minute by
+`ConsumeFailureHandler`, with the remainder counted in `suppressedUnauthenticatedCount()`.
+`EnvelopeWireCodec` rejects textual fields longer than 256 characters. Rejections of authenticated
+envelopes are reported as before. **Consumers:** dashboards that group rejection events by tenant
+will see pre-authentication rejections under the system tenant. Use
+`SelfObservabilityEvents.isUnauthenticatedRejection(event)` to treat them separately, and `new
+EnvelopeWireCodec(n)` if your identifiers exceed 256 characters.
+
+## A fresh sequence scope accepts only the first sequence, and verification no longer fails on a stored maximum (SA05, JS-SEC-105, CWE-190, CWE-755)
+
+Without stored state every sequence was accepted as the baseline. One validly signed envelope with
+`Long.MAX_VALUE` made the scope unusable for good, and every later `verify()` threw an
+`ArithmeticException` although it is documented as total. `SequenceValidator` now accepts a fresh
+scope only up to `maxInitialSequence` (default 1), compares without overflow, and `ConsumePipeline`
+always returns a result. `JCustosEventSequenceStore.resetSequence` gives operators a way to restart
+a scope. **Consumers:** a consumer that joins a running producer with an empty sequence store — for
+instance an in-memory store after a restart — must seed the scope with `updateSequence` or configure
+`new SequenceValidator(maxInitialSequence, maxTolerableGap)`; until then it rejects with
+`SequenceViolation`.
+
+## The payload must describe the event its signed envelope announces (SA07, JS-SEC-107, CWE-345, CWE-863)
+
+The canonical payload repeats event type, event id, tenant, subject and time, but only its hash was
+checked. A producer allowed to publish one harmless event type could wrap a payload saying
+`RoleAssigned` for another tenant, and a consumer acting on the payload would process it.
+`ConsumePipeline` now decodes the payload with the codec of its content type and compares these
+fields with the envelope; a deviation, an undecodable payload or an unknown content type is rejected
+as `PayloadMetadataMismatch`. `Valid` carries the checked payload. The signature base is unchanged.
+**Consumers:** read the event from `Valid.payload()` instead of decoding `canonicalPayload`
+yourself. Register additional codecs through the new constructor; envelopes with a content type that
+has no codec are rejected. Exhaustive switches need the new variant.
+
+## A failed publish no longer leaves a hole in the sequence, and gaps can be healed (SA08, JS-SEC-108, CWE-754, CWE-400)
+
+The publish pipeline reserved the sequence number before canonicalisation and signing, so every
+exception afterwards burnt a number; a strict consumer then rejected everything behind the hole,
+permanently. The reservation now happens after canonicalisation, hashing and key access, and is
+handed back (`releaseReservation`) if building or signing fails. On the consumer,
+`SequenceValidator` can tolerate a bounded gap (`maxTolerableGap`, default 0); an envelope accepted
+across a gap is logged as `events/sequence-anomaly-accepted` and counted. Operators can
+re-synchronise a scope with `updateSequence` or `resetSequence`. **Consumers:** nothing changes by
+default. Configure a tolerance if your transport can drop envelopes, and monitor
+`acceptedSequenceAnomalyCount()`. Custom sequence stores should override `releaseReservation`
+atomically.
+
+## Dead-letter stores deduplicate identical rejections and bound open records (SA09, JS-SEC-109, CWE-770)
+
+Every rejection stored the complete envelope under a new id, so one captured, expired envelope
+submitted repeatedly grew the store without limit — no key required.
+`JCustosEventDeadLetterStore.storeOrMerge` now folds a rejection with the same reason and identical
+envelope content into the open record, and `DeadLetterRecorder` announces it once.
+`InMemoryDeadLetterStore` counts repeats (`occurrences`), holds at most 1000 open records by default
+and evicts the oldest (`evictedCount`, WARN `events/dead-letter-evicted`). **Consumers:** resolve
+dead letters before the capacity is reached or raise it through the constructor. Custom stores
+inherit a scanning default of `storeOrMerge` and should replace it with an indexed one and add their
+own bound.
+
+## Log and wire output can no longer be split by Unicode separators (SA10, JS-SEC-110, CWE-117, CWE-93)
+
+`LogFieldScrubber` replaced ISO control characters and the ASCII space only. U+2028, U+2029 and the
+non-ASCII spaces passed through, so a user name could add a line or a `key=value` field for any
+processor that splits on Unicode line terminators or white space. The scrubber now also replaces
+every Unicode white-space and separator character, format characters and unpaired surrogates;
+`scrubMessage` does the same for free text while keeping the plain space, and `isLineUnsafe` exposes
+the rule. The envelope wire JSON writes U+007F–U+009F, U+2028 and U+2029 as `\uXXXX` escapes.
+**Consumers:** scrubbed log fields show `?` for more characters than before. The wire JSON of an
+envelope that contains one of the listed characters differs textually but decodes to the same value
+in every version, and its signature is unaffected.
+
+## Envelope text must be well-formed; a signed `?` can no longer be swapped for a lone surrogate (SA11, JS-SEC-111, CWE-176, CWE-347)
+
+The signature base encoded strings with `String.getBytes`, which writes `?` for an unpaired
+surrogate. `a?b` and `a` + U+D800 + `b` therefore shared one signature, and an attacker on the
+transport could alter a signed field containing `?` without detection. Envelopes now reject any
+textual field that is not well-formed UTF-16, the wire decoder refuses such strings, and the
+signature base encodes strictly; the bytes for well-formed text are unchanged. On publish, an event
+whose id, type, tenant or subject is malformed is refused with `EventPublishException` (reason
+`malformed-text`) and reported as `EnvelopeRejected`. **Consumers:** validate or replace unpaired
+surrogates in user-supplied identifiers before building events; otherwise those events are rejected
+at publish and appear as `EnvelopeRejected` with reason `malformed-text`.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
