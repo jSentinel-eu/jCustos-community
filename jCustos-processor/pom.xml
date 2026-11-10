@@ -27,9 +27,13 @@
     Compile-time annotation processor that generates a Secured wrapper
     subclass for each @Secured-annotated concrete class. The generated
     wrapper routes every public, non-final, non-static method through
-    JCustosEnforcer when the method (or class) carries a method-security
-    annotation (@RequiresRole, @RequiresPermission, @RequiresAnyPermission,
-    @RequiresAllPermissions, @RequiresPolicy).
+    JCustosEnforcer: @RequiresRole, @RequiresPermission,
+    @RequiresAnyPermission, @RequiresAllPermissions and @RequiresPolicy
+    through the explicit enforcer API, every other restriction annotation
+    (@ProtectedBy, consumer-defined @JCustosAnnotation annotations) and
+    every method without a restriction through the generic
+    JCustosEnforcer.enforce(Method, Class), so that deny-by-default
+    applies to generated wrappers as well.
 
     Runtime sibling: SecuredProxy in jCustos-standalone for the
     JDK-dynamic-proxy path on interfaces.
@@ -68,6 +72,17 @@
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!--
+      JS-SEC-156: the parity test runs the same fixture through the
+      run-time path (SecuredProxy) and through the generated wrapper.
+      Test scope only - the processor itself does not depend on it.
+    -->
+    <dependency>
+      <groupId>eu.jsentinel</groupId>
+      <artifactId>jCustos-standalone</artifactId>
+      <version>${project.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>

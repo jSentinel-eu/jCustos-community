@@ -784,6 +784,31 @@ without POSIX attributes owner and permissions still cannot be checked (JS-SEC-0
 token files that were written by hand or provisioned with wider permissions are no longer accepted;
 on a read-only mount start-up then fails when it tries to replace the file.
 
+## The `@Secured` processor guards every restriction annotation and honours deny-by-default (SA56, JS-SEC-156, CWE-862, CWE-1068)
+
+`SecuredAnnotationProcessor` lowered five annotations and nothing else. `@ProtectedBy` on a method
+and every consumer-defined annotation that is meta-annotated with `@JCustosAnnotation` produced a
+plain `super` call without a compiler message, an annotated `protected` or package-private method
+was left out of the wrapper altogether, and deny-by-default had no effect, because the wrapper
+called the explicit enforcer API instead of `JCustosEnforcer.enforce` — while `SecuredProxy`
+enforced all of it at run time. The wrapper now routes every restriction it does not lower natively,
+every restriction inherited from a superclass or an interface, and every method without a
+restriction through `JCustosEnforcer.enforce(Method, Class)`; the `Method` is resolved once in a
+static field, and a wrapper that cannot resolve it fails its class initialisation instead of running
+unguarded.
+
+A restriction annotation on a method the wrapper does not override — `final`, `static`, `private`,
+`protected`, package-private, an `Object` method, or one excluded through `@SkipProxy` or
+`excludeMethodNames` — is the compile error `processing/unenforceable-security-annotation`, and a
+native and a custom restriction on one element fail with `processing/multiple-security-annotations`.
+**Consumers:** builds that relied on such an annotation being ignored fail until the method is made
+public or the annotation is removed; with deny-by-default switched on, un-annotated methods of a
+generated wrapper are denied unless they carry `@PublicRoute`. A restriction on an interface or
+superclass method that the `@Secured` class overrides without repeating it is still not enforced by
+the wrapper — repeat the annotation on the overriding method. Verified by compiling, loading and
+calling generated wrappers: 432 decisions over seven fixture classes are identical on the
+`SecuredProxy` path and in the wrapper.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

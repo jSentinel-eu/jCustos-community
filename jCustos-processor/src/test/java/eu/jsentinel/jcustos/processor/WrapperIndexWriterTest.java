@@ -172,6 +172,55 @@ class WrapperIndexWriterTest {
     assertEquals("secured", parts[5]);
   }
 
+  @Test
+  @DisplayName("JS-SEC-156: a method guarded through the generic call is indexed; one that only gets the deny-by-default call is not")
+  void genericallyGuardedMethodsAreIndexed() throws IOException {
+    JavaFileObject evaluator = JavaFileObjects.forSourceLines(
+        "demo.OwnerOnly",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;",
+        "import eu.jsentinel.jcustos.authorization.api.AuthorizationEvaluator;",
+        "import eu.jsentinel.jcustos.authorization.navigation.AccessContext;",
+        "public final class OwnerOnly implements AuthorizationEvaluator<ProtectedBy> {",
+        "  @Override",
+        "  public AuthorizationDecision evaluate(AccessContext context, ProtectedBy annotation) {",
+        "    return AuthorizationDecision.forbidden(\"always denied\");",
+        "  }",
+        "}");
+    JavaFileObject base = JavaFileObjects.forSourceLines(
+        "demo.OwnedBase",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "@ProtectedBy(OwnerOnly.class) public class OwnedBase {",
+        "  public void inherited() {}",
+        "}");
+    JavaFileObject owned = JavaFileObjects.forSourceLines(
+        "demo.Owned",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "@Secured public class Owned extends OwnedBase {",
+        "  public void own() {}",
+        "}");
+    JavaFileObject mixed = JavaFileObjects.forSourceLines(
+        "demo.Mixed",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "@Secured public class Mixed {",
+        "  @ProtectedBy(OwnerOnly.class) public void guarded() {}",
+        "  public void open() {}",
+        "}");
+
+    Compilation result = compile(evaluator, base, owned, mixed);
+    assertThat(result).succeeded();
+    List<String> rows = dataRows(readIndex(result));
+    assertEquals(List.of(
+            "demo.Mixed:demo.MixedSecured:proxybuilder:00.11.00:guarded:secured",
+            "demo.Owned:demo.OwnedSecured:proxybuilder:00.11.00:own,inherited:secured"),
+        rows);
+  }
+
   // ── helpers ──────────────────────────────────────────────────────
 
   private static String readIndex(Compilation compilation) throws IOException {

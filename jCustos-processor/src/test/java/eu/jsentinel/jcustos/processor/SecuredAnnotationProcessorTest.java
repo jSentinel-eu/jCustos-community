@@ -210,8 +210,8 @@ class SecuredAnnotationProcessorTest {
   }
 
   @Test
-  @DisplayName("Unannotated method in @Secured class generates pure super-call")
-  void unannotatedMethodHasNoEnforcerCall() {
+  @DisplayName("JS-SEC-156: an unannotated method gets the generic enforce call, so deny-by-default applies")
+  void unannotatedMethodGetsGenericEnforce() {
     JavaFileObject source = JavaFileObjects.forSourceLines(
         "demo.MixedService",
         "package demo;",
@@ -228,22 +228,24 @@ class SecuredAnnotationProcessorTest {
 
     Compilation result = compile(source);
 
-    assertThat(result).succeeded();
+    assertThat(result).succeededWithoutWarnings();
     String generated = generatedFileContent(result, "demo.MixedServiceSecured");
 
-    if (generated.contains("super.unguarded(input)")) {
-      // expected delegate call present
-    } else {
-      throw new AssertionError("unguarded() must still delegate; got: " + generated);
-    }
-    // the unguarded method must NOT contain an enforcer call …
-    int guardedIdx = generated.indexOf("super.guarded()");
-    int unguardedIdx = generated.indexOf("super.unguarded(input)");
-    String unguardedSlice = generated.substring(guardedIdx, unguardedIdx);
-    if (unguardedSlice.lastIndexOf("JCustosEnforcer.")
-        > unguardedSlice.lastIndexOf("super.guarded()")) {
-      throw new AssertionError(
-          "enforcer call leaked into the unguarded() method; full source:\n" + generated);
+    String unguardedBody = methodBody(generated, "public String unguarded(");
+    assertContains(unguardedBody,
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, MixedService.class);");
+    assertContains(unguardedBody, "return super.unguarded(input);");
+    assertBefore(unguardedBody, "JCustosEnforcer.enforce(", "super.unguarded(input)");
+    assertContains(generated,
+        "private static final Method JCUSTOS_GUARD_METHOD_0 = "
+            + "jcustosGuardMethod(\"unguarded\", String.class);");
+    assertContains(generated, "return MixedService.class.getMethod(name, parameterTypes);");
+
+    // the native lowering of the annotated method is untouched
+    String guardedBody = methodBody(generated, "public void guarded(");
+    assertContains(guardedBody, "JCustosEnforcer.requirePermission(\"a\");");
+    if (guardedBody.contains("JCustosEnforcer.enforce(")) {
+      throw new AssertionError("native method must keep its explicit call only:\n" + generated);
     }
   }
 
@@ -463,7 +465,568 @@ class SecuredAnnotationProcessorTest {
     assertThat(result).failed();
   }
 
+  // ── JS-SEC-156 (CWE-862): generic guard and unenforceable annotations ──
+
+  private static final JavaFileObject OWNER_ONLY = JavaFileObjects.forSourceLines(
+      "demo.OwnerOnly",
+      "package demo;",
+      "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+      "import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;",
+      "import eu.jsentinel.jcustos.authorization.api.AuthorizationEvaluator;",
+      "import eu.jsentinel.jcustos.authorization.navigation.AccessContext;",
+      "",
+      "public final class OwnerOnly implements AuthorizationEvaluator<ProtectedBy> {",
+      "    @Override",
+      "    public AuthorizationDecision evaluate(AccessContext context, ProtectedBy annotation) {",
+      "        return AuthorizationDecision.forbidden(\"always denied\");",
+      "    }",
+      "}");
+
+  private static final JavaFileObject ADMIN_ONLY = JavaFileObjects.forSourceLines(
+      "demo.AdminOnly",
+      "package demo;",
+      "import eu.jsentinel.jcustos.authorization.annotations.JCustosAnnotation;",
+      "import java.lang.annotation.ElementType;",
+      "import java.lang.annotation.Retention;",
+      "import java.lang.annotation.RetentionPolicy;",
+      "import java.lang.annotation.Target;",
+      "",
+      "@Retention(RetentionPolicy.RUNTIME)",
+      "@Target({ElementType.TYPE, ElementType.METHOD})",
+      "@JCustosAnnotation(AdminOnlyEvaluator.class)",
+      "public @interface AdminOnly { }");
+
+  private static final JavaFileObject ADMIN_ONLY_EVALUATOR = JavaFileObjects.forSourceLines(
+      "demo.AdminOnlyEvaluator",
+      "package demo;",
+      "import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;",
+      "import eu.jsentinel.jcustos.authorization.navigation.AccessContext;",
+      "import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;",
+      "",
+      "public final class AdminOnlyEvaluator implements AccessEvaluator<AdminOnly> {",
+      "    @Override",
+      "    public AccessDecision evaluate(AccessContext context, AdminOnly annotation) {",
+      "        return AccessDecision.rerouteToError(SecurityException.class, \"admins only\");",
+      "    }",
+      "}");
+
+  @Test
+  @DisplayName("JS-SEC-156: @ProtectedBy on a method yields an enforcer call instead of a bare super-call")
+  void protectedByOnMethodGeneratesEnforcerCall() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.OrderService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class OrderService {",
+        "    @ProtectedBy(OwnerOnly.class)",
+        "    public void delete(String id, int[] lines, java.util.List<String> tags) {}",
+        "}");
+
+    Compilation result = compile(source, OWNER_ONLY);
+
+    assertThat(result).succeededWithoutWarnings();
+    String generated = generatedFileContent(result, "demo.OrderServiceSecured");
+    String body = methodBody(generated, "public void delete(");
+    assertContains(body, "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, OrderService.class);");
+    assertBefore(body, "JCustosEnforcer.enforce(", "super.delete(id, lines, tags)");
+    // resolved once, with the erased parameter types
+    assertContains(generated,
+        "private static final Method JCUSTOS_GUARD_METHOD_0 = "
+            + "jcustosGuardMethod(\"delete\", String.class, int[].class, List.class);");
+    assertContains(generated, "throw new IllegalStateException(");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a consumer-defined @JCustosAnnotation annotation yields an enforcer call")
+  void consumerDefinedAnnotationGeneratesEnforcerCall() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.PurgeService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class PurgeService {",
+        "    @AdminOnly",
+        "    public void purge() {}",
+        "}");
+
+    Compilation result = compile(source, ADMIN_ONLY, ADMIN_ONLY_EVALUATOR);
+
+    assertThat(result).succeededWithoutWarnings();
+    String generated = generatedFileContent(result, "demo.PurgeServiceSecured");
+    String body = methodBody(generated, "public void purge(");
+    assertContains(body, "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, PurgeService.class);");
+    assertBefore(body, "JCustosEnforcer.enforce(", "super.purge()");
+    assertContains(generated,
+        "private static final Method JCUSTOS_GUARD_METHOD_0 = jcustosGuardMethod(\"purge\");");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a class-level @ProtectedBy guards every method through the generic call")
+  void classLevelCustomAnnotationGuardsMethods() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.OwnedService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "@ProtectedBy(OwnerOnly.class)",
+        "public class OwnedService {",
+        "    public void one() {}",
+        "    public void two() {}",
+        "}");
+
+    Compilation result = compile(source, OWNER_ONLY);
+
+    assertThat(result).succeededWithoutWarnings();
+    String generated = generatedFileContent(result, "demo.OwnedServiceSecured");
+    assertContains(methodBody(generated, "public void one("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, OwnedService.class);");
+    assertContains(methodBody(generated, "public void two("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_1, OwnedService.class);");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a restriction annotation on a protected method is a compile error")
+  void annotatedProtectedMethodRejected() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.IndexService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@Secured",
+        "public class IndexService {",
+        "    @RequiresRole(\"ADMIN\")",
+        "    protected void rebuildIndex() {}",
+        "}");
+
+    Compilation result = compile(source);
+
+    assertThat(result).failed();
+    assertThat(result).hadErrorContaining("processing/unenforceable-security-annotation");
+    assertThat(result).hadErrorContaining(
+        "@RequiresRole on IndexService#rebuildIndex cannot be enforced");
+    assertThat(result).hadErrorContaining("the method is protected");
+    assertThat(result)
+        .hadErrorContaining("processing/unenforceable-security-annotation")
+        .inFile(source)
+        .onLine(8);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a restriction annotation on a package-private method is a compile error")
+  void annotatedPackagePrivateMethodRejected() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.ExportService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;",
+        "",
+        "@Secured",
+        "public class ExportService {",
+        "    @RequiresPermission(\"order:export\")",
+        "    void export() {}",
+        "}");
+
+    Compilation result = compile(source);
+
+    assertThat(result).failed();
+    assertThat(result).hadErrorContaining(
+        "processing/unenforceable-security-annotation: @RequiresPermission on "
+            + "ExportService#export cannot be enforced");
+    assertThat(result).hadErrorContaining("the method is package-private");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: @ProtectedBy and a consumer-defined annotation on non-public methods are compile errors too")
+  void customAnnotationsOnNonPublicMethodsRejected() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.HiddenService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class HiddenService {",
+        "    @ProtectedBy(OwnerOnly.class)",
+        "    protected void delete() {}",
+        "    @AdminOnly",
+        "    void purge() {}",
+        "}");
+
+    Compilation result = compile(source, OWNER_ONLY, ADMIN_ONLY, ADMIN_ONLY_EVALUATOR);
+
+    assertThat(result).failed();
+    assertThat(result).hadErrorContaining(
+        "@ProtectedBy on HiddenService#delete cannot be enforced");
+    assertThat(result).hadErrorContaining(
+        "@AdminOnly on HiddenService#purge cannot be enforced");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: restriction annotations on final, static and private methods are named precisely")
+  void annotatedFinalStaticPrivateMethodsRejected() {
+    String[][] cases = {
+        {"public final void op() {}", "the method is final"},
+        {"public static void op() {}", "the method is static"},
+        {"private void op() {}", "the method is private"},
+    };
+    for (String[] c : cases) {
+      JavaFileObject source = JavaFileObjects.forSourceLines(
+          "demo.FixedService",
+          "package demo;",
+          "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+          "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+          "",
+          "@Secured",
+          "public class FixedService {",
+          "    @RequiresRole(\"ADMIN\")",
+          "    " + c[0],
+          "}");
+
+      Compilation result = compile(source);
+
+      assertThat(result).failed();
+      assertThat(result).hadErrorContaining(
+          "processing/unenforceable-security-annotation: @RequiresRole on "
+              + "FixedService#op cannot be enforced");
+      assertThat(result).hadErrorContaining(c[1]);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: an annotated static method stays an error when proxybuilder only warns about static methods")
+  void annotatedStaticMethodRejectedEvenWhenStaticMethodsOnlyWarn() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.StaticService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@Secured",
+        "public class StaticService {",
+        "    @RequiresRole(\"ADMIN\")",
+        "    public static void reset() {}",
+        "    public void op() {}",
+        "}");
+
+    Compilation result = Compiler.javac()
+        .withProcessors(new SecuredAnnotationProcessor())
+        .withOptions("-Aproxybuilder.failOnStaticMethods=false")
+        .compile(source);
+
+    assertThat(result).failed();
+    assertThat(result).hadErrorCount(1);
+    assertThat(result).hadErrorContaining(
+        "processing/unenforceable-security-annotation: @RequiresRole on "
+            + "StaticService#reset cannot be enforced");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a restriction annotation on a method excluded from the wrapper is a compile error")
+  void annotatedExcludedMethodsRejected() {
+    JavaFileObject skipped = JavaFileObjects.forSourceLines(
+        "demo.SkippedService",
+        "package demo;",
+        "import com.svenruppert.proxybuilder.annotations.SkipProxy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@Secured",
+        "public class SkippedService {",
+        "    @SkipProxy",
+        "    @RequiresRole(\"ADMIN\")",
+        "    public void op() {}",
+        "}");
+    Compilation skippedResult = compile(skipped);
+    assertThat(skippedResult).failed();
+    assertThat(skippedResult).hadErrorContaining(
+        "@RequiresRole on SkippedService#op cannot be enforced");
+    assertThat(skippedResult).hadErrorContaining("excluded from the wrapper by @SkipProxy");
+
+    JavaFileObject excluded = JavaFileObjects.forSourceLines(
+        "demo.ExcludedService",
+        "package demo;",
+        "import com.svenruppert.proxybuilder.annotations.ProxyBuilderOptions;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@Secured",
+        "@ProxyBuilderOptions(excludeMethodNames = {\"op\"})",
+        "public class ExcludedService {",
+        "    @RequiresRole(\"ADMIN\")",
+        "    public void op() {}",
+        "    public void other() {}",
+        "}");
+    Compilation excludedResult = compile(excluded);
+    assertThat(excludedResult).failed();
+    assertThat(excludedResult).hadErrorContaining(
+        "@RequiresRole on ExcludedService#op cannot be enforced");
+    assertThat(excludedResult).hadErrorContaining(
+        "excluded from the wrapper by @ProxyBuilderOptions(excludeMethodNames)");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: an annotated protected method inherited from a superclass is an error unless the subclass overrides it")
+  void annotatedProtectedMethodOfSuperclassRejectedUnlessOverridden() {
+    JavaFileObject base = JavaFileObjects.forSourceLines(
+        "demo.BaseService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "public class BaseService {",
+        "    @RequiresRole(\"ADMIN\")",
+        "    protected void maintain() {}",
+        "}");
+    JavaFileObject inheriting = JavaFileObjects.forSourceLines(
+        "demo.InheritingService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class InheritingService extends BaseService {",
+        "    public void op() {}",
+        "}");
+    Compilation inherited = compile(base, inheriting);
+    assertThat(inherited).failed();
+    assertThat(inherited).hadErrorContaining(
+        "@RequiresRole on BaseService#maintain cannot be enforced by the generated "
+            + "wrapper of InheritingService");
+
+    JavaFileObject overriding = JavaFileObjects.forSourceLines(
+        "demo.OverridingService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@Secured",
+        "public class OverridingService extends BaseService {",
+        "    @Override",
+        "    @RequiresRole(\"ADMIN\")",
+        "    public void maintain() {}",
+        "}");
+    Compilation overridden = compile(base, overriding);
+    assertThat(overridden).succeededWithoutWarnings();
+    assertContains(generatedFileContent(overridden, "demo.OverridingServiceSecured"),
+        "JCustosEnforcer.requireRole(\"ADMIN\");");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: unannotated protected and package-private methods are still left alone without a diagnostic")
+  void unannotatedNonPublicMethodsAreNotAnError() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.HelperService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@Secured",
+        "public class HelperService {",
+        "    @RequiresRole(\"ADMIN\")",
+        "    public void op() { helper(); internal(); }",
+        "    protected void helper() {}",
+        "    void internal() {}",
+        "}");
+
+    Compilation result = compile(source);
+
+    assertThat(result).succeededWithoutWarnings();
+    String generated = generatedFileContent(result, "demo.HelperServiceSecured");
+    if (generated.contains("helper()") || generated.contains("internal()")) {
+      throw new AssertionError("non-public methods must not be overridden:\n" + generated);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a native and a custom restriction on one method fail with processing/multiple-security-annotations")
+  void nativeAndCustomRestrictionOnOneMethodRejected() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.DoubleGuardService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.ProtectedBy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class DoubleGuardService {",
+        "    @RequiresRole(\"ADMIN\")",
+        "    @ProtectedBy(OwnerOnly.class)",
+        "    public void delete() {}",
+        "}");
+
+    Compilation result = compile(source, OWNER_ONLY);
+
+    assertThat(result).failed();
+    assertThat(result).hadErrorContaining(
+        "processing/multiple-security-annotations: delete carries 2 security annotations");
+    assertThat(result).hadErrorContaining("@RequiresRole, @ProtectedBy");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a subclass that overrides its base's class-level restriction is not 'two annotations' and keeps its own")
+  void subclassOverridesInheritedClassLevelRestriction() {
+    JavaFileObject base = JavaFileObjects.forSourceLines(
+        "demo.GuardedBase",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;",
+        "",
+        "@RequiresPermission(\"base:use\")",
+        "public class GuardedBase {",
+        "    public void inherited() {}",
+        "}");
+    JavaFileObject derived = JavaFileObjects.forSourceLines(
+        "demo.GuardedDerived",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "@RequiresRole(\"USER\")",
+        "public class GuardedDerived extends GuardedBase {",
+        "    public void own() {}",
+        "}");
+
+    Compilation result = compile(base, derived);
+
+    assertThat(result).succeededWithoutWarnings();
+    String generated = generatedFileContent(result, "demo.GuardedDerivedSecured");
+    // declared in the @Secured class: its own, declared restriction - natively
+    String own = methodBody(generated, "public void own(");
+    assertContains(own, "JCustosEnforcer.requireRole(\"USER\");");
+    if (own.contains("base:use")) {
+      throw new AssertionError("the inherited annotation must not win:\n" + generated);
+    }
+    // declared in the superclass: left to the run-time scanner, which starts at
+    // the declaring class
+    assertContains(methodBody(generated, "public void inherited("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, GuardedDerived.class);");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a class-level restriction that is only inherited is resolved through the generic call")
+  void inheritedClassLevelRestrictionUsesGenericCall() {
+    JavaFileObject base = JavaFileObjects.forSourceLines(
+        "demo.RoleBase",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "",
+        "@RequiresRole(\"ADMIN\")",
+        "public class RoleBase { }");
+    JavaFileObject derived = JavaFileObjects.forSourceLines(
+        "demo.RoleDerived",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class RoleDerived extends RoleBase {",
+        "    public void op() {}",
+        "}");
+
+    Compilation result = compile(base, derived);
+
+    assertThat(result).succeededWithoutWarnings();
+    assertContains(methodBody(generatedFileContent(result, "demo.RoleDerivedSecured"),
+            "public void op("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, RoleDerived.class);");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: @PropagateToken is no restriction - the method is delegated as before, with a warning about deny-by-default")
+  void propagateTokenIsNotARestriction() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.GatewayService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.annotations.PropagateToken;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class GatewayService {",
+        "    @PropagateToken",
+        "    public void call() {}",
+        "    @PropagateToken",
+        "    @RequiresRole(\"ADMIN\")",
+        "    public void adminCall() {}",
+        "    public void plain() {}",
+        "}");
+
+    Compilation result = compile(source);
+
+    assertThat(result).succeeded();
+    assertThat(result).hadWarningCount(1);
+    assertThat(result).hadWarningContaining(
+        "processing/deny-by-default-not-applied: call is delegated without a guard");
+    String generated = generatedFileContent(result, "demo.GatewayServiceSecured");
+    String call = methodBody(generated, "public void call(");
+    if (call.contains("JCustosEnforcer.")) {
+      throw new AssertionError("enforce() cannot evaluate @PropagateToken:\n" + generated);
+    }
+    assertContains(call, "super.call();");
+    assertContains(methodBody(generated, "public void adminCall("),
+        "JCustosEnforcer.requireRole(\"ADMIN\");");
+    assertContains(methodBody(generated, "public void plain("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, GatewayService.class);");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-156: a custom restriction next to @PropagateToken cannot be enforced and fails the build")
+  void customRestrictionNextToPropagateTokenRejected() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.MixedGatewayService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.annotations.PropagateToken;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class MixedGatewayService {",
+        "    @PropagateToken",
+        "    @AdminOnly",
+        "    public void call() {}",
+        "}");
+
+    Compilation result = compile(source, ADMIN_ONLY, ADMIN_ONLY_EVALUATOR);
+
+    assertThat(result).failed();
+    assertThat(result).hadErrorContaining(
+        "processing/unenforceable-security-annotation: @AdminOnly on call cannot be "
+            + "enforced next to @PropagateToken");
+  }
+
   // ── helpers ──────────────────────────────────────────────────────
+
+  private static void assertContains(String haystack, String needle) {
+    if (!haystack.contains(needle)) {
+      throw new AssertionError("expected to find\n  " + needle + "\nin:\n" + haystack);
+    }
+  }
+
+  private static void assertBefore(String haystack, String first, String second) {
+    int firstIdx = haystack.indexOf(first);
+    int secondIdx = haystack.indexOf(second);
+    if (firstIdx < 0 || secondIdx < 0 || firstIdx > secondIdx) {
+      throw new AssertionError("expected '" + first + "' before '" + second + "' in:\n"
+          + haystack);
+    }
+  }
+
+  /** The text of one generated method, from its signature to the closing brace. */
+  private static String methodBody(String generated, String signaturePrefix) {
+    int start = generated.indexOf(signaturePrefix);
+    if (start < 0) {
+      throw new AssertionError("no method '" + signaturePrefix + "' in:\n" + generated);
+    }
+    int end = generated.indexOf("\n  }\n", start);
+    if (end < 0) {
+      throw new AssertionError("unterminated method '" + signaturePrefix + "' in:\n"
+          + generated);
+    }
+    return generated.substring(start, end);
+  }
 
   private static String generatedFileContent(Compilation compilation, String qualifiedName) {
     return compilation.generatedSourceFiles().stream()
