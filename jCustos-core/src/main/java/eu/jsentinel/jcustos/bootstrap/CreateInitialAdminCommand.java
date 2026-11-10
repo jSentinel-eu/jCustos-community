@@ -46,4 +46,19 @@ public record CreateInitialAdminCommand(
     Objects.requireNonNull(username, "username");
     Objects.requireNonNull(password, "password");
   }
+
+  /**
+   * Masks the bootstrap token and the password. The compiler-generated
+   * {@code toString()} would print the token — which authorises the creation
+   * of the first administrator — into any log line or exception message that
+   * stringifies the command (JS-SEC-127, CWE-532).
+   *
+   * @return a description without the token and the password
+   */
+  @Override
+  public String toString() {
+    return "CreateInitialAdminCommand[bootstrapToken=***, username=" + username
+        + ", password=***, displayName=" + displayName
+        + ", email=" + email + "]";
+  }
 }

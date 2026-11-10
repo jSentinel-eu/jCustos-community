@@ -56,8 +56,11 @@ public interface AbuseDetectionService {
   /**
    * Records the outcome of the operation so the counters can update.
    * Successful logins typically reset the per-username failure
-   * counter; volume counters (CLIENT_ADDRESS / TENANT / GLOBAL)
-   * usually keep tracking irrespective of outcome.
+   * counter; volume counters (CLIENT_ADDRESS / TENANT / GLOBAL, and
+   * the per-username counter of {@code RESET_REQUEST}) keep tracking
+   * irrespective of outcome — an accepted reset request is a success
+   * and must still count against the account's request budget
+   * (JS-SEC-121, CWE-799).
    */
   void recordOutcome(AbuseAttemptContext context, AttemptOutcome outcome);
 }

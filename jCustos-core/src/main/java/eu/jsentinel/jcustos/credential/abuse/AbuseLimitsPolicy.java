@@ -34,27 +34,45 @@ import java.util.Objects;
  *
  * <p>The model is intentionally simple: each
  * {@code (AbuseAttemptType, AbuseDimension)} key carries a sliding
- * window of length {@code window} and three escalating
- * <em>failure</em> thresholds — {@code delayAt}, {@code stepUpAt},
- * {@code blockAt} — that map onto
+ * window of length {@code window} and three escalating thresholds —
+ * {@code delayAt}, {@code stepUpAt}, {@code blockAt} — that map onto
  * {@link AbuseDecision.Delay}, {@link AbuseDecision.RequireAdditionalCheck}
- * and {@link AbuseDecision.Block} respectively. Successful attempts
- * reset the per-username failure counter; volume counters
- * (CLIENT_ADDRESS / TENANT / GLOBAL) keep tracking regardless of
- * outcome.</p>
+ * and {@link AbuseDecision.Block} respectively.</p>
+ *
+ * <p>What a threshold counts depends on the key (JS-SEC-121, CWE-799):</p>
+ * <ul>
+ *   <li><em>Failure counters</em> — {@code USERNAME} for {@code LOGIN},
+ *       {@code PASSWORD_CHANGE} and {@code RESET_CONSUME}: the thresholds
+ *       count failed attempts in the window, and a successful attempt
+ *       clears the counter.</li>
+ *   <li><em>Volume counters</em> — {@code CLIENT_ADDRESS}, {@code TENANT}
+ *       and {@code GLOBAL} for every attempt type, and {@code USERNAME} for
+ *       {@code RESET_REQUEST}: the thresholds count every attempt in the
+ *       window regardless of its outcome, and a success resets nothing. A
+ *       reset request that was accepted is a success, so only a volume
+ *       counter can limit how many links are sent to one account.</li>
+ * </ul>
  */
 public final class AbuseLimitsPolicy {
 
   /**
    * Single sliding-window limit definition.
    *
+   * <p>The three thresholds are <em>event counts within the window</em>.
+   * For a failure counter an event is a failed attempt; for a volume
+   * counter it is any attempt, whatever its outcome — see the class
+   * comment for which {@code (AbuseAttemptType, AbuseDimension)} key is
+   * which. In particular the limit of {@code RESET_REQUEST / USERNAME}
+   * bounds the number of reset requests for one account, accepted ones
+   * included (JS-SEC-121, CWE-799).</p>
+   *
    * @param window    sliding-window length
-   * @param delayAt   failure count at which {@link AbuseDecision.Delay}
+   * @param delayAt   event count at which {@link AbuseDecision.Delay}
    *                  kicks in, or 0 to disable the delay step
-   * @param stepUpAt  failure count at which
+   * @param stepUpAt  event count at which
    *                  {@link AbuseDecision.RequireAdditionalCheck}
    *                  kicks in, or 0 to disable
-   * @param blockAt   failure count at which {@link AbuseDecision.Block}
+   * @param blockAt   event count at which {@link AbuseDecision.Block}
    *                  kicks in, or 0 to disable
    * @param delayLen  duration returned with {@link AbuseDecision.Delay}
    * @param blockLen  duration returned with {@link AbuseDecision.Block}
@@ -104,7 +122,10 @@ public final class AbuseLimitsPolicy {
   /**
    * Sensible default policy: 5/10/15 failures per username per
    * 15 minutes for LOGIN; 30 / 60 / 120 per client address per hour
-   * (volume counter); no step-up by default.
+   * (volume counter); for RESET_REQUEST a delay from the 3rd and a block
+   * from the 6th request per username per hour and 10 / 30 per client
+   * address per hour, both volume counters that count accepted requests
+   * too (JS-SEC-121); no step-up for the reset and change flows.
    */
   public static AbuseLimitsPolicy defaults() {
     Duration loginWindow = Duration.ofMinutes(15);

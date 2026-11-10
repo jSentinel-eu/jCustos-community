@@ -347,5 +347,17 @@ public final class EmailVerificationService implements HasLogger {
       }
       requireNonNull(record, "record must not be null");
     }
+
+    /**
+     * Masks the plain token; the compiler-generated {@code toString()} would
+     * print a reusable secret into any log line that stringifies the tuple
+     * (JS-SEC-127, CWE-532). The record carries the hash only and stays readable.
+     *
+     * @return a description without the plain token
+     */
+    @Override
+    public String toString() {
+      return "IssuedToken[plainToken=***, record=" + record + "]";
+    }
   }
 }

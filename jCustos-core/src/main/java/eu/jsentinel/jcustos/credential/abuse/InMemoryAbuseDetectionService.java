@@ -41,11 +41,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@link AbuseDetectionService}.
  *
  * <p>Each {@code (AbuseAttemptType, AbuseDimension, dimensionKey)}
- * tuple has its own sliding-window deque of failure timestamps.
- * {@link AbuseDimension#USERNAME} counters track failures only;
- * {@link AbuseDimension#CLIENT_ADDRESS},
- * {@link AbuseDimension#TENANT} and {@link AbuseDimension#GLOBAL}
- * track every attempt regardless of outcome (the volume axes).</p>
+ * tuple has its own sliding-window deque of event timestamps. What
+ * counts as an event depends on the pair
+ * {@code (AbuseAttemptType, AbuseDimension)}:</p>
+ * <ul>
+ *   <li><em>Volume counters</em> record every attempt regardless of
+ *       its outcome and are never reset by a success:
+ *       {@link AbuseDimension#CLIENT_ADDRESS},
+ *       {@link AbuseDimension#TENANT} and {@link AbuseDimension#GLOBAL}
+ *       for every attempt type, and — since 00.84.00 —
+ *       {@link AbuseDimension#USERNAME} for
+ *       {@link AbuseAttemptType#RESET_REQUEST} (JS-SEC-121, CWE-799: an
+ *       accepted reset request is a {@code SUCCESS}, so a failure
+ *       counter never saw it and a mailbox could be flooded
+ *       unthrottled).</li>
+ *   <li><em>Failure counters</em> record failures only and are cleared
+ *       by a success: {@link AbuseDimension#USERNAME} for every other
+ *       attempt type ({@code LOGIN}, {@code PASSWORD_CHANGE},
+ *       {@code RESET_CONSUME}).</li>
+ * </ul>
  *
  * <p>Auditing is best-effort: every block / step-up / delay decision
  * publishes a {@link RateLimitExceeded} event with the dimension
@@ -54,11 +68,29 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class InMemoryAbuseDetectionService implements AbuseDetectionService {
 
-  /** Dimensions that count every attempt, not just failures. */
+  /** Dimensions that count every attempt, not just failures, for every attempt type. */
   private static final Set<AbuseDimension> VOLUME_DIMENSIONS = EnumSet.of(
       AbuseDimension.CLIENT_ADDRESS,
       AbuseDimension.TENANT,
       AbuseDimension.GLOBAL);
+
+  /**
+   * Counting semantics of one {@code (attemptType, dimension)} pair.
+   *
+   * <p>JS-SEC-121 (CWE-799, CWE-307): the per-username counter of
+   * {@link AbuseAttemptType#RESET_REQUEST} is a volume counter. A reset request
+   * that was accepted for an existing user is reported as
+   * {@link AttemptOutcome#SUCCESS}; as a failure counter the dimension never
+   * counted it and every such request cleared the window, so the documented
+   * per-username limit only ever applied to unknown usernames.</p>
+   *
+   * @return {@code true} when every attempt is counted and a success does not
+   *     reset the window; {@code false} for a failure counter that a success clears
+   */
+  static boolean countsEveryAttempt(AbuseAttemptType attemptType, AbuseDimension dimension) {
+    return VOLUME_DIMENSIONS.contains(dimension)
+        || attemptType == AbuseAttemptType.RESET_REQUEST;
+  }
 
   /** JS-SEC-030 (CWE-770): default upper bound on tracked counter keys. */
   public static final int DEFAULT_MAX_ENTRIES = 100_000;
@@ -133,8 +165,8 @@ public final class InMemoryAbuseDetectionService implements AbuseDetectionServic
         continue;
       }
       String composite = composite(context.attemptType(), dimension, key.get());
-      if (VOLUME_DIMENSIONS.contains(dimension)) {
-        // Volume counters tick on every attempt.
+      if (countsEveryAttempt(context.attemptType(), dimension)) {
+        // Volume counters tick on every attempt and are not reset by a success.
         appendEvent(composite, context.at());
       } else {
         // Failure-only counters.

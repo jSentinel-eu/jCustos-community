@@ -25,7 +25,8 @@ import java.util.Objects;
  *
  * @param name  HTTP header name (e.g. {@code Authorization}); validated
  *              against the {@code tchar} grammar
- * @param value HTTP header value; CR / LF / control bytes rejected
+ * @param value HTTP header value; CR / LF / control bytes rejected.
+ *              Never part of {@link #toString()} (JS-SEC-088)
  *
  * @since 00.74.00
  */
@@ -55,6 +56,21 @@ public record HeaderValue(String name, String value) {
             "HeaderValue value must not contain control bytes at index " + i);
       }
     }
+  }
+
+  /**
+   * Masks the header value. The value is as a rule a credential —
+   * {@code Bearer <token>}, an API key — and the record travels through a
+   * {@code ThreadLocal} ({@link OutboundHeaderContext}); the
+   * compiler-generated {@code toString()} would put the complete token into
+   * any log line or exception message that stringifies the record
+   * (JS-SEC-088, CWE-532). The header name stays readable for diagnostics.
+   *
+   * @return {@code HeaderValue[name=<name>, value=***]}
+   */
+  @Override
+  public String toString() {
+    return "HeaderValue[name=" + name + ", value=***]";
   }
 
   /**

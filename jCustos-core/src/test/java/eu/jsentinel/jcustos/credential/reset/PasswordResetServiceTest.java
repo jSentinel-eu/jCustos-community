@@ -184,7 +184,7 @@ class PasswordResetServiceTest {
   }
 
   @Test
-  @DisplayName("issue mints a token, persists the digest, and transitions credential to RESET_PENDING")
+  @DisplayName("issue mints a token and persists the digest; the ACTIVE credential keeps its status (JS-SEC-121)")
   void issueHappyPath() {
     Fixture f = new Fixture();
     f.register("alice", "old-password", CredentialStatus.ACTIVE);
@@ -193,7 +193,9 @@ class PasswordResetServiceTest {
     ResetTokenCreationResult.Created created = assertInstanceOf(
         ResetTokenCreationResult.Created.class, result);
     assertEquals(1, f.tokens.size());
-    assertEquals(CredentialStatus.RESET_PENDING,
+    // JS-SEC-121 (CWE-645): before 00.84.00 the request moved the credential to
+    // RESET_PENDING and thereby closed the password login for its owner.
+    assertEquals(CredentialStatus.ACTIVE,
         f.credentials.findByUsername("alice").orElseThrow().status());
     assertTrue(created.token().encode().contains("."));
   }

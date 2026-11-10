@@ -705,6 +705,72 @@ lines, does not match. **Consumers:** code that used the two-argument constructo
 `CallbackStateBinding.hostCookieHeader(state)` when it starts the flow, or switch to the explicitly
 unbound factory; custom cookie names need the `__Host-` prefix.
 
+## A reset request no longer locks the account (SA21, JS-SEC-121, CWE-645, CWE-640, CWE-799)
+
+`credential.reset.PasswordResetService.issue` moved an `ACTIVE` credential to `RESET_PENDING`, and
+nothing ever moved it back: anyone who knew a username could close the password login of its owner,
+and every further request retired the link the owner had just received. A reset request is
+unauthenticated, so it now leaves the status of a usable credential alone; the reset runs alongside
+the password login until `consume` replaces the password. Only a `COMPROMISED` credential still
+enters `RESET_PENDING` (JS-SEC-076), and it returns to `COMPROMISED` when its last open link lapses
+— adapters trigger that check with `releaseLapsedReset(username)`.
+
+The service gained a throttle seam, `withAbuseDetection(...)`: a request the throttle refuses issues
+no token and retires no link, while an accepted request still makes the older links worthless. The
+per-username counter for `RESET_REQUEST` in `InMemoryAbuseDetectionService` now counts accepted
+requests instead of being cleared by them, so the documented limit (delay from the fourth, block
+from the seventh request per hour) applies to existing accounts for the first time. **Consumers:**
+integrations that read `RESET_PENDING` as "reset outstanding" for ordinary accounts no longer see
+it; accounts that an earlier version left in `RESET_PENDING` leave it through a completed reset.
+`ResetTokenStore` gained default methods a third-party store may override.
+
+## Token-bearing records no longer print their token (SA27, JS-SEC-127, and ER21, JS-SEC-088, CWE-532)
+
+Seven records relied on the compiler-generated `toString()` and with it printed a reusable secret
+into any log line or exception message that stringified them: `HeaderValue`,
+`TokenService.TokenPair`, the three `IssuedToken` records of the remember-me, password-reset and
+email-verification services, `JCustosNotification` with its `tokenPlain` attribute, and
+`CreateInitialAdminCommand`. All of them now mask the secret and keep the other components readable.
+Which notification attributes count as secret is decided in one place,
+`JCustosNotification.isSensitiveAttribute`, used by the record and by `LoggingNotificationSender`
+alike. A structural test walks every record of `jCustos-core` and fails when one with a
+secret-bearing component keeps the generated `toString()`, so the next record of this kind cannot
+slip through.
+
+## Password change and reset invalidate what the old password issued (SA28, JS-SEC-128, CWE-613, CWE-640, CWE-367)
+
+A reset link issued before a password change stayed valid after it, neither flow revoked sessions or
+tokens, and `consume` wrote the new hash before it claimed the token, so two requests with one link
+could both write a password. `PasswordChangeService.withResetTokenStore(...)` now retires the open
+links of the account after a change, and `consume` claims the token first and writes only when the
+claim succeeded; a token whose claim succeeded stays spent. Both services accept an optional
+`CredentialChangeListener`; the shipped `RevokingCredentialChangeListener` raises the subject's
+security version and revokes its remember-me and refresh tokens.
+
+`StoreBackedRememberMeService.rotate` exchanges a remember-me token on every use, and a token that
+was already exchanged revokes all remember-me tokens of the subject when it is presented again —
+with a store that records rotated tokens, which the in-memory store does; the Eclipse-Store
+remember-me store still inherits the defaults and rotates without replay detection. All of this is
+additive: an application that does not configure the new collaborators behaves as before, except
+that a reset token whose claim succeeded is spent even when the hash write then fails.
+
+## A revocation during refresh-token rotation is no longer lost (SA29, JS-SEC-129, CWE-367, CWE-613)
+
+`TokenService.rotate` checked a token, claimed it and stored its successor in three separate store
+calls; a logout between check and claim was ignored, and a `revokeAll` between claim and save left
+the successor alive. `RefreshTokenStore` gained an atomic `rotate(oldHash, successor, now)` that
+claims only a record which is neither replaced nor revoked nor expired and stores the successor in
+the same step, and `revokeAll` now leaves an "invalid before" mark that refuses tokens from
+operations that started earlier. The in-memory and the Eclipse-Store implementation provide both; a
+third-party store inherits default methods that keep the earlier behaviour and should override them
+— the testkit contract checks the new operations (`implementsAtomicRotation()` opts out).
+
+Revoking a token that was already rotated now also revokes its successors, and the family walk after
+a replay re-reads each record after revoking it. **Consumers:** `TokenService.issue` throws an
+`IllegalStateException` (`authentication/refresh-token-superseded`) in the rare case that a
+`revokeAll` for the same subject overtook it; `EclipseStoreJCustosRoot` gained the field
+`refreshTokenInvalidBefore`, which roots stored before 00.84.00 receive on first use.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

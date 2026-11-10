@@ -92,6 +92,18 @@ final class EclipseStoreJCustosRoot {
   /** token hash → refresh-token record. */
   final Map<String, RefreshTokenRecord> refreshTokens = new LinkedHashMap<>();
 
+  /**
+   * (tenant, subject) → instant before which the subject's refresh tokens are
+   * invalid (JS-SEC-129, CWE-613), written by a subject-wide revocation.
+   *
+   * <p>Not {@code final} and possibly {@code null}: the field was added in
+   * 00.84.00, and a root that was stored by an earlier version is loaded
+   * without it — field initialisers do not run for instances the storage
+   * reconstructs. {@link EclipseStoreRefreshTokenStore} creates the map on
+   * first use under the write lock; nothing else may touch this field.</p>
+   */
+  Map<RefreshTokenScope, Instant> refreshTokenInvalidBefore = new LinkedHashMap<>();
+
   /** rate-limit key → ordered list of event instants. */
   final Map<RateLimitKey, LinkedHashSet<Instant>> rateLimitEvents = new LinkedHashMap<>();
 
@@ -113,5 +125,16 @@ final class EclipseStoreJCustosRoot {
    * @param lastFailureAt  most recent failure instant
    */
   record LoginAttemptLedger(int count, Instant lastFailureAt) {
+  }
+
+  /**
+   * Key of {@link #refreshTokenInvalidBefore}: the subject within a tenant
+   * whose refresh tokens were revoked wholesale. Kept here because it is an
+   * implementation detail of how this module stores the mark.
+   *
+   * @param tenant    tenant scope
+   * @param subjectId subject identifier value
+   */
+  record RefreshTokenScope(String tenant, String subjectId) {
   }
 }

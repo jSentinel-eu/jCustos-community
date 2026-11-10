@@ -55,8 +55,18 @@ public sealed interface CredentialLifecycleDecision
   }
 
   /**
-   * A reset token is outstanding for this credential. Logins must use
-   * the reset flow instead of the password flow until consumed.
+   * The credential is {@code RESET_PENDING}: its secret may only be
+   * replaced through the reset flow, and the password login stays closed
+   * until a reset link is consumed.
+   *
+   * <p>Since 00.84.00 a reset <em>request</em> no longer puts a usable
+   * credential into this state (JS-SEC-121, CWE-645): the request is
+   * unauthenticated, and a decision that closes the password login must
+   * not be obtainable by anyone who knows a username. The state is
+   * reached from {@code COMPROMISED} when a reset is requested
+   * (JS-SEC-076) and by an explicit administrative transition. A
+   * credential that entered it from {@code COMPROMISED} returns there
+   * when its last open link lapses unused.</p>
    */
   record ResetInProgress() implements CredentialLifecycleDecision {
     public static final ResetInProgress INSTANCE = new ResetInProgress();

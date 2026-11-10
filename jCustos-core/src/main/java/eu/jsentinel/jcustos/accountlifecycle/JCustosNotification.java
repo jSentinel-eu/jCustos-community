@@ -21,7 +21,9 @@ import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
 
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 
 import static java.util.Objects.requireNonNull;
 
@@ -85,5 +87,48 @@ public record JCustosNotification(
     tenant = tenant == null ? TenantId.DEFAULT : tenant;
     requireNonNull(timestamp, "timestamp must not be null");
     attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
+  }
+
+  /**
+   * The single rule for which attribute values are secrets: the key contains
+   * {@code token}, {@code secret} or {@code password}, compared without regard
+   * to case. {@link #toString()} and {@link LoggingNotificationSender} both
+   * use it, so that a new attribute key is masked in every place at once
+   * (JS-SEC-127, CWE-532).
+   *
+   * @param key an attribute key; {@code null} is not sensitive
+   * @return {@code true} when the value under {@code key} must not be written
+   *     to a log or a diagnostic string
+   * @since 00.84.00
+   */
+  public static boolean isSensitiveAttribute(String key) {
+    if (key == null) {
+      return false;
+    }
+    String k = key.toLowerCase(Locale.ROOT);
+    return k.contains("token") || k.contains("secret") || k.contains("password");
+  }
+
+  /**
+   * Masks the values of sensitive attributes
+   * ({@link #isSensitiveAttribute(String)}), above all the plain reset or
+   * verification token under {@code tokenPlain}. The compiler-generated
+   * {@code toString()} would print the attribute map verbatim, so that any
+   * {@link JCustosNotificationSender} which logs the notification it was
+   * handed would write a usable reset link into the log (JS-SEC-127,
+   * CWE-532). Keys are listed in sorted order.
+   *
+   * @return a description without secret attribute values
+   */
+  @Override
+  public String toString() {
+    Map<String, String> shown = new TreeMap<>();
+    attributes.forEach((key, value) ->
+        shown.put(key, isSensitiveAttribute(key) ? "***" : value));
+    return "JCustosNotification[kind=" + kind
+        + ", subjectId=" + subjectId
+        + ", tenant=" + tenant
+        + ", timestamp=" + timestamp
+        + ", attributes=" + shown + "]";
   }
 }

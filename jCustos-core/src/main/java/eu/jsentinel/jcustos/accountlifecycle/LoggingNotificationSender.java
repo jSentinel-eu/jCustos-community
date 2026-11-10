@@ -89,18 +89,11 @@ public final class LoggingNotificationSender implements JCustosNotificationSende
       String value = entry.getValue();
       if (value == null) continue;
       sb.append(' ').append(LogFieldScrubber.scrub(key)).append('=')
-          .append(isSensitive(key) ? "***" : LogFieldScrubber.scrub(value));
+          // JS-SEC-127 (CWE-532): one rule for what counts as a secret attribute,
+          // shared with JCustosNotification.toString().
+          .append(JCustosNotification.isSensitiveAttribute(key)
+              ? "***" : LogFieldScrubber.scrub(value));
     }
     return sb.toString();
-  }
-
-  /**
-   * @param key an attribute key
-   * @return {@code true} if its value carries a secret (e.g. the plaintext
-   *     {@code tokenPlain}) and must be redacted (CWE-532)
-   */
-  private static boolean isSensitive(String key) {
-    String k = key.toLowerCase(java.util.Locale.ROOT);
-    return k.contains("token") || k.contains("secret") || k.contains("password");
   }
 }

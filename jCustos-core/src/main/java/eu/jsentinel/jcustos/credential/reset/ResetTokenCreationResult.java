@@ -53,6 +53,13 @@ public sealed interface ResetTokenCreationResult
     public static final UnknownUser INSTANCE = new UnknownUser();
   }
 
+  /**
+   * No token was issued although the request was well-formed: the
+   * credential is {@code DISABLED}, or — when the service has a throttle
+   * ({@link PasswordResetService#withAbuseDetection}) — the request was
+   * refused by it (JS-SEC-121, CWE-799). A throttled request yields this
+   * variant for unknown usernames as well, and it retires no open link.
+   */
   record Blocked() implements ResetTokenCreationResult {
     public static final Blocked INSTANCE = new Blocked();
   }

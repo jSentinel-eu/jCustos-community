@@ -22,6 +22,7 @@
  */
 package eu.jsentinel.jcustos.credential.reset;
 
+import eu.jsentinel.jcustos.credential.store.CredentialStatus;
 import eu.jsentinel.jcustos.util.CapacityBound;
 
 import java.time.Clock;
@@ -44,6 +45,13 @@ public final class InMemoryResetTokenStore implements ResetTokenStore {
       new ConcurrentHashMap<>();
   /** username → selectors, so retiring siblings on every issue stays proportional to the user's tokens. */
   private final ConcurrentHashMap<String, Set<String>> byUsername = new ConcurrentHashMap<>();
+  /**
+   * username → status before the reset (JS-SEC-121). Only written for existing
+   * credentials on the path out of COMPROMISED, so its size is bounded by the
+   * number of credentials, not by the unauthenticated request volume.
+   */
+  private final ConcurrentHashMap<String, CredentialStatus> statusBeforeReset =
+      new ConcurrentHashMap<>();
   private final int maxEntries;
   private final Clock clock;
   /** Earliest expiry among stored records; lets a full store refuse in O(1) when nothing can be purged. */
@@ -170,6 +178,25 @@ public final class InMemoryResetTokenStore implements ResetTokenStore {
       deadByStatus.incrementAndGet();
     }
     return new ResetTokenUpdateResult.Updated(next);
+  }
+
+  @Override
+  public void rememberStatusBeforeReset(String username, CredentialStatus status) {
+    Objects.requireNonNull(username, "username");
+    Objects.requireNonNull(status, "status");
+    statusBeforeReset.put(username, status);
+  }
+
+  @Override
+  public Optional<CredentialStatus> statusBeforeReset(String username) {
+    Objects.requireNonNull(username, "username");
+    return Optional.ofNullable(statusBeforeReset.get(username));
+  }
+
+  @Override
+  public void forgetStatusBeforeReset(String username) {
+    Objects.requireNonNull(username, "username");
+    statusBeforeReset.remove(username);
   }
 
   /** Test helper: number of stored tokens. */

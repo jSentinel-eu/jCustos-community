@@ -22,6 +22,8 @@
  */
 package eu.jsentinel.jcustos.credential.reset;
 
+import eu.jsentinel.jcustos.credential.store.CredentialStatus;
+
 import java.util.List;
 import java.util.Optional;
 
@@ -74,4 +76,77 @@ public interface ResetTokenStore {
    */
   ResetTokenUpdateResult markExpiredIfCurrent(
       String selector, ResetTokenStatus expectedStatus);
+
+  /**
+   * Marks every still-{@link ResetTokenStatus#ISSUED} token of
+   * {@code username} {@link ResetTokenStatus#EXPIRED}. Used when the
+   * credential changed by another route — a password change with the
+   * current password — so that a link issued earlier cannot replace the
+   * new password afterwards (JS-SEC-128, CWE-613, CWE-640).
+   *
+   * <p>The default walks {@link #findByUsername(String)} and retires each
+   * record through {@link #markExpiredIfCurrent}; a token that a
+   * concurrent consume claims first is left alone. Stores may override it
+   * with a single bulk statement.</p>
+   *
+   * @param username the credential's username; non-blank
+   * @return number of tokens retired
+   * @since 00.84.00
+   */
+  default int retireOpenTokens(String username) {
+    int retired = 0;
+    for (ResetTokenRecord record : findByUsername(username)) {
+      if (record.status() != ResetTokenStatus.ISSUED) {
+        continue;
+      }
+      if (markExpiredIfCurrent(record.selector(), ResetTokenStatus.ISSUED)
+          instanceof ResetTokenUpdateResult.Updated) {
+        retired++;
+      }
+    }
+    return retired;
+  }
+
+  /**
+   * Remembers the status a credential had before a reset moved it to
+   * {@link CredentialStatus#RESET_PENDING}, so that the reset service can
+   * return it to that status when the last open token lapses unused
+   * (JS-SEC-121, CWE-645). The reset service only records this for the
+   * path out of {@link CredentialStatus#COMPROMISED}; a usable credential
+   * keeps its status while a reset is open.
+   *
+   * <p>The default does nothing. A store that keeps the default never
+   * reports an origin, and the reset service then leaves such a credential
+   * in {@code RESET_PENDING} until a new link is consumed — the behaviour
+   * before 00.84.00. Persistent stores should keep the value next to the
+   * tokens so that it survives a restart.</p>
+   *
+   * @param username the credential's username; non-blank
+   * @param status   the status to return to; non-null
+   * @since 00.84.00
+   */
+  default void rememberStatusBeforeReset(String username, CredentialStatus status) {
+    // optional capability — see the method comment
+  }
+
+  /**
+   * @param username the credential's username; non-blank
+   * @return the status recorded by {@link #rememberStatusBeforeReset}, or
+   *     empty when none is recorded or the store does not keep it
+   * @since 00.84.00
+   */
+  default Optional<CredentialStatus> statusBeforeReset(String username) {
+    return Optional.empty();
+  }
+
+  /**
+   * Drops the status recorded by {@link #rememberStatusBeforeReset} — the
+   * reset was consumed, or the credential was returned to that status.
+   *
+   * @param username the credential's username; non-blank
+   * @since 00.84.00
+   */
+  default void forgetStatusBeforeReset(String username) {
+    // optional capability — see rememberStatusBeforeReset
+  }
 }

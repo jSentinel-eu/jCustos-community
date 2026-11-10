@@ -22,11 +22,20 @@
  */
 package eu.jsentinel.jcustos.credential.reset;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.PasswordResetCompleted;
 import eu.jsentinel.jcustos.audit.PasswordResetRequested;
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.credential.abuse.AbuseAttemptContext;
+import eu.jsentinel.jcustos.credential.abuse.AbuseAttemptType;
+import eu.jsentinel.jcustos.credential.abuse.AbuseDecision;
+import eu.jsentinel.jcustos.credential.abuse.AbuseDetectionService;
+import eu.jsentinel.jcustos.credential.abuse.AttemptOutcome;
+import eu.jsentinel.jcustos.credential.change.CredentialChangeListener;
 import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidationResult;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidator;
@@ -56,21 +65,44 @@ import java.util.Optional;
  * <p>{@link #issue(String, Duration)} mints a {@link SelectorVerifierToken}
  * through {@link TokenDigestService}, retires every still-open token of
  * the same credential (JS-SEC-074, CWE-640: only the newest link works),
- * persists the digest with the supplied TTL, emits
- * {@link PasswordResetRequested} and — for credentials in a state that
- * allows it — transitions the credential to
- * {@link CredentialStatus#RESET_PENDING}. The verifier is returned to
+ * persists the digest with the supplied TTL and emits
+ * {@link PasswordResetRequested}. The verifier is returned to
  * the caller exactly once; the store retains only the digest
  * (CWE-522 / CWE-209 / CWE-640).</p>
+ *
+ * <p>A reset request is unauthenticated, so it must not take anything away
+ * from the account's owner (JS-SEC-121, CWE-645, CWE-640). Since 00.84.00 the
+ * request therefore leaves the status of a usable credential untouched: the
+ * reset runs <em>alongside</em> the password login until {@link #consume}
+ * replaces the password. Before, the request moved an {@code ACTIVE}
+ * credential to {@link CredentialStatus#RESET_PENDING}, which locked the
+ * owner out of the password login for as long as anyone kept asking.</p>
+ *
+ * <p>The one path that still enters {@code RESET_PENDING} is the way out of
+ * {@link CredentialStatus#COMPROMISED} (JS-SEC-076): that credential is
+ * blocked anyway and stays blocked until the link is consumed. When the last
+ * open link of such a credential lapses unused, the credential returns to
+ * {@code COMPROMISED} — see {@link #releaseLapsedReset(String)}.</p>
+ *
+ * <h2>Throttle</h2>
+ * <p>{@link #withAbuseDetection(AbuseDetectionService)} gives the service a
+ * throttle seam. With it, every request is evaluated as
+ * {@link AbuseAttemptType#RESET_REQUEST} <em>before</em> anything is
+ * touched; a request the throttle refuses issues no token and — the point
+ * of JS-SEC-121 — retires no sibling, so a flood of requests cannot keep
+ * invalidating the link the owner just received. Without the seam every
+ * request is accepted and the adapter is expected to throttle before it
+ * calls the service.</p>
  *
  * <h2>Consume</h2>
  * <p>{@link #consume(String, SecretValue)} parses the wire token,
  * looks up the digest record by selector, checks expiry and status,
  * verifies the verifier digest in constant time
  * ({@link TokenDigestService#verifyVerifier}), validates the new
- * password against the input policy, hashes it, performs a
- * compare-and-swap on the credential's encoded hash and finally CAS-marks
- * the reset token CONSUMED — all single-use (CWE-362 / CWE-640). Open
+ * password against the input policy, then <em>claims</em> the token by
+ * CAS-marking it CONSUMED and only after a successful claim hashes the
+ * password and performs a compare-and-swap on the credential's encoded
+ * hash (JS-SEC-128, CWE-367: one token writes at most one password). Open
  * siblings are retired and {@link PasswordResetCompleted} is emitted
  * (JS-SEC-074).</p>
  *
@@ -78,7 +110,10 @@ import java.util.Optional;
  * response at the adapter boundary; the differentiated reason stays
  * inside the audit trail (CWE-209).</p>
  */
-public final class PasswordResetService {
+public final class PasswordResetService implements HasLogger {
+
+  /** Lifecycle reason key of the transition back out of {@code RESET_PENDING} (JS-SEC-121). */
+  static final String REASON_RESET_LAPSED = "reset-lapsed";
 
   private final CredentialStore credentialStore;
   private final ResetTokenStore resetStore;
@@ -89,6 +124,10 @@ public final class PasswordResetService {
   private final CredentialLifecycleService lifecycleService;
   private final Clock clock;
   private final JCustosAuditService auditService;
+  /** Optional throttle seam (JS-SEC-121); {@code null} when the adapter throttles itself. */
+  private final AbuseDetectionService abuseDetection;
+  /** Optional hook after a consumed reset (JS-SEC-128); never {@code null}. */
+  private final CredentialChangeListener changeListener;
 
   public PasswordResetService(
       CredentialStore credentialStore,
@@ -121,6 +160,23 @@ public final class PasswordResetService {
       CredentialLifecycleService lifecycleService,
       Clock clock,
       JCustosAuditService auditService) {
+    this(credentialStore, resetStore, tokens, hashingService, inputValidator,
+        inputPolicy, lifecycleService, clock, auditService,
+        null, CredentialChangeListener.noop());
+  }
+
+  private PasswordResetService(
+      CredentialStore credentialStore,
+      ResetTokenStore resetStore,
+      TokenDigestService tokens,
+      PasswordHashingService hashingService,
+      PasswordInputValidator inputValidator,
+      PasswordInputPolicy inputPolicy,
+      CredentialLifecycleService lifecycleService,
+      Clock clock,
+      JCustosAuditService auditService,
+      AbuseDetectionService abuseDetection,
+      CredentialChangeListener changeListener) {
     this.auditService = auditService;
     this.credentialStore = Objects.requireNonNull(credentialStore, "credentialStore");
     this.resetStore = Objects.requireNonNull(resetStore, "resetStore");
@@ -130,22 +186,119 @@ public final class PasswordResetService {
     this.inputPolicy = Objects.requireNonNull(inputPolicy, "inputPolicy");
     this.lifecycleService = Objects.requireNonNull(lifecycleService, "lifecycleService");
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.abuseDetection = abuseDetection;
+    this.changeListener = Objects.requireNonNull(changeListener, "changeListener");
+  }
+
+  /**
+   * Returns a copy of this service that asks {@code abuseDetection} before it
+   * accepts a reset request (JS-SEC-121, CWE-799).
+   *
+   * <p>The request is evaluated as {@link AbuseAttemptType#RESET_REQUEST}
+   * with the username, the client address handed to
+   * {@link #issue(String, Duration, String)} and {@link TenantId#DEFAULT}.
+   * {@link AbuseDecision.Block} and
+   * {@link AbuseDecision.RequireAdditionalCheck} refuse the request with
+   * {@link ResetTokenCreationResult.Blocked} — the service cannot perform an
+   * additional check itself, so it fails closed; an adapter that offers a
+   * step-up evaluates the throttle itself and uses a service without this
+   * seam. {@link AbuseDecision.Delay} lets the request pass; the pause is the
+   * adapter's to apply. The service records the outcome of every request it
+   * let pass, so the adapter must not record {@code RESET_REQUEST} a second
+   * time.</p>
+   *
+   * @param abuseDetection the throttle; non-null
+   * @return a new service; this instance is unchanged
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public PasswordResetService withAbuseDetection(AbuseDetectionService abuseDetection) {
+    return new PasswordResetService(credentialStore, resetStore, tokens, hashingService,
+        inputValidator, inputPolicy, lifecycleService, clock, auditService,
+        Objects.requireNonNull(abuseDetection, "abuseDetection"), changeListener);
+  }
+
+  /**
+   * Returns a copy of this service that notifies {@code listener} after every
+   * consumed reset (JS-SEC-128, CWE-613).
+   * {@link eu.jsentinel.jcustos.credential.change.RevokingCredentialChangeListener}
+   * raises the subject's security version and revokes remember-me and
+   * refresh tokens.
+   *
+   * @param listener the hook; non-null
+   * @return a new service; this instance is unchanged
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public PasswordResetService withCredentialChangeListener(CredentialChangeListener listener) {
+    return new PasswordResetService(credentialStore, resetStore, tokens, hashingService,
+        inputValidator, inputPolicy, lifecycleService, clock, auditService,
+        abuseDetection, Objects.requireNonNull(listener, "listener"));
   }
 
   /**
    * Issues a fresh reset token. Returns either a {@code Created} with
    * the wire token, or an opaque failure — callers must surface the
    * same generic message in both cases (CWE-203).
+   *
+   * <p>Equivalent to {@link #issue(String, Duration, String)} without a
+   * client address.</p>
    */
   public ResetTokenCreationResult issue(String username, Duration ttl) {
+    return issue(username, ttl, null);
+  }
+
+  /**
+   * Issues a fresh reset token for a request that came from
+   * {@code clientAddress}.
+   *
+   * <p>The status of a usable credential is not changed (JS-SEC-121): the
+   * owner can keep signing in with the current password while the link is
+   * open. Only a {@link CredentialStatus#COMPROMISED} credential moves to
+   * {@link CredentialStatus#RESET_PENDING}.</p>
+   *
+   * <p>When a throttle is configured
+   * ({@link #withAbuseDetection(AbuseDetectionService)}) and refuses the
+   * request, the result is {@link ResetTokenCreationResult.Blocked} for known
+   * and unknown usernames alike; no token is issued and no open link is
+   * retired.</p>
+   *
+   * @param username      the credential's username; non-null
+   * @param ttl           lifetime of the link; positive
+   * @param clientAddress resolved client address for the per-address
+   *                      throttle, or {@code null} when unknown
+   * @return the outcome; adapters surface the same public response for all
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public ResetTokenCreationResult issue(String username, Duration ttl, String clientAddress) {
     Objects.requireNonNull(username, "username");
     Objects.requireNonNull(ttl, "ttl");
     if (ttl.isZero() || ttl.isNegative()) {
       throw new IllegalArgumentException("ttl must be positive");
     }
+    Instant now = Instant.now(clock);
+
+    // JS-SEC-121 (CWE-799, CWE-645): ask the throttle before anything is
+    // touched. A refused request must neither mint a token nor retire the link
+    // the owner already holds — otherwise repeating the request is all it takes
+    // to keep every delivered link dead. The answer is the same for known and
+    // unknown usernames (CWE-203).
+    AbuseAttemptContext attempt = abuseDetection == null ? null
+        : new AbuseAttemptContext(AbuseAttemptType.RESET_REQUEST,
+            Optional.of(username), Optional.ofNullable(clientAddress),
+            TenantId.DEFAULT, now);
+    if (attempt != null) {
+      AbuseDecision decision = abuseDetection.evaluate(attempt);
+      if (decision instanceof AbuseDecision.Block
+          || decision instanceof AbuseDecision.RequireAdditionalCheck) {
+        return ResetTokenCreationResult.Blocked.INSTANCE;
+      }
+    }
 
     Optional<CredentialRecord> credential = credentialStore.findByUsername(username);
     if (credential.isEmpty()) {
+      recordOutcome(attempt, AttemptOutcome.FAILURE);
       return ResetTokenCreationResult.UnknownUser.INSTANCE;
     }
     CredentialStatus status = credential.get().status();
@@ -153,10 +306,10 @@ public final class PasswordResetService {
     // the secret. Only DISABLED stays blocked; re-enabling is an administrative
     // decision, not something a password-reset link may perform.
     if (status == CredentialStatus.DISABLED) {
+      recordOutcome(attempt, AttemptOutcome.FAILURE);
       return ResetTokenCreationResult.Blocked.INSTANCE;
     }
 
-    Instant now = Instant.now(clock);
     Instant expiresAt = now.plus(ttl);
 
     SelectorVerifierToken token = tokens.generate();
@@ -166,28 +319,58 @@ public final class PasswordResetService {
         ResetTokenStatus.ISSUED, 1L);
     // JS-SEC-074 (CWE-640): only the newest link may work. Retire every open
     // sibling before the new token exists, so an older intercepted link dies
-    // the moment the user asks again.
+    // the moment the user asks again. JS-SEC-121: this point is only reached
+    // by a request that passed the throttle above.
     retireOpenSiblings(username, null);
     resetStore.save(record);
     publish(new PasswordResetRequested(now, username, token.selector()));
 
-    // Mark the credential RESET_PENDING so concurrent password logins
-    // surface ResetInProgress in the lifecycle layer. Failure to
-    // transition is non-fatal — the consume step will still verify
-    // and apply the reset.
-    if (status == CredentialStatus.ACTIVE
-        || status == CredentialStatus.MUST_CHANGE
-        || status == CredentialStatus.REHASH_REQUIRED
-        || status == CredentialStatus.DEPRECATED_ALGORITHM
-        || status == CredentialStatus.LOCKED
-        || status == CredentialStatus.COMPROMISED) {
-      if (lifecycleService.isAllowed(status, CredentialStatus.RESET_PENDING)) {
-        lifecycleService.transition(
-            username, status, CredentialStatus.RESET_PENDING,
-            "reset-issued");
-      }
+    // JS-SEC-121 (CWE-645, CWE-640): an unauthenticated request does not change
+    // the status of a usable credential — ACTIVE, MUST_CHANGE, REHASH_REQUIRED,
+    // DEPRECATED_ALGORITHM and LOCKED stay what they are, and the password
+    // login keeps working until consume replaces the password. The only
+    // transition left is COMPROMISED -> RESET_PENDING (JS-SEC-076): that
+    // credential is blocked either way, and RESET_PENDING tells consume that
+    // the reset was requested after the compromise was recorded. The status is
+    // read again after the token is stored, so that a concurrent
+    // releaseLapsedReset which just returned the credential to COMPROMISED
+    // cannot strand the new link.
+    CredentialStatus current = credentialStore.findByUsername(username)
+        .map(CredentialRecord::status).orElse(status);
+    if (current == CredentialStatus.COMPROMISED) {
+      enterResetPending(username);
     }
+    recordOutcome(attempt, AttemptOutcome.SUCCESS);
     return new ResetTokenCreationResult.Created(token);
+  }
+
+  /**
+   * Returns a credential to the status it had before a reset moved it to
+   * {@link CredentialStatus#RESET_PENDING}, once no open reset link is left
+   * for it (JS-SEC-121, CWE-645).
+   *
+   * <p>There is no timer in the core. The check runs when an expired link is
+   * presented to {@link #consume}, and adapters call this method where a
+   * {@code RESET_PENDING} credential shows up — typically in the login path
+   * before the lifecycle decision is evaluated — or from a housekeeping job.
+   * It is cheap and idempotent.</p>
+   *
+   * <p>Only a credential whose earlier status the {@link ResetTokenStore}
+   * recorded is touched ({@link ResetTokenStore#statusBeforeReset}); the
+   * reset service records it for the path out of {@code COMPROMISED}. A
+   * credential that is {@code RESET_PENDING} for another reason — set by an
+   * administrator, or by a version before 00.84.00 — is left alone and
+   * leaves that status through a consumed reset.</p>
+   *
+   * @param username the credential's username; non-null
+   * @return the credential's status after the check, empty for an unknown username
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public Optional<CredentialStatus> releaseLapsedReset(String username) {
+    Objects.requireNonNull(username, "username");
+    releaseIfLapsed(username, Instant.now(clock));
+    return credentialStore.findByUsername(username).map(CredentialRecord::status);
   }
 
   /**
@@ -198,6 +381,10 @@ public final class PasswordResetService {
    * <p>Returns {@code Succeeded} only when every step succeeded; any
    * failure path returns {@code Failed} so the public response stays
    * generic (CWE-203 / CWE-209).</p>
+   *
+   * <p>The token is claimed before the password is hashed and written
+   * (JS-SEC-128, CWE-367). A token whose claim succeeded stays consumed even
+   * when the write that follows fails; the user then asks for a new link.</p>
    */
   public PasswordResetConsumeResult consume(
       String wireToken, SecretValue newPassword) {
@@ -220,6 +407,9 @@ public final class PasswordResetService {
       // Lazy expiry CAS so audit timelines stay accurate; do not
       // surface anything beyond Failed to the caller.
       resetStore.markExpiredIfCurrent(token.selector(), record.status());
+      // JS-SEC-121: the link lapsed unused. If it was the last open one of a
+      // credential on the path out of COMPROMISED, the credential goes back.
+      releaseIfLapsed(record.username(), now);
       return PasswordResetConsumeResult.Failed.INSTANCE;
     }
     if (record.status() != ResetTokenStatus.ISSUED) {
@@ -249,6 +439,22 @@ public final class PasswordResetService {
       return PasswordResetConsumeResult.Failed.INSTANCE;
     }
 
+    // JS-SEC-128 (CWE-367, CWE-640): claim the token FIRST. The CAS on the
+    // token status is the single-use guarantee; hashing and writing the
+    // password happen only for the caller whose claim succeeded. In the order
+    // used before 00.84.00 — hash write first, claim second — a second consume
+    // that ran in between read the already replaced hash as its witness, wrote
+    // its own password and took the claim, so one token wrote two passwords
+    // and the later caller's password stayed.
+    ResetTokenUpdateResult tokenUpdate = resetStore.markConsumedIfCurrent(
+        token.selector(), ResetTokenStatus.ISSUED);
+    if (!(tokenUpdate instanceof ResetTokenUpdateResult.Updated)) {
+      return PasswordResetConsumeResult.Failed.INSTANCE;
+    }
+
+    // From here on the token is spent. If hashing throws or the compare-and-swap
+    // loses against a concurrent credential change, the reset fails and the
+    // token stays consumed — a link must never become usable again.
     PasswordHashResult newHash = hashingService.hash(newPassword);
     CredentialUpdateResult credUpdate = credentialStore.updateHashIfCurrent(
         record.username(),
@@ -259,13 +465,6 @@ public final class PasswordResetService {
       return PasswordResetConsumeResult.Failed.INSTANCE;
     }
 
-    // Atomic single-use marker — once Updated, no second consume can
-    // win (CWE-362).
-    ResetTokenUpdateResult tokenUpdate = resetStore.markConsumedIfCurrent(
-        token.selector(), ResetTokenStatus.ISSUED);
-    if (!(tokenUpdate instanceof ResetTokenUpdateResult.Updated)) {
-      return PasswordResetConsumeResult.Failed.INSTANCE;
-    }
     // JS-SEC-074 (CWE-640): the reset is done; no other link issued for this
     // credential may reset the password a second time.
     retireOpenSiblings(record.username(), token.selector());
@@ -279,7 +478,105 @@ public final class PasswordResetService {
           CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE,
           "reset-consumed");
     }
+    // JS-SEC-121: the reset completed; there is no earlier status to return to.
+    resetStore.forgetStatusBeforeReset(record.username());
+
+    // JS-SEC-128 (CWE-613): whatever was obtained with the old password is
+    // handed to the listener for revocation. The password is already replaced,
+    // so a failing listener is logged and does not turn the reset into a failure.
+    try {
+      changeListener.credentialChanged(record.username(),
+          CredentialChangeListener.Cause.PASSWORD_RESET, now);
+    } catch (RuntimeException failure) {
+      logger().warn("credential/reset-listener-failed: listener failed after the "
+          + "password reset of user '{}': {}", record.username(), failure.toString());
+    }
     return PasswordResetConsumeResult.Succeeded.INSTANCE;
+  }
+
+  /**
+   * COMPROMISED -> RESET_PENDING, remembering where the credential came from
+   * (JS-SEC-076, JS-SEC-121).
+   */
+  private void enterResetPending(String username) {
+    if (!lifecycleService.isAllowed(
+        CredentialStatus.COMPROMISED, CredentialStatus.RESET_PENDING)) {
+      return;
+    }
+    // Record the origin before the transition: a crash in between leaves a
+    // record for a credential that is not RESET_PENDING, which releaseIfLapsed
+    // ignores; the other order could leave RESET_PENDING without a way back.
+    resetStore.rememberStatusBeforeReset(username, CredentialStatus.COMPROMISED);
+    lifecycleService.transition(
+        username, CredentialStatus.COMPROMISED, CredentialStatus.RESET_PENDING,
+        "reset-issued");
+  }
+
+  /**
+   * JS-SEC-121 (CWE-645): returns a RESET_PENDING credential to its recorded
+   * earlier status when it has no open, unexpired link left.
+   */
+  private void releaseIfLapsed(String username, Instant now) {
+    Optional<CredentialStatus> origin = resetStore.statusBeforeReset(username);
+    if (origin.isEmpty() || hasOpenToken(username, now)) {
+      return;
+    }
+    Optional<CredentialRecord> credential = credentialStore.findByUsername(username);
+    if (credential.isEmpty()
+        || credential.get().status() != CredentialStatus.RESET_PENDING) {
+      return;
+    }
+    CredentialStatus target = origin.get();
+    if (!lifecycleService.isAllowed(CredentialStatus.RESET_PENDING, target)) {
+      return;
+    }
+    CredentialUpdateResult released = lifecycleService.transition(
+        username, CredentialStatus.RESET_PENDING, target, REASON_RESET_LAPSED);
+    if (!(released instanceof CredentialUpdateResult.Updated)) {
+      return;
+    }
+    // A request that stored a new link while the credential was still
+    // RESET_PENDING saw nothing to do. Look again now that the status is
+    // written: issue reads the status after it stored its token, this method
+    // reads the tokens after it wrote the status — one of the two sees the other.
+    if (target == CredentialStatus.COMPROMISED && hasOpenToken(username, now)) {
+      enterResetPending(username);
+      return;
+    }
+    resetStore.forgetStatusBeforeReset(username);
+  }
+
+  /**
+   * @return whether {@code username} has a link that is still ISSUED and not
+   *     past its expiry at {@code now}; links past their expiry are marked
+   *     EXPIRED on the way
+   */
+  private boolean hasOpenToken(String username, Instant now) {
+    boolean open = false;
+    for (ResetTokenRecord candidate : resetStore.findByUsername(username)) {
+      if (candidate.status() != ResetTokenStatus.ISSUED) {
+        continue;
+      }
+      if (candidate.isExpired(now)) {
+        resetStore.markExpiredIfCurrent(candidate.selector(), ResetTokenStatus.ISSUED);
+      } else {
+        open = true;
+      }
+    }
+    return open;
+  }
+
+  private void recordOutcome(AbuseAttemptContext attempt, AttemptOutcome outcome) {
+    if (attempt == null) {
+      return;
+    }
+    try {
+      abuseDetection.recordOutcome(attempt, outcome);
+    } catch (RuntimeException failure) {
+      // The request itself is decided; a counter that could not be updated
+      // must not turn an issued link into an error.
+      logger().warn("credential/reset-throttle-record-failed: {}", failure.toString());
+    }
   }
 
   /**

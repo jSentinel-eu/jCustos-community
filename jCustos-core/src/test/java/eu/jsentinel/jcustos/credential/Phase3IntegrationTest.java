@@ -193,7 +193,9 @@ class Phase3IntegrationTest {
 
     ResetTokenCreationResult.Created created = (ResetTokenCreationResult.Created)
         d.resetService.issue("alice", TTL);
-    assertEquals(CredentialStatus.RESET_PENDING,
+    // JS-SEC-121 (CWE-645): an unauthenticated reset request no longer moves a
+    // usable credential to RESET_PENDING; the reset runs alongside the login.
+    assertEquals(CredentialStatus.ACTIVE,
         d.credentials.findByUsername("alice").orElseThrow().status());
 
     PasswordResetConsumeResult consume = d.resetService.consume(

@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authentication;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.credential.token.TokenHasher;
@@ -44,6 +45,23 @@ import static java.util.Objects.requireNonNull;
  * an attacker who exfiltrates the store cannot impersonate the
  * subject without the cookie value.
  *
+ * <h2>Rotation and theft detection (JS-SEC-128, CWE-613)</h2>
+ * <p>{@link #rotate(String)} is the way to redeem a token: it validates the
+ * token, retires it and returns a successor, so that a cookie value works
+ * exactly once. A token that was already exchanged and is presented again
+ * has been copied — by whoever holds the other copy. The service answers
+ * with the pattern of JS-SEC-071: it refuses the token and revokes every
+ * remember-me token of the subject, which signs out the thief and the owner
+ * alike and makes the incident visible. A second presentation within
+ * {@link #ROTATION_RACE_TOLERANCE} of the rotation is refused without that
+ * consequence, because a browser sends parallel requests with the same
+ * cookie. Replay detection needs a store that keeps the trail of rotated
+ * tokens ({@link RememberMeTokenStore#findRotated}); with a store that does
+ * not, rotation still works and a replayed token is simply unknown.</p>
+ *
+ * <p>{@link #validate(String)} stays for callers that only need to look at a
+ * token; it does not rotate.</p>
+ *
  * <p>Bound to one {@link TenantId} at construction. Multi-tenant
  * deployments instantiate one service per tenant.
  *
@@ -53,10 +71,20 @@ import static java.util.Objects.requireNonNull;
  * is required by the carrier (cookie, header, query parameter).
  */
 @ExperimentalJCustosApi
-public final class StoreBackedRememberMeService {
+public final class StoreBackedRememberMeService implements HasLogger {
 
   /** Default token entropy in bytes (256 bits). */
   public static final int DEFAULT_TOKEN_BYTES = 32;
+
+  /**
+   * How long after a rotation a second presentation of the consumed token is
+   * treated as a concurrent request of the same client rather than as a replay
+   * (JS-SEC-128). The token is refused either way; within this window the
+   * subject's other tokens are left alone.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration ROTATION_RACE_TOLERANCE = Duration.ofSeconds(5);
 
   private final RememberMeTokenStore store;
   private final TokenHasher hasher;
@@ -174,19 +202,98 @@ public final class StoreBackedRememberMeService {
       return Optional.empty();
     }
     String hash = hasher.hash(plainToken.toCharArray());
+    return findLive(hash, clock.instant());
+  }
+
+  /**
+   * Redeems the supplied plain token: validates it like {@link #validate},
+   * retires it and issues a successor for the same subject (JS-SEC-128,
+   * CWE-613). The caller replaces the client's cookie with
+   * {@link IssuedToken#plainToken()} of the result.
+   *
+   * <p>The successor keeps the expiry of the token it replaces; rotation
+   * does not extend the lifetime of a remembered login. Of two concurrent
+   * calls with the same token exactly one receives a successor. A token that
+   * was rotated earlier and is presented again is a replay — see the class
+   * comment for what follows.</p>
+   *
+   * @param plainToken plain token from the carrier; null/blank yields empty
+   * @return the successor, or empty when the token is unknown, expired,
+   *     from another tenant, already rotated or lost a concurrent rotation
+   * @since 00.84.00
+   */
+  public Optional<IssuedToken> rotate(String plainToken) {
+    if (plainToken == null || plainToken.isBlank()) {
+      return Optional.empty();
+    }
+    String hash = hasher.hash(plainToken.toCharArray());
+    Instant now = clock.instant();
+    Optional<RememberMeTokenRecord> live = findLive(hash, now);
+    if (live.isEmpty()) {
+      return Optional.empty();
+    }
+    RememberMeTokenRecord old = live.get();
+    // Claim first, issue second (the order of JS-SEC-071): nothing is stored
+    // for a caller that lost the claim.
+    if (!store.markRotated(hash, now)) {
+      // Another presentation of the same token won a moment ago.
+      onRotatedTokenPresented(hash, now);
+      return Optional.empty();
+    }
+    String plain = tokenSource.get();
+    if (plain == null || plain.isBlank()) {
+      throw new IllegalStateException("tokenSource produced a blank token");
+    }
+    RememberMeTokenRecord successor = new RememberMeTokenRecord(
+        hasher.hash(plain.toCharArray()), tenant, old.subjectId(), now, old.expiresAt());
+    store.save(successor);
+    return Optional.of(new IssuedToken(plain, successor));
+  }
+
+  /**
+   * @return the live record for {@code hash} in this tenant; expired matches
+   *     are removed, and a hash that was consumed by a rotation is handled as
+   *     a replay
+   */
+  private Optional<RememberMeTokenRecord> findLive(String hash, Instant now) {
     Optional<RememberMeTokenRecord> match = store.findByHash(hash);
     if (match.isEmpty()) {
+      onRotatedTokenPresented(hash, now);
       return Optional.empty();
     }
     RememberMeTokenRecord record = match.get();
     if (!record.tenant().equals(tenant)) {
       return Optional.empty();
     }
-    if (record.isExpired(clock.instant())) {
+    if (record.isExpired(now)) {
       store.deleteByHash(hash);
       return Optional.empty();
     }
     return Optional.of(record);
+  }
+
+  /**
+   * JS-SEC-128 (CWE-613, CWE-294): a hash that is not live but was consumed by
+   * a rotation means the token exists in two places. Outside the tolerance for
+   * parallel requests every remember-me token of the subject is revoked — the
+   * successor the other holder obtained included.
+   */
+  private void onRotatedTokenPresented(String hash, Instant now) {
+    Optional<RememberMeTokenStore.RotatedToken> trail = store.findRotated(hash);
+    if (trail.isEmpty()) {
+      return;
+    }
+    RememberMeTokenRecord consumed = trail.get().record();
+    if (!consumed.tenant().equals(tenant)) {
+      return;
+    }
+    if (now.isBefore(trail.get().rotatedAt().plus(ROTATION_RACE_TOLERANCE))) {
+      return;
+    }
+    int revoked = store.deleteBySubject(tenant, consumed.subjectId());
+    logger().warn("authentication/remember-me-replay: a remember-me token that was "
+        + "already rotated was presented again; revoked {} token(s) of subject '{}'",
+        revoked, consumed.subjectId().value());
   }
 
   /**
@@ -249,6 +356,18 @@ public final class StoreBackedRememberMeService {
         throw new IllegalArgumentException("plainToken must not be blank");
       }
       requireNonNull(record, "record must not be null");
+    }
+
+    /**
+     * Masks the plain token; the compiler-generated {@code toString()} would
+     * print a reusable secret into any log line that stringifies the tuple
+     * (JS-SEC-127, CWE-532). The record carries the hash only and stays readable.
+     *
+     * @return a description without the plain token
+     */
+    @Override
+    public String toString() {
+      return "IssuedToken[plainToken=***, record=" + record + "]";
     }
   }
 }
