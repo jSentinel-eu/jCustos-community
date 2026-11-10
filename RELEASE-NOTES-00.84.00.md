@@ -616,6 +616,26 @@ the three real filters: each answers a 401 with
 `{"type":"about:blank","title":"Unauthorized","status":401}`, and the audit trail holds the
 `AccessDenied` and the `SessionStale` event.
 
+## `X-Forwarded-For` on several header lines no longer lets the client choose its address (SA13, JS-SEC-113, CWE-348, CWE-290)
+
+`TrustedProxyClientAddressResolver` reads `X-Forwarded-For` from the right, but the REST path handed
+it a single-valued header map, and every shipped adapter kept only the first of several lines. A
+proxy that adds its own line instead of merging — HAProxy with `option forwardfor` — was thereby
+dropped, and the line the client had sent decided the address: throttle buckets, audit lines and
+`ipAllowList` policies followed a forged value.
+
+`RestRequest` gains `headerValues(String)`, `RestClientAddress` resolves through it, and the
+contract of `RestRequest.headers()` now states that repeated list headers are joined with `", "`
+(RFC 9110 §5.3) while a repeated `Authorization`, `X-Api-Key` or `Cookie` is rejected with `400`;
+the new `RestHeaderLines` implements both for an adapter. `ClientRequestView.of(String, Map)` is
+deprecated in favour of the multi-valued factory, and `BearerTokenExtractor` yields no token when
+`Authorization` arrives twice. **Consumers:** an adapter that reduces headers to their first line
+must be changed — override `headerValues` or build `headers()` with `RestHeaderLines.joined(...)`;
+as an immediate measure let HAProxy replace the header with `http-request set-header X-Forwarded-For
+%[src]` (see `docs/security/deployment/reverse-proxy.md`). Verified over a real socket against a JDK
+`HttpServer`: two lines, the client's first, resolve to the proxy's value, and an `ipAllowList`
+policy denies.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

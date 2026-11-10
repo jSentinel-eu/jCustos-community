@@ -53,13 +53,22 @@ public interface ClientRequestView {
   List<String> headers(String name);
 
   /**
-   * A view over a single-valued header map, as the REST adapter provides it.
-   * Names compare case-insensitively; the map is copied.
+   * A view over a single-valued header map. Names compare case-insensitively;
+   * the map is copied.
    *
    * @param remoteAddress peer address, may be {@code null}
    * @param headers       headers, may be {@code null}
    * @return the view
+   * @deprecated JS-SEC-113 (CWE-348): a single-valued map cannot represent a
+   *     header that arrived on several lines. A transport that keeps only the
+   *     first {@code X-Forwarded-For} line drops the entry a trusted proxy
+   *     appended and leaves the client's forged line as the only one the
+   *     resolver sees. Use {@link #of(String, Function)} with a lookup that
+   *     returns every line. This factory stays correct only for maps in which
+   *     repeated list headers were joined with {@code ", "} beforehand
+   *     (RFC 9110 §5.3).
    */
+  @Deprecated(since = "00.84.00")
   static ClientRequestView of(String remoteAddress, Map<String, String> headers) {
     TreeMap<String, String> copy = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     if (headers != null) {
@@ -77,7 +86,8 @@ public interface ClientRequestView {
 
   /**
    * A view over a header lookup function, for transports that expose
-   * multi-valued headers.
+   * multi-valued headers. The lookup returns one entry per header line in wire
+   * order; this is the factory every adapter should use (JS-SEC-113).
    *
    * @param remoteAddress peer address, may be {@code null}
    * @param headers       lookup by header name; may return {@code null} for "absent"

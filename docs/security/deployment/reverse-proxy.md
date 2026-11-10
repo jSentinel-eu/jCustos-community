@@ -1,6 +1,6 @@
 # Running jCustos behind a reverse proxy
 
-Status: 00.84.00 · JS-SEC-061 · CWE-348 (Use of Less Trusted Source)
+Status: 00.84.00 · JS-SEC-061, JS-SEC-113 · CWE-348 (Use of Less Trusted Source)
 
 Behind a reverse proxy the connection peer the application sees is the proxy,
 not the client. Everything jCustos keys on the client address — brute-force
@@ -62,10 +62,69 @@ JCustosServiceResolver.setClientAddressResolver(
     ClientAddressResolver.trustedProxies("10.0.0.0/8"));
 ```
 
-Nothing has to be changed on the proxy beyond what it does anyway: Caddy,
-nginx and HAProxy append the peer they saw to `X-Forwarded-For`. If several
-proxies are chained, list all of them (or their range) — the resolver walks the
-chain from the right.
+Caddy and nginx (`proxy_add_x_forwarded_for`) need nothing beyond what they do
+anyway: they merge the peer they saw into the existing `X-Forwarded-For` value,
+so the application receives one line whose last entry is the proxy's. If
+several proxies are chained, list all of them (or their range) — the resolver
+walks the chain from the right.
+
+HAProxy needs one line of configuration; see the next section.
+
+### Several `X-Forwarded-For` lines (HAProxy `option forwardfor`)
+
+HTTP allows a header to arrive on more than one line. HAProxy's
+`option forwardfor` does not merge: it **adds its own `X-Forwarded-For` line
+after** whatever the client sent. A client that sends
+
+```
+X-Forwarded-For: 10.66.66.66
+```
+
+reaches the application as
+
+```
+X-Forwarded-For: 10.66.66.66
+X-Forwarded-For: 203.0.113.50
+```
+
+The resolver is only correct when it sees **both** lines: read from the right,
+the proxy's entry `203.0.113.50` wins and the client's line is never reached.
+An adapter that hands on only the first line turns this upside down — the
+forged value becomes the client address, with everything that hangs on it:
+throttle buckets, audit lines and `ipAllowList` policies (JS-SEC-113).
+
+What jCustos does since 00.84.00:
+
+- The Vaadin adapter always read every line (`getHeaders(name)`).
+- The REST adapter resolves through `RestRequest.headerValues(name)`, which
+  returns one entry per header line. `RestRequest.headers()` stays
+  single-valued; its contract now says that repeated list headers are joined
+  with `", "` (RFC 9110 §5.3) and that a repeated `Authorization`, `X-Api-Key`
+  or `Cookie` is rejected with `400`. `RestHeaderLines` (`jCustos-rest`)
+  implements both for an adapter.
+
+What the integration has to check:
+
+- **Your `RestRequest` adapter.** If it is built from a multi-valued header
+  structure (JDK `HttpExchange`, servlet request), it must not reduce a header
+  to `values.get(0)`. Either override `headerValues(name)` to return all lines,
+  or build `headers()` with `RestHeaderLines.joined(lines)` — the default
+  `headerValues` then sees the joined value. Adapters written against a release
+  before 00.84.00, including copies of the demo `Router`, keep the first line
+  and are affected.
+- **The proxy, as an immediate and independent measure.** Let HAProxy replace
+  the header instead of adding to it, so that a client-supplied value never
+  reaches the application at all:
+
+  ```haproxy
+  # instead of: option forwardfor
+  http-request set-header X-Forwarded-For %[src]
+  ```
+
+  This is the recommended HAProxy configuration whatever the adapter does. If
+  HAProxy sits behind another trusted proxy whose chain must be preserved,
+  delete the client's lines at the outermost proxy and use `option forwardfor`
+  only on the inner ones.
 
 ### Topology B — Jetty `ForwardedRequestCustomizer` with stripped headers
 
@@ -115,6 +174,21 @@ one-time warning `Client address taken from the connection peer …` show which
 address the framework used. Behind the configured proxy the audit line carries
 the client's public address; a direct connection to the connector carries the
 connecting host.
+
+Repeat the check **through the proxy** with a forged header. The address the
+framework records must be the one the proxy saw, never `198.51.100.9`:
+
+```
+curl -H 'X-Forwarded-For: 198.51.100.9' https://app.example/api/whoami
+```
+
+If the forged value shows up, the proxy adds a separate header line and the
+REST adapter in use drops it — see "Several `X-Forwarded-For` lines" above.
+A request with two `Authorization` lines must be answered with `400`:
+
+```
+curl -H 'Authorization: Bearer a' -H 'Authorization: Bearer b' https://app.example/api/whoami
+```
 
 ## Related
 

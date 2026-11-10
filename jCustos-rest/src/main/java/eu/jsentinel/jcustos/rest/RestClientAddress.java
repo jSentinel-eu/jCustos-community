@@ -56,11 +56,18 @@ public final class RestClientAddress {
   /**
    * The transport-neutral view the resolver works on.
    *
+   * <p>JS-SEC-113 (CWE-348): the view hands the resolver every line of a header
+   * through {@link RestRequest#headerValues(String)}. It used to be built from the
+   * single-valued {@link RestRequest#headers()} map; adapters that kept only the
+   * first of several {@code X-Forwarded-For} lines thereby hid the entry a trusted
+   * proxy appended and let the client's own line decide the address.
+   *
    * @param request the request
    * @return peer address and headers of the request
    */
   public static ClientRequestView view(RestRequest request) {
     Objects.requireNonNull(request, "request");
-    return ClientRequestView.of(request.remoteAddress(), request.headers());
+    // JS-SEC-113 (CWE-348, CWE-290): multi-valued lookup, never the flattened map.
+    return ClientRequestView.of(request.remoteAddress(), request::headerValues);
   }
 }
