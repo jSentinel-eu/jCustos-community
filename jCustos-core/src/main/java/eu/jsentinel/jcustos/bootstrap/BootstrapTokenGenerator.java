@@ -54,4 +54,37 @@ public final class BootstrapTokenGenerator {
     }
     return new BootstrapToken(sb.toString(), Instant.now(clock));
   }
+
+  /**
+   * Tells whether {@code value} has the shape this generator produces:
+   * five groups of four characters from the generator's alphabet, separated
+   * by {@code '-'}. Used to refuse a token
+   * file whose content was not written by the framework (JS-SEC-130, CWE-345).
+   *
+   * @param value candidate token value; {@code null} is not well-formed
+   * @return whether the value could have been generated here
+   * @since 00.84.00
+   */
+  public static boolean isWellFormed(String value) {
+    if (value == null || value.length() != GROUPS * (GROUP_LENGTH + 1) - 1) {
+      return false;
+    }
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      boolean separatorPosition = i % (GROUP_LENGTH + 1) == GROUP_LENGTH;
+      if (separatorPosition ? c != '-' : !inAlphabet(c)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean inAlphabet(char c) {
+    for (char allowed : ALPHABET) {
+      if (allowed == c) {
+        return true;
+      }
+    }
+    return false;
+  }
 }

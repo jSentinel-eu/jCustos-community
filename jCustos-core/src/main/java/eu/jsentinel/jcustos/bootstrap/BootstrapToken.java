@@ -35,6 +35,16 @@ import java.util.Objects;
  */
 public record BootstrapToken(String value, Instant createdAt) {
 
+  /**
+   * How far {@link #createdAt} may lie ahead of the reference instant before
+   * the token is treated as invalid (JS-SEC-130, CWE-613). It absorbs a clock
+   * that was set back a little between two starts; anything beyond it is not a
+   * token this installation issued.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration FUTURE_TOLERANCE = Duration.ofMinutes(5);
+
   /** Defensive constructor — rejects null / blank values. */
   public BootstrapToken {
     Objects.requireNonNull(value, "value must not be null");
@@ -59,11 +69,20 @@ public record BootstrapToken(String value, Instant createdAt) {
   /**
    * @param now      the reference instant to evaluate expiry against
    * @param validity the validity duration since {@link #createdAt}
-   * @return {@code true} when {@code now} is after {@code createdAt + validity}.
+   * @return {@code true} when {@code now} is after {@code createdAt + validity},
+   *     or when {@code createdAt} lies more than {@link #FUTURE_TOLERANCE}
+   *     ahead of {@code now}
    */
   public boolean isExpired(Instant now, Duration validity) {
     Objects.requireNonNull(now, "now");
     Objects.requireNonNull(validity, "validity");
+    // JS-SEC-130 (CWE-613): a creation instant in the future never reaches
+    // createdAt + validity, so a token file carrying one would never expire.
+    // The generator stamps tokens with the current time; a token from the
+    // future was not generated here and is treated as expired.
+    if (createdAt.isAfter(now.plus(FUTURE_TOLERANCE))) {
+      return true;
+    }
     return now.isAfter(createdAt.plus(validity));
   }
 

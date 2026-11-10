@@ -771,6 +771,19 @@ a replay re-reads each record after revoking it. **Consumers:** `TokenService.is
 `revokeAll` for the same subject overtook it; `EclipseStoreJCustosRoot` gained the field
 `refreshTokenInvalidBefore`, which roots stored before 00.84.00 receive on first use.
 
+## A planted bootstrap token file is not adopted (SA30, JS-SEC-130, CWE-345, CWE-732, CWE-613)
+
+In `PERSISTENT_FILE` mode start-up reused whatever token file it found, and a creation instant in
+the future never expired — a local user with write access to the token path could plant a token and
+create the first administrator with it. `FileBootstrapTokenStore.load()` now adopts a file only when
+it can have been written by the store itself: on POSIX a regular file owned by the process user with
+no access for group or others, and on every platform a token in the generator's format. A rejected
+file is reported with a warning and treated as absent, so start-up generates a fresh token and
+replaces the file; a creation instant more than five minutes ahead counts as expired. On filesystems
+without POSIX attributes owner and permissions still cannot be checked (JS-SEC-016). **Consumers:**
+token files that were written by hand or provisioned with wider permissions are no longer accepted;
+on a read-only mount start-up then fails when it tries to replace the file.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

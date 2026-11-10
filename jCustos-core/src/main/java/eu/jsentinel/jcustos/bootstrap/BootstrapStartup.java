@@ -24,6 +24,13 @@ package eu.jsentinel.jcustos.bootstrap;
  * the configured {@link BootstrapTokenOutput}. If a token already exists
  * (persistent mode after restart), it is reused so the user can resume the
  * setup.
+ * <p>
+ * A stored token is only reused when the store vouches for it and it is
+ * neither expired nor stamped with a creation instant in the future
+ * (JS-SEC-130, CWE-345, CWE-613). {@link FileBootstrapTokenStore#load()}
+ * reports a file it does not trust as absent — foreign owner, permissions
+ * beyond the owner, or a value the generator cannot have produced — and this
+ * method then generates a fresh token and replaces the file.
  */
 public final class BootstrapStartup {
 
@@ -47,6 +54,9 @@ public final class BootstrapStartup {
               + "starting the server.");
     }
     if (!stateService.bootstrapRequired()) return;
+    // JS-SEC-130: load() already dropped a token file it does not trust, and
+    // isExpired also rejects a creation instant in the future — both end in a
+    // fresh token that overwrites whatever was found.
     BootstrapToken token = tokenStore.load()
         .filter(existing -> !existing.isExpired(java.time.Instant.now(), configuration.tokenValidity()))
         .orElseGet(() -> {

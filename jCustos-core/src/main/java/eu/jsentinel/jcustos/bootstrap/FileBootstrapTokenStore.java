@@ -20,11 +20,14 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.nio.file.attribute.UserPrincipal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -41,6 +44,15 @@ import java.util.Optional;
  * (JS-SEC-016) — place the file in an owner-only directory or prefer
  * {@code TRANSIENT_CONSOLE}.
  * <p>
+ * A file found on disk is only adopted when it can have been written by this
+ * store (JS-SEC-130, CWE-345, CWE-732): on POSIX it must be a regular file
+ * that belongs to the user the process runs as and grants nothing to group
+ * or others, and on every platform the token must have the shape
+ * {@link BootstrapTokenGenerator} produces. Anything else is reported with a
+ * WARN and treated as absent, so start-up generates a fresh token and
+ * replaces the file. On a non-POSIX filesystem owner and permissions cannot
+ * be checked; the behaviour there is unchanged (JS-SEC-016).
+ * <p>
  * Format (intentionally simple, no JSON dependency):
  * <pre>
  * token=XXXX-XXXX-XXXX-XXXX-XXXX
@@ -52,6 +64,13 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
   private static final EnumSet<PosixFilePermission> OWNER_RW =
       EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
 
+  /** Everything beyond the owner's bits — "wider than 0600" in the sense of JS-SEC-130. */
+  private static final EnumSet<PosixFilePermission> GROUP_OR_OTHERS = EnumSet.of(
+      PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE,
+      PosixFilePermission.GROUP_EXECUTE,
+      PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_WRITE,
+      PosixFilePermission.OTHERS_EXECUTE);
+
   private final Path path;
 
   public FileBootstrapTokenStore(Path path) {
@@ -60,8 +79,14 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
 
   @Override
   public Optional<BootstrapToken> load() {
-    if (!Files.exists(path)) return Optional.empty();
+    if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return Optional.empty();
     try {
+      // JS-SEC-130 (CWE-345, CWE-732): the file content becomes the credential
+      // for creating the first administrator. Adopt it only when nobody but
+      // this process's user can have written or read it.
+      if (!trustedOnPosix()) {
+        return Optional.empty();
+      }
       List<String> lines = Files.readAllLines(path);
       String tokenValue = null;
       Instant createdAt = null;
@@ -80,9 +105,91 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
       if (tokenValue == null || tokenValue.isBlank() || createdAt == null) {
         return Optional.empty();
       }
+      // JS-SEC-130 (CWE-345): a value the generator cannot have produced was
+      // not written by save(). The value itself is never logged.
+      if (!BootstrapTokenGenerator.isWellFormed(tokenValue)) {
+        logger().warn("bootstrap/token-file-rejected: {} does not contain a token in the "
+            + "generator's format; the file is ignored and a fresh token is required", path);
+        return Optional.empty();
+      }
       return Optional.of(new BootstrapToken(tokenValue, createdAt));
     } catch (IOException e) {
       return Optional.empty();
+    }
+  }
+
+  /**
+   * JS-SEC-130: owner and permission check for a token file found on disk.
+   *
+   * @return {@code true} when the file may be read — it passed the check, or
+   *     the filesystem has no POSIX attributes (JS-SEC-016: nothing to check)
+   */
+  private boolean trustedOnPosix() throws IOException {
+    if (!path.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+      return true;
+    }
+    // NOFOLLOW_LINKS: judge the entry at the configured path itself. A symbolic
+    // link there is not a file this store wrote, wherever it points.
+    PosixFileAttributes attributes =
+        Files.readAttributes(path, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+    if (!attributes.isRegularFile()) {
+      logger().warn("bootstrap/token-file-rejected: {} is not a regular file; the file "
+          + "is ignored and a fresh token is required", path);
+      return false;
+    }
+    EnumSet<PosixFilePermission> excess = EnumSet.copyOf(GROUP_OR_OTHERS);
+    excess.retainAll(attributes.permissions());
+    if (!excess.isEmpty()) {
+      logger().warn("bootstrap/token-file-rejected: {} is accessible beyond its owner "
+          + "(permissions {}); the file is ignored and a fresh token is required",
+          path, PosixFilePermissions.toString(attributes.permissions()));
+      return false;
+    }
+    Optional<UserPrincipal> self = processUser();
+    if (self.isEmpty() || !self.get().equals(attributes.owner())) {
+      logger().warn("bootstrap/token-file-rejected: {} belongs to '{}', not to the user "
+          + "this process runs as; the file is ignored and a fresh token is required",
+          path, attributes.owner().getName());
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The principal files created by this process belong to. Resolved from
+   * {@code user.name}; where that name has no entry in the user database (a
+   * container running under an arbitrary uid), the owner of a probe file
+   * created next to the token file is used instead.
+   *
+   * @return the principal, or empty when it cannot be determined — the caller
+   *     then rejects the token file
+   */
+  private Optional<UserPrincipal> processUser() {
+    try {
+      return Optional.of(path.getFileSystem().getUserPrincipalLookupService()
+          .lookupPrincipalByName(System.getProperty("user.name")));
+    } catch (IOException | RuntimeException lookupFailed) {
+      // fall through to the probe
+    }
+    Path parent = path.toAbsolutePath().getParent();
+    if (parent == null) {
+      return Optional.empty();
+    }
+    Path probe = null;
+    try {
+      probe = Files.createTempFile(parent, ".bootstrap-owner-", ".probe",
+          PosixFilePermissions.asFileAttribute(OWNER_RW));
+      return Optional.of(Files.getOwner(probe, LinkOption.NOFOLLOW_LINKS));
+    } catch (IOException | RuntimeException probeFailed) {
+      return Optional.empty();
+    } finally {
+      if (probe != null) {
+        try {
+          Files.deleteIfExists(probe);
+        } catch (IOException ignored) {
+          // best effort — an empty probe file carries nothing
+        }
+      }
     }
   }
 
