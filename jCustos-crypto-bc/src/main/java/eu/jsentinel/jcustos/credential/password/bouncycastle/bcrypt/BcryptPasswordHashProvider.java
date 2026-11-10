@@ -22,6 +22,7 @@
  */
 package eu.jsentinel.jcustos.credential.password.bouncycastle.bcrypt;
 
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.credential.CredentialType;
 import eu.jsentinel.jcustos.credential.InternalAuditEventType;
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
@@ -49,15 +50,39 @@ import java.util.Optional;
  * {@link BCrypt} generator (Bcprov's lightweight API, no JCA
  * registration).
  *
- * <h2>72-byte input limit</h2>
+ * <h2>Password framing (JS-SEC-133)</h2>
+ * <p>Blowfish repeats its key cyclically over the key schedule. Standard
+ * bcrypt therefore appends a terminating {@code 0x00} byte to the
+ * password; without it {@code abc}, {@code abcabc} and
+ * {@code abcabcabcabc} derive the same hash, and a periodic password is
+ * only as strong as its shortest period (CWE-327, CWE-521). New hashes
+ * carry the terminator and record it in the envelope as
+ * {@link BcryptParameterNames#TERMINATOR}{@code =1}; with it the derived
+ * bytes are those of OpenBSD bcrypt for the same password, salt and
+ * cost.</p>
+ *
+ * <p>An envelope without that parameter is a <em>legacy</em> hash,
+ * written before 00.84.00 from the raw UTF-8 bytes. It keeps verifying in
+ * legacy framing, so no user is locked out, and is reported for a rehash
+ * through the policy defaults (see
+ * {@link BcryptDefaults#defaultParameters()}); the weakness of a legacy
+ * hash ends with that rehash.</p>
+ *
+ * <p>Two inputs are refused in the new framing: a password containing
+ * U+0000, because {@code a} and {@code a\0a} would collide once the
+ * terminator is appended, and the empty password.</p>
+ *
+ * <h2>Input limit</h2>
  * <p>bcrypt's underlying Blowfish key schedule operates on a fixed
- * 72-byte input. Passwords longer than 72&nbsp;bytes in their UTF-8
- * encoding are <em>not</em> silently truncated by this provider; they
- * are rejected with a
- * {@link ProviderVerificationResult.ProviderError}. The Konzept
- * §2.2 also forbids silent pre-hashing without a real pepper service,
- * so callers must enforce a policy-level length cap or wait for the
- * Phase-2 pepper-HMAC integration (Prompt 017).</p>
+ * 72-byte input. With the terminator, a password may occupy at most
+ * {@value BcryptParameterNames#MAX_TERMINATED_PASSWORD_BYTES}&nbsp;bytes
+ * in its UTF-8 encoding. Longer passwords are <em>not</em> silently
+ * truncated by this provider; they are rejected with
+ * {@link BcryptInputTooLongException} on {@code hash} and with a
+ * {@link ProviderVerificationResult.ProviderError} on {@code verify}. The
+ * Konzept §2.2 also forbids silent pre-hashing without a real pepper
+ * service, so callers must enforce a policy-level length cap or wait for
+ * the Phase-2 pepper-HMAC integration (Prompt 017).</p>
  *
  * <h2>Password shucking</h2>
  * <p>Pre-hashing a password before handing it to bcrypt without a
@@ -100,7 +125,10 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
     Objects.requireNonNull(policy, "policy");
     Objects.requireNonNull(pepper, "pepper");
 
-    byte[] pwBytes = toUtf8(password);
+    // JS-SEC-133 (CWE-327): refuse what the NUL-terminated framing cannot
+    // represent before any byte of the password is copied.
+    requireRepresentable(password);
+    byte[] pwBytes = toTerminatedUtf8(password);
     try {
       requireUnderBcryptLimit(pwBytes);
       Map<String, String> defaults = policy.defaultParameters(algorithm());
@@ -118,6 +146,10 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
         params.put(BcryptParameterNames.COST, Integer.toString(cost));
         params.put(BcryptParameterNames.SALT,
             Base64.getEncoder().encodeToString(salt));
+        // JS-SEC-133 (CWE-327): record the framing, so that verification can tell
+        // this hash from a legacy one that was derived without the terminator.
+        params.put(BcryptParameterNames.TERMINATOR,
+            BcryptParameterNames.TERMINATOR_NUL);
         Optional<String> pepperKeyId = pepper.map(PepperReference::keyId);
 
         PasswordHashEnvelope envelope = new PasswordHashEnvelope(
@@ -164,6 +196,16 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
     Objects.requireNonNull(pepper, "pepper");
 
     Map<String, String> params = envelope.parameters();
+    // JS-SEC-133 (CWE-327): absent = legacy framing (raw UTF-8 bytes), "1" = the
+    // terminating NUL byte of standard bcrypt. Any other value is refused rather
+    // than interpreted; the stored hash decides the framing, never the caller.
+    String terminator = params.get(BcryptParameterNames.TERMINATOR);
+    boolean terminated = terminator != null;
+    if (terminated && !BcryptParameterNames.TERMINATOR_NUL.equals(terminator)) {
+      return new ProviderVerificationResult.ProviderError(
+          InternalAuditEventType.VERIFICATION_FAILED_INVALID_PARAMETERS,
+          "bcrypt envelope terminator parameter is not supported");
+    }
     int cost;
     byte[] salt;
     byte[] expectedDerived;
@@ -199,14 +241,27 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
           "bcrypt envelope cost parameters exceed safe limits");
     }
 
-    byte[] pwBytes = toUtf8(password);
+    // JS-SEC-133 (CWE-327): in the terminated framing U+0000 inside the candidate
+    // would make it collide with the shorter password in front of it, so it is
+    // refused before the KDF runs. A legacy envelope is verified exactly as it was
+    // written - no terminator, no additional restriction - so that it keeps
+    // verifying until it is rehashed.
+    boolean unrepresentable = terminated && containsNul(password);
+    byte[] pwBytes = unrepresentable
+        ? new byte[0]
+        : terminated ? toTerminatedUtf8(password) : toUtf8(password);
     byte[] candidate = null;
     byte[] peppered = null;
     try {
+      if (unrepresentable) {
+        return new ProviderVerificationResult.ProviderError(
+            InternalAuditEventType.VERIFICATION_FAILED_INVALID_PARAMETERS,
+            "candidate password contains U+0000, which bcrypt cannot represent");
+      }
       if (pwBytes.length > BcryptParameterNames.MAX_PASSWORD_BYTES) {
         return new ProviderVerificationResult.ProviderError(
             InternalAuditEventType.VERIFICATION_FAILED_INVALID_PARAMETERS,
-            "candidate password exceeds bcrypt 72-byte input limit");
+            "candidate password exceeds the bcrypt input limit");
       }
       try {
         candidate = BCrypt.generate(pwBytes, salt, cost);
@@ -238,17 +293,66 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
     }
   }
 
-  private static void requireUnderBcryptLimit(byte[] pwBytes) {
-    if (pwBytes.length > BcryptParameterNames.MAX_PASSWORD_BYTES) {
+  /**
+   * Checks the terminated key - password bytes plus the terminator - against
+   * bcrypt's 72-byte key, which leaves
+   * {@value BcryptParameterNames#MAX_TERMINATED_PASSWORD_BYTES} bytes for the
+   * password itself.
+   */
+  private static void requireUnderBcryptLimit(byte[] terminatedPwBytes) {
+    if (terminatedPwBytes.length > BcryptParameterNames.MAX_PASSWORD_BYTES) {
       throw new BcryptInputTooLongException();
     }
   }
 
+  /**
+   * JS-SEC-133 (CWE-327): a password the NUL-terminated framing cannot
+   * represent is a controlled error on the hash path. The empty password is
+   * refused here rather than left to the generator, and U+0000 is refused
+   * because the terminator would make {@code a} and {@code a\0a} one key.
+   */
+  private static void requireRepresentable(char[] password) {
+    if (password.length == 0) {
+      throw new BcryptEmptyPasswordException();
+    }
+    if (containsNul(password)) {
+      throw new BcryptNulCharacterException();
+    }
+  }
+
+  /**
+   * UTF-8 never encodes any character other than U+0000 with a zero byte, so
+   * looking at the characters is equivalent to looking at the encoded bytes.
+   */
+  private static boolean containsNul(char[] password) {
+    boolean found = false;
+    // No early exit: the scan time must not depend on where the character sits.
+    for (char c : password) {
+      found |= c == '\u0000';
+    }
+    return found;
+  }
+
   private static byte[] toUtf8(char[] password) {
+    return encodeUtf8(password, 0);
+  }
+
+  /**
+   * JS-SEC-133 (CWE-327): the UTF-8 bytes of the password followed by the
+   * single {@code 0x00} byte that standard bcrypt appends, cf.
+   * {@code BCrypt.passwordToByteArray(char[])} in Bouncy Castle.
+   */
+  private static byte[] toTerminatedUtf8(char[] password) {
+    return encodeUtf8(password, 1);
+  }
+
+  /** Encodes into an array with {@code trailingZeroBytes} zero bytes appended. */
+  private static byte[] encodeUtf8(char[] password, int trailingZeroBytes) {
     java.nio.CharBuffer charBuffer = java.nio.CharBuffer.wrap(password);
     java.nio.ByteBuffer byteBuffer = StandardCharsets.UTF_8.encode(charBuffer);
-    byte[] out = new byte[byteBuffer.remaining()];
-    byteBuffer.get(out);
+    int encoded = byteBuffer.remaining();
+    byte[] out = new byte[encoded + trailingZeroBytes];
+    byteBuffer.get(out, 0, encoded);
     if (byteBuffer.hasArray()) {
       Arrays.fill(byteBuffer.array(), (byte) 0);
     }
@@ -270,14 +374,52 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
 
   /**
    * Control-flow signal that the supplied password exceeds bcrypt's
-   * fixed 72-byte UTF-8 input limit. Surfaced to callers of
+   * input limit: {@value BcryptParameterNames#MAX_TERMINATED_PASSWORD_BYTES}
+   * UTF-8 bytes, because the terminating NUL byte occupies the last of
+   * the 72 key bytes (JS-SEC-133). Surfaced to callers of
    * {@link #hash(char[], PasswordHashPolicy, java.util.Optional)} so
    * the bootstrap or registration path can reject overlong passwords
    * up front instead of silently truncating them.
    */
   public static final class BcryptInputTooLongException extends RuntimeException {
     public BcryptInputTooLongException() {
-      super("password exceeds bcrypt 72-byte input limit");
+      super("password exceeds the bcrypt input limit of "
+          + BcryptParameterNames.MAX_TERMINATED_PASSWORD_BYTES
+          + " UTF-8 bytes (72 including the NUL terminator)");
+    }
+  }
+
+  /**
+   * Control-flow signal that
+   * {@link #hash(char[], PasswordHashPolicy, java.util.Optional)} was
+   * asked to hash the empty password. bcrypt has no meaningful key for
+   * it, so the provider refuses it before the generator runs instead of
+   * storing a hash that every empty input would match. JS-SEC-133.
+   *
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public static final class BcryptEmptyPasswordException extends RuntimeException {
+    public BcryptEmptyPasswordException() {
+      super("bcrypt cannot hash an empty password");
+    }
+  }
+
+  /**
+   * Control-flow signal that the password handed to
+   * {@link #hash(char[], PasswordHashPolicy, java.util.Optional)}
+   * contains U+0000. bcrypt terminates its key with a NUL byte, so a
+   * password with an embedded NUL would be equivalent to the shorter
+   * password in front of it ({@code a} and {@code a\0a} derive the same
+   * hash). The message never repeats any part of the password.
+   * JS-SEC-133 (CWE-327).
+   *
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public static final class BcryptNulCharacterException extends RuntimeException {
+    public BcryptNulCharacterException() {
+      super("bcrypt cannot hash a password that contains U+0000");
     }
   }
 }

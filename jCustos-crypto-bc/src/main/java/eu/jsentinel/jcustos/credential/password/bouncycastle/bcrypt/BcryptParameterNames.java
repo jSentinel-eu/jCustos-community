@@ -44,11 +44,48 @@ public final class BcryptParameterNames {
   public static final String SALT = "s";
 
   /**
-   * bcrypt's hard 72-byte input limit on the UTF-8 representation of the
-   * password. Inputs longer than this are silently truncated by the
-   * bcrypt algorithm itself; this provider rejects them explicitly.
+   * Password framing marker, JS-SEC-133 (CWE-327). The value
+   * {@link #TERMINATOR_NUL} states that the provider appended the
+   * terminating {@code 0x00} byte of standard bcrypt to the UTF-8 bytes
+   * of the password before the key schedule ran. An envelope
+   * <em>without</em> this parameter is a legacy hash, derived from the
+   * raw UTF-8 bytes: Blowfish repeats its key cyclically, so without the
+   * terminator a periodic password ({@code abcabcabcabc}) is equivalent
+   * to its shortest period ({@code abc}). Legacy hashes still verify, in
+   * legacy framing, and are reported for a rehash through the policy
+   * defaults (see {@link BcryptDefaults#defaultParameters()}).
+   *
+   * @since 00.84.00
+   */
+  public static final String TERMINATOR = "term";
+
+  /**
+   * The only supported value of {@link #TERMINATOR}: a single trailing
+   * {@code 0x00} byte, as in OpenBSD bcrypt ({@code $2a$}/{@code $2b$}/{@code $2y$}).
+   *
+   * @since 00.84.00
+   */
+  public static final String TERMINATOR_NUL = "1";
+
+  /**
+   * bcrypt's hard 72-byte limit on the key that enters the Blowfish key
+   * schedule. Inputs longer than this are silently truncated by the
+   * bcrypt algorithm itself; this provider rejects them explicitly. For
+   * new hashes the terminator occupies one of the 72 bytes, so the
+   * password itself is limited to {@link #MAX_TERMINATED_PASSWORD_BYTES};
+   * the full 72 bytes are accepted only when a legacy envelope (no
+   * {@link #TERMINATOR} parameter) is verified.
    */
   public static final int MAX_PASSWORD_BYTES = 72;
+
+  /**
+   * Upper bound on the UTF-8 length of a password in a new,
+   * NUL-terminated hash: 71 password bytes plus the terminator fill the
+   * 72-byte bcrypt key. JS-SEC-133 (CWE-327).
+   *
+   * @since 00.84.00
+   */
+  public static final int MAX_TERMINATED_PASSWORD_BYTES = MAX_PASSWORD_BYTES - 1;
 
   /** Fixed bcrypt salt length in bytes. */
   public static final int SALT_BYTES = 16;

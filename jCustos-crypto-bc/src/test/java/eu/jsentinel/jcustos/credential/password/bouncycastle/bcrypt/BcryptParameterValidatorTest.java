@@ -31,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class BcryptParameterValidatorTest {
@@ -112,6 +113,34 @@ class BcryptParameterValidatorTest {
     params.remove(BcryptParameterNames.COST);
     assertThrows(PasswordHashValidationException.class,
         () -> validator.validate(params, min, max));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-133: the terminator marker term=1 passes validation")
+  void terminatorMarkerAccepted() {
+    Map<String, String> params = valid();
+    params.put(BcryptParameterNames.TERMINATOR, BcryptParameterNames.TERMINATOR_NUL);
+    validator.validate(params, min, max);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-133: a legacy envelope without the terminator marker still passes validation")
+  void legacyEnvelopeWithoutTerminatorAccepted() {
+    Map<String, String> params = valid();
+    assertFalse(params.containsKey(BcryptParameterNames.TERMINATOR));
+    validator.validate(params, min, max);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-133: any terminator value other than 1 is rejected")
+  void unsupportedTerminatorValueRejected() {
+    for (String unsupported : new String[] {"0", "2", "true", "", " 1"}) {
+      Map<String, String> params = valid();
+      params.put(BcryptParameterNames.TERMINATOR, unsupported);
+      assertThrows(PasswordHashValidationException.class,
+          () -> validator.validate(params, min, max),
+          "terminator value '" + unsupported + "' must not validate");
+    }
   }
 
   @Test

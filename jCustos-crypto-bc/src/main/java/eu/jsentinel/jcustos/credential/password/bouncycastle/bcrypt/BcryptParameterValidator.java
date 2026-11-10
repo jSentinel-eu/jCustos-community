@@ -31,12 +31,14 @@ import java.util.Map;
 /**
  * Bounds the bcrypt envelope parameters before any KDF call.
  *
- * <p>Enforces the cost-factor min/max and verifies the salt is exactly
+ * <p>Enforces the cost-factor min/max, verifies the salt is exactly
  * {@value BcryptParameterNames#SALT_BYTES} bytes after base64 decoding
- * (CWE-20). bcrypt's 72-byte input limit on the password itself is
- * checked by the provider at hash/verify time, not here, because it
- * applies to the supplied password rather than to a stored
- * parameter.</p>
+ * (CWE-20) and accepts the framing marker
+ * {@link BcryptParameterNames#TERMINATOR} only when it is absent (legacy
+ * hash) or carries the one supported value (JS-SEC-133). bcrypt's input
+ * limit on the password itself is checked by the provider at hash/verify
+ * time, not here, because it applies to the supplied password rather
+ * than to a stored parameter.</p>
  */
 public final class BcryptParameterValidator implements PasswordHashParameterValidator {
 
@@ -70,6 +72,17 @@ public final class BcryptParameterValidator implements PasswordHashParameterVali
       throw new PasswordHashValidationException(
           "bcrypt salt must be exactly "
               + BcryptParameterNames.SALT_BYTES + " bytes");
+    }
+
+    // JS-SEC-133 (CWE-327): the framing marker is either absent (legacy hash,
+    // verified without the terminator and then rehashed) or names the one
+    // supported framing. Anything else is a malformed or tampered envelope and
+    // must not reach the KDF under a guessed interpretation.
+    String terminator = parameters.get(BcryptParameterNames.TERMINATOR);
+    if (terminator != null
+        && !BcryptParameterNames.TERMINATOR_NUL.equals(terminator)) {
+      throw new PasswordHashValidationException(
+          "bcrypt terminator parameter has an unsupported value");
     }
   }
 

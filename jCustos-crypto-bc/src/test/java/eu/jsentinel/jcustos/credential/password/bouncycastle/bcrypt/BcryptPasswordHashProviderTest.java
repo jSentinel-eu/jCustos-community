@@ -149,15 +149,24 @@ class BcryptPasswordHashProviderTest {
   }
 
   @Test
-  @DisplayName("Boundary: password exactly 72 UTF-8 bytes is accepted")
-  void exactlySeventyTwoBytesAccepted() {
-    char[] pw = new char[72];
+  @DisplayName("Boundary: password of exactly 71 UTF-8 bytes is accepted (71 + NUL terminator = 72)")
+  void exactlySeventyOneBytesAccepted() {
+    char[] pw = new char[BcryptParameterNames.MAX_TERMINATED_PASSWORD_BYTES];
     Arrays.fill(pw, 'a');
     PasswordHashResult r = provider.hash(pw.clone(), fastTestPolicy(), Optional.empty());
     PasswordHashEnvelope env = PasswordHashCodec.DEFAULT
         .decode(r.encodedHash()).envelope();
     assertSame(ProviderVerificationResult.Matched.INSTANCE,
         provider.verify(pw.clone(), env, Optional.empty()));
+  }
+
+  @Test
+  @DisplayName("Boundary: 72-byte password is rejected on hash - the terminator needs the last key byte (JS-SEC-133)")
+  void seventyTwoBytesRejectedOnHash() {
+    char[] pw = new char[72];
+    Arrays.fill(pw, 'a');
+    assertThrows(BcryptPasswordHashProvider.BcryptInputTooLongException.class,
+        () -> provider.hash(pw, fastTestPolicy(), Optional.empty()));
   }
 
   @Test
@@ -189,10 +198,10 @@ class BcryptPasswordHashProviderTest {
   }
 
   @Test
-  @DisplayName("Multi-byte characters count toward the 72-byte UTF-8 limit")
+  @DisplayName("Multi-byte characters count toward the UTF-8 byte limit")
   void multiByteCountsTowardLimit() {
-    // ä is 2 bytes in UTF-8; 37 * 'ä' = 74 bytes > 72.
-    char[] pw = new char[37];
+    // ä is 2 bytes in UTF-8; 36 * 'ä' = 72 bytes > 71 (the terminator needs one).
+    char[] pw = new char[36];
     Arrays.fill(pw, 'ä');
     assertThrows(BcryptPasswordHashProvider.BcryptInputTooLongException.class,
         () -> provider.hash(pw, fastTestPolicy(), Optional.empty()));

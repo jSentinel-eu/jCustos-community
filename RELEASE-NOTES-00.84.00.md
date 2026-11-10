@@ -809,6 +809,28 @@ the wrapper — repeat the annotation on the overriding method. Verified by comp
 calling generated wrappers: 432 decisions over seven fixture classes are identical on the
 `SecuredProxy` path and in the wrapper.
 
+## bcrypt hashes are NUL-terminated; legacy hashes keep verifying and are rehashed (SA33, JS-SEC-133, CWE-327, CWE-521)
+
+`BcryptPasswordHashProvider` handed the raw UTF-8 bytes of the password to Bouncy Castle's low-level
+`BCrypt.generate`, without the terminating NUL byte of standard bcrypt. Blowfish repeats its key
+cyclically, so `abc`, `abcabc` and `abcabcabcabc` derived the same hash: a periodic password
+verified with its shortest period. New hashes append the terminator and record it in the envelope as
+`term=1`; their derived bytes equal OpenBSD bcrypt (`$2a$`/`$2b$`/`$2y$`) for the same password,
+salt and cost, proven against Bouncy Castle's `OpenBSDBCrypt` and published test vectors. An
+envelope without `term` is a legacy hash: it still verifies in the old framing, so nobody is locked
+out, and `needsRehash` reports `PARAMETERS_OUTDATED` for it under every policy whose bcrypt defaults
+come from `BcryptDefaults.defaultParameters()`. `hash` now accepts at most 71 UTF-8 bytes (the
+terminator takes the 72nd) and rejects the empty password and any password containing U+0000 with
+dedicated exceptions; a candidate containing U+0000 never matches a new hash.
+
+**Operators:** the weakness of an existing bcrypt hash ends only when it is rehashed, on the user's
+next successful login. A policy that assembles its bcrypt default parameters by hand must add
+`term=1` (`BcryptParameterNames.TERMINATOR`) to them to obtain the rehash signal. Rehash code must
+expect `BcryptInputTooLongException` for a legacy password of exactly 72 bytes, and
+`BcryptNulCharacterException` for one containing U+0000, and ask for a new password. Hashes written
+by this release cannot be verified by an earlier one, so a rollback after users have logged in locks
+those users out.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

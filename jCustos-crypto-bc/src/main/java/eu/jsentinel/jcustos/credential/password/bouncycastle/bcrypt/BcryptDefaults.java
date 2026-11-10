@@ -48,9 +48,24 @@ public final class BcryptDefaults {
 
   private BcryptDefaults() { }
 
+  /**
+   * Default parameters of a bcrypt policy: the cost factor and the
+   * password framing.
+   *
+   * <p>JS-SEC-133 (CWE-327): the map carries
+   * {@link BcryptParameterNames#TERMINATOR} so that the rehash engine,
+   * which reports {@code PARAMETERS_OUTDATED} for an envelope that lacks
+   * a parameter named in the policy defaults, flags every legacy hash
+   * (derived without the terminating NUL byte) on its next successful
+   * verification. The provider writes the terminator into every new hash
+   * regardless of the policy; a policy that assembles its bcrypt
+   * defaults by hand must add the entry itself to obtain the rehash
+   * signal.</p>
+   */
   public static Map<String, String> defaultParameters() {
     Map<String, String> m = new LinkedHashMap<>();
     m.put(BcryptParameterNames.COST, Integer.toString(DEFAULT_COST));
+    m.put(BcryptParameterNames.TERMINATOR, BcryptParameterNames.TERMINATOR_NUL);
     return m;
   }
 
