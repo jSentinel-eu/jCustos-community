@@ -1086,6 +1086,25 @@ rotation that leaves the id unchanged is no longer reported and audited as a rot
 **Consumers:** callback views that do not extend the base class must call
 `LoginSessionRotation.afterLogin()` themselves.
 
+## OIDC logout reaches the provider, always ends the local session and needs proof of intent (SA47, JS-SEC-147, CWE-613, CWE-460, CWE-352)
+
+`AbstractOidcLogoutView` requested its redirect through `getUI()`, which is empty while a view is
+being entered, so the browser never reached the provider's end-session endpoint; locally it removed
+the subject only, and not even that when `endSessionEndpoint()`, `logoutRequest()` or
+`onBeforeLogout()` threw. The view now redirects through the navigation event's UI and performs the
+complete local teardown in a `finally` block: session policy notified, subject, token credential and
+security-version snapshot cleared, `LogoutPerformed` audited, Vaadin session closed and HTTP session
+invalidated. When the provider URL cannot be computed, the user is logged out locally and sent to
+`localLogoutTarget()` (default: the login route) with a warning in the log.
+
+Navigating to the route no longer logs anybody out: the logout runs only with a single-use token
+bound to the session, minted by `AbstractOidcLogoutView.logoutLocation(...)`, and otherwise the view
+shows a confirmation button. The REST `OidcLogoutHandler` accepts `POST` only (405 with `Allow:
+POST` otherwise) and refuses a foreign `Origin` with 403; `withAllowedOrigins(...)` names the public
+origins behind a proxy. **Consumers:** existing sign-out links have to be built with
+`logoutLocation(...)`; the REST route has to be mapped as `POST`; `onBeforeLogout()` now runs after
+the subject has been cleared, as its Javadoc always stated.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
