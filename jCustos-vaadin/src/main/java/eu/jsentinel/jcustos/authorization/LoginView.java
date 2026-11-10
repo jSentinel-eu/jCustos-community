@@ -17,22 +17,8 @@
 package eu.jsentinel.jcustos.authorization;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
-import eu.jsentinel.jcustos.audit.JCustosAuditService;
-import eu.jsentinel.jcustos.audit.SessionInvalidated;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStore;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
-import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
-import eu.jsentinel.jcustos.logout.SubjectId;
-import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
-import eu.jsentinel.jcustos.session.JCustosVersion;
-import eu.jsentinel.jcustos.session.JCustosVersionKey;
-import eu.jsentinel.jcustos.session.JCustosVersionStore;
 import eu.jsentinel.jcustos.session.SessionContext;
-import eu.jsentinel.jcustos.session.SessionDecision;
 import eu.jsentinel.jcustos.session.SessionPolicy;
-import eu.jsentinel.jcustos.session.vaadin.VaadinJCustosVersionContext;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.Composite;
 import com.vaadin.flow.component.button.Button;
@@ -46,17 +32,8 @@ import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 import com.vaadin.flow.component.textfield.Autocomplete;
 import com.vaadin.flow.component.textfield.PasswordField;
 import com.vaadin.flow.component.textfield.TextField;
-import com.vaadin.flow.server.VaadinRequest;
-import com.vaadin.flow.server.VaadinService;
-import com.vaadin.flow.server.VaadinServletRequest;
-import com.vaadin.flow.server.VaadinSession;
-import com.vaadin.flow.server.WrappedSession;
-import jakarta.servlet.http.HttpServletRequest;
 
-import java.time.Instant;
 import java.time.LocalDateTime;
-import java.util.Map;
-import java.util.Optional;
 
 
 /**
@@ -69,6 +46,14 @@ import java.util.Optional;
  * <p>
  * The form can be extended with custom UI elements via
  * {@link #setCustomElements(Component)}.
+ * <p>
+ * After a successful {@link #checkCredentials()} the view runs
+ * {@link LoginSessionRotation#afterLogin(LoginSessionRotation.RotationHook)}: the HTTP
+ * session id is <em>always</em> rotated (session-fixation mitigation, secure by default —
+ * JS-SEC-003 / CWE-384), the configured {@link SessionPolicy} observes the login with the id
+ * that lives on (JS-SEC-060), the rotation is audited, {@link #onSessionRotated(String, String)}
+ * is called and the security-version snapshot is recorded. Failures, a missing Vaadin
+ * session or a missing SPI are logged and never block the login flow.
  */
 public abstract class LoginView
     extends Composite<HorizontalLayout>
@@ -187,184 +172,17 @@ public abstract class LoginView
     boolean isValid = checkCredentials();
     if (isValid) {
       logger().info("Login was accepted .. {}", LocalDateTime.now());
-      notifyOnLogin();
-      captureJCustosVersionSnapshot();
+      // JS-SEC-003 / JS-SEC-060 / JS-SEC-146 (CWE-384): the post-login sequence - session id
+      // rotation, SessionPolicy.onLogin, rotation audit, onSessionRotated hook, security
+      // version snapshot - lives in LoginSessionRotation, shared with the OAuth2 callback.
+      // A rotation the transport refuses is logged there and the login continues.
+      LoginSessionRotation.afterLogin(this::onSessionRotated);
       navigateToApp();
     } else {
       logger().warn("Login was not accepted .. {}", LocalDateTime.now());
       reactOnFailedLogin();
     }
     clearFields();
-  }
-
-  /**
-   * JS-SEC-027: warns once (not per login) when a JCustosVersionStore is
-   * registered but no SubjectIdResolver is resolvable, so drift detection is
-   * silently inert.
-   */
-  private static final java.util.concurrent.atomic.AtomicBoolean DRIFT_INERT_WARNED =
-      new java.util.concurrent.atomic.AtomicBoolean(false);
-
-  /**
-   * Phase 4c-Followup: best-effort capture of the
-   * {@link JCustosVersion} snapshot into
-   * {@link VaadinJCustosVersionContext} so the
-   * {@code JCustosVersionEnforcerListener} can detect drift on
-   * subsequent requests.
-   * <p>
-   * Fires after {@link #notifyOnLogin()} so any session rotation
-   * has already happened and the recorded {@code sessionId}
-   * matches the new servlet session. The capture is a strict
-   * three-way no-op when any prerequisite is missing:
-   * <ol>
-   *   <li>No SPI-registered {@link JCustosVersionStore} (Phase 4a
-   *       not wired) — skip.</li>
-   *   <li>No SPI-registered {@link SubjectIdResolver} — the
-   *       framework cannot derive a {@link SubjectId} from the
-   *       application's typed user, so skip.</li>
-   *   <li>No active Vaadin session / no current subject — skip.</li>
-   * </ol>
-   * Any exception thrown by the resolver, the store, or
-   * {@link VaadinJCustosVersionContext#record} is swallowed —
-   * snapshot capture must never block the login flow.
-   */
-  @SuppressWarnings({"unchecked", "rawtypes"})
-  private void captureJCustosVersionSnapshot() {
-    try {
-      Optional<JCustosVersionStore> storeOpt = JCustosServiceResolver.findJCustosVersionStore();
-      if (storeOpt.isEmpty()) {
-        return;
-      }
-      Optional<SubjectIdResolver<Object>> resolverOpt =
-          JCustosServiceResolver.findSubjectIdResolver();
-      if (resolverOpt.isEmpty()) {
-        // JS-SEC-027 (CWE-636): a version store is registered but no
-        // SubjectIdResolver — the snapshot is never captured, so the drift
-        // enforcer no-ops on every navigation (mid-session revocation is silently
-        // not enforced). Warn once so a manual-SPI integrator gets a runtime
-        // signal (the DX bootstrap fails this as a STRICT/ERROR diagnostic).
-        if (DRIFT_INERT_WARNED.compareAndSet(false, true)) {
-          logger().warn("JCustosVersion drift detection is inert: a JCustosVersionStore "
-              + "is registered but no SubjectIdResolver is resolvable, so no login snapshot is "
-              + "captured and mid-session role/permission revocation will not be enforced. "
-              + "Register a SubjectIdResolver.");
-        }
-        return;
-      }
-      Object subject = currentSubject().orElse(null);
-      if (subject == null) {
-        return;
-      }
-      VaadinSession session = VaadinSession.getCurrent();
-      if (session == null) {
-        return;
-      }
-      SubjectIdResolver<Object> resolver = resolverOpt.get();
-      SubjectId subjectId = resolver.resolve(subject);
-      TenantId tenant = resolver.tenantFor(subject);
-      JCustosVersion snapshot = storeOpt.get()
-          .current(new JCustosVersionKey(tenant, subjectId));
-      WrappedSession wrapped = session.getSession();
-      String sessionId = wrapped == null ? null : wrapped.getId();
-      VaadinJCustosVersionContext.record(session, subjectId, tenant, snapshot, sessionId);
-    } catch (RuntimeException captureFailure) {
-      logger().warn("JCustosVersion snapshot capture failed: {}", captureFailure.toString());
-    }
-  }
-
-  /**
-   * Best-effort notification of {@link SessionPolicy#onLogin(SessionContext)}.
-   * <p>
-   * Fires after a successful {@link #checkCredentials()}. It <em>always</em>
-   * rotates the HTTP session id first (session-fixation mitigation,
-   * secure-by-default — JS-SEC-003 / CWE-384) and only then lets the
-   * configured {@link SessionPolicy} observe the login, so every observer —
-   * the policy's {@code SessionCreated} event, the {@code JCustosVersion}
-   * snapshot and any {@code SessionStore} record created in
-   * {@link #onSessionRotated(String, String)} — sees the id that lives on
-   * (JS-SEC-060). Failures, a missing Vaadin session, or a missing SPI are
-   * silently absorbed — the lifecycle hook must never block the login flow.
-   * <p>
-   * Rotation goes through {@code HttpServletRequest.changeSessionId()} on
-   * the current {@link VaadinServletRequest}: the servlet session object and
-   * with it the {@link VaadinSession}, the just-bound subject and every other
-   * attribute stay in place; only the id changes. Non-servlet transports fall
-   * back to {@link VaadinService#reinitializeSession(VaadinRequest)}. A
-   * {@code SessionInvalidated} audit event is emitted for the <em>old</em>
-   * session id after the policy ran; when the policy returns
-   * {@link SessionDecision.Invalidate Invalidate} its {@code reason} is used,
-   * otherwise the default {@code "RotationAfterLogin"} reason is recorded. The
-   * {@code loginRoute} of an {@code Invalidate} decision is deliberately
-   * ignored in the post-login context: the user proceeds to
-   * {@link #navigateToApp()} on the rotated session. Invalidation
-   * <em>from {@code beforeNavigation}</em> (session expired) follows a
-   * different code path and uses {@code loginRoute} as written.
-   */
-  private void notifyOnLogin() {
-    try {
-      SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
-      Optional<SessionContext<Object>> beforeRotation = buildSessionContext();
-      if (beforeRotation.isEmpty()) {
-        return;
-      }
-      String previousSessionId = beforeRotation.get().sessionId();
-      // JS-SEC-003 / JS-SEC-060 (CWE-384): rotate the HTTP session id on every
-      // successful login, independently of the SessionPolicy decision, and do
-      // it before the policy runs so SessionCreated names the surviving id.
-      boolean rotated = rotateSessionId();
-      SessionContext<Object> context = rotated
-          ? buildSessionContext().orElse(beforeRotation.get())
-          : beforeRotation.get();
-      SessionDecision decision = policy.onLogin(context);
-      String reason = decision instanceof SessionDecision.Invalidate invalidate
-          ? invalidate.reason()
-          : "RotationAfterLogin";
-      if (rotated) {
-        auditRotation(context, previousSessionId, reason);
-        notifySessionRotated(previousSessionId, context.sessionId());
-      }
-    } catch (RuntimeException notifyFailure) {
-      logger().warn("SessionPolicy.onLogin notification failed: {}", notifyFailure.toString());
-    }
-  }
-
-  /**
-   * Rotates the underlying HTTP session id while preserving the
-   * {@link VaadinSession} (and therefore the just-bound subject). Standard
-   * session-fixation mitigation: callers that pass credentials over a
-   * pre-existing session id cannot replay the post-login session because
-   * the id changes here.
-   *
-   * @return {@code true} when the id was rotated, {@code false} when no
-   *         request is bound or the container refused
-   */
-  private boolean rotateSessionId() {
-    VaadinRequest request = VaadinRequest.getCurrent();
-    if (request == null) {
-      return false;
-    }
-    try {
-      if (request instanceof VaadinServletRequest servletRequest) {
-        HttpServletRequest http = servletRequest.getHttpServletRequest();
-        http.changeSessionId();
-        return true;
-      }
-      // Non-servlet transport: the legacy path copies the attributes into a
-      // fresh session. Deprecated for removal from Flow 25.4, kept only here.
-      VaadinService.reinitializeSession(request);
-      return true;
-    } catch (RuntimeException rotationFailure) {
-      logger().warn("Session id rotation after login failed: {}", rotationFailure.toString());
-      return false;
-    }
-  }
-
-  private void notifySessionRotated(String previousSessionId, String currentSessionId) {
-    try {
-      onSessionRotated(previousSessionId, currentSessionId);
-    } catch (RuntimeException hookFailure) {
-      logger().warn("onSessionRotated hook failed: {}", hookFailure.toString());
-    }
   }
 
   /**
@@ -391,93 +209,12 @@ public abstract class LoginView
     // default: nothing to re-key
   }
 
-  private void auditRotation(SessionContext<Object> context, String oldSessionId, String reason) {
-    try {
-      JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
-      sink.publish(new SessionInvalidated(
-          Instant.now(),
-          subjectIdOf(context),
-          oldSessionId,
-          reason == null ? "RotationAfterLogin" : reason));
-    } catch (RuntimeException auditFailure) {
-      // never block login because the audit sink failed
-    }
-  }
-
   // Package-private for direct testing of the id-derivation (R14): the
-  // auditRotation() path itself needs a live Vaadin session, so the
-  // security-relevant logic — never leak subject.toString() — is unit-tested
-  // here in isolation.
+  // security-relevant logic — never leak subject.toString() into the audit
+  // channel — lives in LoginSessionRotation since 00.84.00 and stays reachable
+  // here for the existing tests.
   static String subjectIdOf(SessionContext<Object> context) {
-    Object subject = context.subject();
-    if (subject == null) {
-      return "";
-    }
-    // R14 (V00.76.10): never publish subject.toString() as the audit subject id.
-    // An application user object's toString() commonly serialises email / hash /
-    // internal ids into the audit channel — the leak class R019 / R020-R021
-    // closed on the REST / StepUp / policy paths. Derive a stable id via the
-    // registered SubjectIdResolver (the same resolver the JCustosVersion
-    // snapshot path uses), falling back to a non-PII empty id when none is
-    // registered (audit attribution requires a resolver by design).
-    Optional<SubjectIdResolver<Object>> resolver =
-        JCustosServiceResolver.findSubjectIdResolver();
-    return resolver.map(r -> r.resolve(subject).value()).orElse("");
-  }
-
-  /**
-   * Builds a {@link SessionContext} from the current Vaadin runtime —
-   * subject (best-effort, looked up via the active
-   * {@link SubjectStore} keyed on the application's subject type),
-   * sessionId + createdAt from the {@link WrappedSession}, lastActivity
-   * = createdAt for a fresh login, clientAddress from the
-   * {@link VaadinRequest}.
-   *
-   * @return populated context, or empty when no Vaadin session is bound
-   */
-  private static Optional<SessionContext<Object>> buildSessionContext() {
-    VaadinSession vaadin = VaadinSession.getCurrent();
-    if (vaadin == null) {
-      return Optional.empty();
-    }
-    WrappedSession wrapped = vaadin.getSession();
-    Instant createdAt = wrapped == null
-        ? Instant.now()
-        : Instant.ofEpochMilli(wrapped.getCreationTime());
-    String sessionId = wrapped == null ? null : wrapped.getId();
-    String clientAddress = currentClientAddress();
-    Object subject = currentSubject().orElse(null);
-    return Optional.of(new SessionContext<>(
-        subject, sessionId, createdAt, createdAt, clientAddress, Map.of()));
-  }
-
-  private static Optional<Object> currentSubject() {
-    try {
-      Class<?> subjectType = JCustosServiceResolver
-          .<Object, Object>authenticationService()
-          .subjectType();
-      if (subjectType == null) {
-        return Optional.empty();
-      }
-      SubjectStore store = SubjectStores.findSubjectStore().orElse(null);
-      if (store == null) {
-        return Optional.empty();
-      }
-      @SuppressWarnings({"rawtypes", "unchecked"})
-      Class raw = subjectType;
-      return store.currentSubject(raw).map(value -> (Object) value);
-    } catch (RuntimeException ignored) {
-      return Optional.empty();
-    }
-  }
-
-  /**
-   * JS-SEC-061 (CWE-348): the client address comes from the registered
-   * {@code ClientAddressResolver}, never from {@code getRemoteAddr()} directly,
-   * so a reverse-proxy deployment cannot be keyed on a forgeable header.
-   */
-  private static String currentClientAddress() {
-    return VaadinClientAddress.current().orElse(null);
+    return LoginSessionRotation.subjectIdOf(context);
   }
 
   /**

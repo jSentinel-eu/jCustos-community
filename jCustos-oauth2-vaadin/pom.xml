@@ -51,5 +51,27 @@
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- JS-SEC-146 / JS-SEC-147: the navigation glue is tested through the Vaadin
+         router with real sessions (browserless), recording audit sink and fake
+         authentication service from jCustos-test. -->
+    <dependency>
+      <groupId>eu.jsentinel</groupId>
+      <artifactId>jCustos-test</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.vaadin</groupId>
+      <artifactId>browserless-test-junit6</artifactId>
+      <version>1.0.0</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- the loopback identity provider the real authorization-code flow talks to -->
+    <dependency>
+      <groupId>eu.jsentinel</groupId>
+      <artifactId>jCustos-test-oidc</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 </project>

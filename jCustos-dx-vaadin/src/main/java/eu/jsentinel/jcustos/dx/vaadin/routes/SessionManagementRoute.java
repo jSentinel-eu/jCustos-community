@@ -34,6 +34,12 @@ import eu.jsentinel.jcustos.components.SecuredVisibility.Requirement;
  * emits {@code session-management-view-without-session-store}
  * (STRICT throws, PRODUCTION warns).
  *
+ * <p><strong>Revoke (JS-SEC-131, CWE-613).</strong> Unless the bootstrap
+ * published its own handler, Revoke removes the record from the store
+ * and ends the live session: at once on this node, on the next request
+ * on any other node that reads the same store. It never touches the
+ * session of the administrator who clicks.
+ *
  * <p><strong>Access (JS-SEC-068, CWE-306).</strong> The route is
  * protected by {@link SessionManagementAccess}: a subject must hold
  * the roles and permissions published at bootstrap, otherwise

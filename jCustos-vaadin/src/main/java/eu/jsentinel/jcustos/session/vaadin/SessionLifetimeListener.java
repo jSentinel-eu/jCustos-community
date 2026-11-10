@@ -30,58 +30,77 @@ import eu.jsentinel.jcustos.session.NoopSessionPolicy;
 import eu.jsentinel.jcustos.session.SessionMetadata;
 import eu.jsentinel.jcustos.session.SessionPolicy;
 import eu.jsentinel.jcustos.session.SessionPolicyDecision;
+import com.vaadin.flow.component.PollEvent;
 import com.vaadin.flow.component.UI;
+import com.vaadin.flow.component.PushConfiguration;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
 import com.vaadin.flow.router.ListenerPriority;
-import com.vaadin.flow.router.RouteConfiguration;
-import com.vaadin.flow.server.HandlerHelper;
 import com.vaadin.flow.server.RequestHandler;
 import com.vaadin.flow.server.ServiceInitEvent;
 import com.vaadin.flow.server.UIInitEvent;
 import com.vaadin.flow.server.UIInitListener;
 import com.vaadin.flow.server.VaadinRequest;
+import com.vaadin.flow.server.VaadinRequestInterceptor;
 import com.vaadin.flow.server.VaadinResponse;
+import com.vaadin.flow.server.VaadinService;
 import com.vaadin.flow.server.VaadinServiceInitListener;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.WrappedSession;
 import com.vaadin.flow.shared.Registration;
+import com.vaadin.flow.shared.ui.Transport;
 
+import java.io.IOException;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Vaadin {@link BeforeEnterListener} that consults the
- * {@link SessionPolicy} on every navigation and enforces idle / absolute
- * session lifetime via {@code SessionPolicy.evaluate(SessionMetadata)}.
- * <p>
- * The listener runs at {@link Integer#MAX_VALUE} priority so it fires
+ * Enforces the {@link SessionPolicy} lifetime (idle timeout, absolute lifetime) and the
+ * revocation state of a session on every way a client reaches the server:
+ *
+ * <ul>
+ *   <li>as a {@link BeforeEnterListener} on every navigation - this covers page loads;</li>
+ *   <li>as a {@link RequestHandler} on every UIDL request sent over XHR - button clicks,
+ *       grid paging, {@code @ClientCallable} (JS-SEC-082, CWE-613);</li>
+ *   <li>as a {@link VaadinRequestInterceptor} on every client message that travels through
+ *       the push channel, which is how {@code Transport.WEBSOCKET} delivers them and which
+ *       never reaches a request handler (JS-SEC-155, CWE-613).</li>
+ * </ul>
+ *
+ * <p>The navigation listener runs at {@link Integer#MAX_VALUE} priority so it fires
  * <em>before</em> the
  * {@code eu.jsentinel.jcustos.authorization.impl.AuthorizationListener}
- * (priority {@code MAX_VALUE - 1}). If the session is idle or has
- * exceeded its absolute lifetime, the listener:
+ * (priority {@code MAX_VALUE - 1}). When the session is idle, past its absolute lifetime
+ * or revoked, the listener:
  * <ol>
- *   <li>Removes the cached subject from the {@link SubjectStore} so
- *       downstream filters see an unauthenticated request.</li>
- *   <li>Emits a {@link SessionExpired} audit event with an
- *       {@code IdleTimeout} or {@code AbsoluteLifetimeExceeded} reason.</li>
- *   <li>Forwards the navigation to the configured
- *       {@link LoginView} (resolved through the registered
- *       {@link LoginListener}).</li>
+ *   <li>removes the cached subject from the {@link SubjectStore}, together with the
+ *       security-version snapshot and a bound token credential;</li>
+ *   <li>emits a {@link SessionExpired} audit event with an {@code IdleTimeout} or
+ *       {@code AbsoluteLifetimeExceeded} reason, or {@code SessionInvalidated} with the
+ *       reason {@code Revoked};</li>
+ *   <li>on a navigation forwards to the configured {@link LoginView} (resolved through the
+ *       registered {@link LoginListener}); on a client message closes the Vaadin session,
+ *       invalidates the HTTP session and answers with Vaadin's session-expired message
+ *       <em>instead of</em> executing the message (JS-SEC-155).</li>
  * </ol>
  *
- * <p>For active sessions the listener writes the current time back to a
- * private session attribute so the next navigation observes the
- * advanced last-activity timestamp. Since 00.84.00 (JS-SEC-082, CWE-613) the
- * listener is also a {@link RequestHandler}: every UIDL request - button
- * clicks, grid paging, {@code @ClientCallable} - is evaluated as well, and
- * Vaadin's {@link VaadinSession#getLastRequestTimestamp() last request
- * timestamp} counts as activity, so a user working inside one view is neither
- * left unenforced nor logged out spuriously on the next navigation.
+ * <p><strong>Locking (JS-SEC-155, CWE-667).</strong> Vaadin calls a plain request handler
+ * and a request interceptor <em>without</em> the session lock. Both entry points take the
+ * lock themselves before they read or write session state; with
+ * {@code sessionLockCheckStrategy=throw}, which Vaadin applies outside production mode,
+ * every unlocked access would otherwise fail the request.
+ *
+ * <p><strong>Activity (JS-SEC-155, CWE-613).</strong> The listener keeps its own
+ * last-activity instant in a session attribute. Navigations and client messages advance it;
+ * a message that turns out to be an automatic poll ({@code UI.setPollInterval}) restores the
+ * previous value, so a polling view no longer keeps an unattended session alive. Vaadin's
+ * {@link VaadinSession#getLastRequestTimestamp() last request timestamp} is not used: it is
+ * stamped for polls as well. A message that carries a poll <em>and</em> a user interaction
+ * counts as a poll; the next interaction advances the activity again.
  *
  * <p>The listener is loaded via
  * {@code META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener}.
@@ -90,7 +109,7 @@ import java.util.Optional;
 @ListenerPriority(Integer.MAX_VALUE)
 public class SessionLifetimeListener
     implements VaadinServiceInitListener, UIInitListener, BeforeEnterListener, RequestHandler,
-               HasLogger, Serializable {
+               VaadinRequestInterceptor, HasLogger, Serializable {
 
   @Serial
   private static final long serialVersionUID = 1L;
@@ -99,9 +118,19 @@ public class SessionLifetimeListener
   static final String LAST_ACTIVITY_ATTRIBUTE =
       "eu.jsentinel.jcustos.session.lastActivity";
 
+  /** Request attribute: the activity value before this request advanced it (JS-SEC-155). */
+  static final String ACTIVITY_BEFORE_REQUEST_ATTRIBUTE =
+      "eu.jsentinel.jcustos.session.activityBeforeRequest";
+
+  /** Request attribute: set once a poll was seen in this request (JS-SEC-155). */
+  static final String POLL_SEEN_ATTRIBUTE =
+      "eu.jsentinel.jcustos.session.pollSeen";
+
   /** JS-SEC-035 (CWE-613): warn once when session-lifetime enforcement is inert. */
-  private static final java.util.concurrent.atomic.AtomicBoolean NOOP_POLICY_WARNED =
-      new java.util.concurrent.atomic.AtomicBoolean(false);
+  private static final AtomicBoolean NOOP_POLICY_WARNED = new AtomicBoolean(false);
+
+  /** JS-SEC-155 (CWE-384): warn once when the push transport cannot rotate a session id. */
+  private static final AtomicBoolean WEBSOCKET_TRANSPORT_WARNED = new AtomicBoolean(false);
 
   private final transient Clock clock;
 
@@ -117,16 +146,29 @@ public class SessionLifetimeListener
 
   @Override
   public void serviceInit(ServiceInitEvent event) {
-    event.getSource().addUIInitListener(this);
+    VaadinService service = event.getSource();
+    service.addUIInitListener(this);
+    // JS-SEC-131 (CWE-613): a revoke has to reach the live session, so the service's
+    // sessions are tracked from their start to their destruction.
+    service.addSessionInitListener(init -> VaadinSessionRevocation.track(init.getSession()));
+    service.addSessionDestroyListener(destroy -> VaadinSessionRevocation.untrack(destroy.getSession()));
     // JS-SEC-082 (CWE-613): RPC round-trips never reach beforeEnter - enforce per UIDL request too.
     event.addRequestHandler(this);
+    // JS-SEC-155 (CWE-613): with Transport.WEBSOCKET the messages bypass the request handlers.
+    event.addVaadinRequestInterceptor(this);
   }
 
   @Override
   public void uiInit(UIInitEvent event) {
     UI ui = event.getUI();
     Registration reg = ui.addBeforeEnterListener(this);
-    ui.addDetachListener(e -> reg.remove());
+    // JS-SEC-155 (CWE-613): an automatic poll is no user activity.
+    Registration poll = ui.addPollListener(SessionLifetimeListener::pollSeen);
+    ui.addDetachListener(e -> {
+      reg.remove();
+      poll.remove();
+    });
+    warnIfWebSocketOnly(ui.getPushConfiguration());
   }
 
   @Override
@@ -135,64 +177,143 @@ public class SessionLifetimeListener
     if (session == null) {
       return;
     }
-    evaluate(session).ifPresent(expiry -> {
-      removeSubject(expiry.store());
-      audit(expiry.subjectId(), expiry.reason());
+    endIfDue(session, VaadinRequest.getCurrent()).ifPresent(ending -> {
+      if (ending.revoked()) {
+        // JS-SEC-131 (CWE-613): a revoked session does not live on as an anonymous one.
+        SessionTermination.closeAndInvalidate(session);
+      }
       forwardToLogin(event);
     });
   }
 
   /**
-   * JS-SEC-082 (CWE-613): enforcement per UIDL request. Button clicks, grid paging and
-   * {@code @ClientCallable} calls travel through the UIDL handler and never reach
-   * {@link #beforeEnter(BeforeEnterEvent)}, so a session past its absolute lifetime kept
-   * working inside the current view. This handler is registered through
+   * JS-SEC-082 / JS-SEC-155 (CWE-613, CWE-667): enforcement per UIDL request. Button clicks,
+   * grid paging and {@code @ClientCallable} calls travel through the UIDL handler and never
+   * reach {@link #beforeEnter(BeforeEnterEvent)}. This handler is registered through
    * {@link ServiceInitEvent#addRequestHandler} and therefore runs ahead of the framework
-   * handlers with the session locked: for an expired session it drops the subject, audits
-   * the expiry, sends the browser to the login route and closes the session. The request
-   * is never consumed - the UIDL handler still runs, now without a subject.
+   * handlers. Vaadin calls it <em>without</em> the session lock, so it takes the lock for
+   * the check. For an expired or revoked session it drops the subject, audits, closes the
+   * Vaadin session, invalidates the HTTP session and <em>consumes</em> the request: the
+   * response is Vaadin's session-expired message and the UIDL handler never executes the
+   * RPC invocations the request carries.
+   *
+   * @return {@code true} when the session was ended and the request answered
+   * @since 00.84.00
+   */
+  @Override
+  public boolean handleRequest(VaadinSession session, VaadinRequest request, VaadinResponse response)
+      throws IOException {
+    if (session == null || !SessionTermination.isUidlRequest(request)) {
+      return false;
+    }
+    boolean ended = SessionTermination.underLock(session, Boolean.FALSE, locked -> {
+      Optional<Ending> ending = endIfDue(locked, request);
+      ending.ifPresent(due -> SessionTermination.closeInvalidateAndDestroy(locked));
+      return ending.isPresent();
+    });
+    if (!ended) {
+      return false;
+    }
+    SessionTermination.writeSessionExpired(request, response);
+    return true;
+  }
+
+  /**
+   * JS-SEC-155 (CWE-613): enforcement for client messages that arrive through the push
+   * channel. With {@code @Push(transport = Transport.WEBSOCKET)} Vaadin's {@code PushHandler}
+   * hands every message straight to the RPC handler; the request handlers are not consulted,
+   * but {@code VaadinService.requestStart} - and with it every request interceptor - is. For
+   * an expired or revoked session the interceptor ends the session before the push handler
+   * looks it up, so the handler finds none, sends the session-expired message and drops the
+   * RPC invocations.
    *
    * @since 00.84.00
    */
   @Override
-  public boolean handleRequest(VaadinSession session, VaadinRequest request, VaadinResponse response) {
-    if (session == null || !HandlerHelper.isRequestType(request, HandlerHelper.RequestType.UIDL)) {
-      return false;
+  public void requestStart(VaadinRequest request, VaadinResponse response) {
+    try {
+      if (request == null || !SessionTermination.isPushMessage(request)) {
+        return;
+      }
+      SessionTermination.sessionOf(request).ifPresent(session ->
+          SessionTermination.underLock(session, Boolean.FALSE, locked -> {
+            Optional<Ending> ending = endIfDue(locked, request);
+            // the request will end without a session, so nobody else destroys this one
+            ending.ifPresent(due -> SessionTermination.closeInvalidateAndDestroy(locked));
+            return ending.isPresent();
+          }));
+    } catch (RuntimeException checkFailure) {
+      logger().warn("Session check for a push message failed: {}", checkFailure.toString());
     }
-    evaluate(session).ifPresent(expiry -> {
-      removeSubject(expiry.store());
-      audit(expiry.subjectId(), expiry.reason());
-      redirectToLogin(session, request);
-      session.close();
-    });
-    return false;
   }
 
-  /** An expired session: whose subject to drop and which reason to audit. */
-  private record Expiry(SubjectStore store, String subjectId, String reason) { }
+  @Override
+  public void handleException(VaadinRequest request, VaadinResponse response,
+                              VaadinSession vaadinSession, Exception t) {
+    // nothing to add - the framework reports the failure
+  }
+
+  @Override
+  public void requestEnd(VaadinRequest request, VaadinResponse response, VaadinSession session) {
+    // nothing to release - the check holds the session lock only while it runs
+  }
 
   /**
-   * Evaluates the policy for the bound subject. Advances the private last-activity
-   * attribute for an active session and returns empty; returns the expiry to enforce
-   * otherwise.
+   * Drops the identity of the locked, current session and audits when the policy or the
+   * store says the session is over. Closing the session is left to the caller, because it
+   * differs between the entry points.
    */
-  private Optional<Expiry> evaluate(VaadinSession session) {
+  private Optional<Ending> endIfDue(VaadinSession session, VaadinRequest request) {
+    Optional<Ending> ending = check(session, request);
+    ending.ifPresent(due -> enforce(session, due));
+    return ending;
+  }
+
+  /**
+   * Why a session ends: whose subject to drop and what to audit.
+   *
+   * @param reason the {@link SessionExpired} reason, or {@code null} for a revoked session
+   */
+  private record Ending(SubjectStore store, String subjectId, String sessionId, String reason) {
+    boolean revoked() {
+      return reason == null;
+    }
+  }
+
+  /** The activity value a request found before it advanced it; {@code null} when none. */
+  private record ActivityBefore(Instant value) { }
+
+  /**
+   * Evaluates revocation and lifetime for the bound subject. Advances the last-activity
+   * attribute for an active session and returns empty; returns the ending to enforce
+   * otherwise. The caller holds the session lock.
+   */
+  private Optional<Ending> check(VaadinSession session, VaadinRequest request) {
     Optional<SubjectStore> store = SubjectStores.findSubjectStore();
     if (store.isEmpty()) {
       return Optional.empty();
     }
+    Instant now = Instant.now(clock);
 
     Optional<?> currentSubject = currentSubject(store.get());
     if (currentSubject.isEmpty()) {
+      // Nothing to expire, but the round-trip is activity: a login later in this session
+      // must not inherit a stamp from before the anonymous browsing.
+      recordActivity(session, request, now);
       return Optional.empty();
     }
     String subjectId = subjectIdOf(currentSubject.get());
+    String sessionId = SessionTermination.sessionIdOf(session);
+
+    // JS-SEC-131 (CWE-613): "Revoke" has to end the session, not only edit the store.
+    if (VaadinSessionRevocation.isRevoked(session)) {
+      return Optional.of(new Ending(store.get(), subjectId, sessionId, null));
+    }
 
     Instant createdAt = sessionCreatedAt(session);
     if (createdAt == null) {
       return Optional.empty();
     }
-    Instant now = Instant.now(clock);
     Instant lastActivity = lastActivityOf(session, createdAt);
 
     SessionMetadata metadata = new SessionMetadata(subjectId, createdAt, lastActivity);
@@ -211,87 +332,106 @@ public class SessionLifetimeListener
 
     return switch (decision) {
       case SessionPolicyDecision.Active ignored -> {
-        session.setAttribute(LAST_ACTIVITY_ATTRIBUTE, now);
+        recordActivity(session, request, now);
         yield Optional.empty();
       }
       case SessionPolicyDecision.IdleTimeout ignored ->
-          Optional.of(new Expiry(store.get(), subjectId, SessionExpired.REASON_IDLE_TIMEOUT));
+          Optional.of(new Ending(store.get(), subjectId, sessionId, SessionExpired.REASON_IDLE_TIMEOUT));
       case SessionPolicyDecision.AbsoluteLifetimeExceeded ignored ->
-          Optional.of(new Expiry(store.get(), subjectId, SessionExpired.REASON_ABSOLUTE_LIFETIME));
+          Optional.of(new Ending(store.get(), subjectId, sessionId, SessionExpired.REASON_ABSOLUTE_LIFETIME));
     };
   }
 
+  private static void enforce(VaadinSession session, Ending ending) {
+    SessionTermination.clearIdentity(session, ending.store());
+    if (ending.revoked()) {
+      VaadinSessionRevocation.auditRevoked(ending.subjectId(), ending.sessionId());
+    } else {
+      audit(ending.subjectId(), ending.reason());
+    }
+  }
+
   /**
-   * JS-SEC-082: Vaadin stamps every serviced UIDL request ({@code ServerRpcHandler}); that is
-   * the activity signal of a single-view application, which used to be logged out on its next
-   * navigation because only navigations advanced the private attribute. The attribute remains
-   * for adapters and tests that drive the listener without the request pipeline. The later of
-   * both wins; neither may predate the session.
+   * JS-SEC-155 (CWE-613): the listener's own activity attribute is the only activity signal.
+   * Vaadin's {@code getLastRequestTimestamp()} is stamped for every UIDL message, automatic
+   * polls included, and therefore kept a polling view alive for ever. Neither value may
+   * predate the session.
    */
   private static Instant lastActivityOf(VaadinSession session, Instant createdAt) {
-    Instant latest = createdAt;
-    long stamped = session.getLastRequestTimestamp();
-    if (stamped > 0) {
-      Instant fromVaadin = Instant.ofEpochMilli(stamped);
-      if (fromVaadin.isAfter(latest)) {
-        latest = fromVaadin;
-      }
-    }
     Optional<Instant> fromAttribute = lastActivityAttribute(session);
-    if (fromAttribute.isPresent() && fromAttribute.get().isAfter(latest)) {
-      latest = fromAttribute.get();
-    }
-    return latest;
+    return fromAttribute.isPresent() && fromAttribute.get().isAfter(createdAt)
+        ? fromAttribute.get()
+        : createdAt;
   }
 
-  private static void removeSubject(SubjectStore store) {
-    Class<?> subjectType = resolveSubjectType();
-    if (subjectType != null) {
-      removeSubjectUnchecked(store, subjectType);
-    }
-  }
-
-  private static void redirectToLogin(VaadinSession session, VaadinRequest request) {
-    try {
-      UI ui = session.getService().findUI(request);
-      if (ui != null) {
-        ui.getPage().setLocation(loginUrl(request));
+  /**
+   * Advances the activity attribute and remembers, once per request, the value it replaced,
+   * so {@link #pollSeen(PollEvent)} can take the advance back. A request in which a poll was
+   * already seen does not advance the activity any more.
+   */
+  private static void recordActivity(VaadinSession session, VaadinRequest request, Instant now) {
+    VaadinRequest current = request != null ? request : VaadinRequest.getCurrent();
+    if (current != null) {
+      if (Boolean.TRUE.equals(current.getAttribute(POLL_SEEN_ATTRIBUTE))) {
+        return;
       }
-    } catch (RuntimeException ignored) {
-      // the session is closed regardless; the next round-trip lands on the login page
+      if (current.getAttribute(ACTIVITY_BEFORE_REQUEST_ATTRIBUTE) == null) {
+        current.setAttribute(ACTIVITY_BEFORE_REQUEST_ATTRIBUTE,
+            new ActivityBefore(lastActivityAttribute(session).orElse(null)));
+      }
+    }
+    session.setAttribute(LAST_ACTIVITY_ATTRIBUTE, now);
+  }
+
+  /**
+   * JS-SEC-155 (CWE-613): a poll round-trip is no user activity. The request that carries it
+   * advanced the activity before the message was decoded; restore the value from before.
+   */
+  static void pollSeen(PollEvent event) {
+    if (!event.isFromClient()) {
+      return;
+    }
+    VaadinRequest current = VaadinRequest.getCurrent();
+    VaadinSession session = event.getSource().getSession();
+    if (current == null || session == null) {
+      return;
+    }
+    current.setAttribute(POLL_SEEN_ATTRIBUTE, Boolean.TRUE);
+    if (current.getAttribute(ACTIVITY_BEFORE_REQUEST_ATTRIBUTE) instanceof ActivityBefore before) {
+      session.setAttribute(LAST_ACTIVITY_ATTRIBUTE, before.value());
     }
   }
 
-  private static String loginUrl(VaadinRequest request) {
-    String route = LoginListeners.findLoginListener()
-        .map(LoginListener::loginNavigationTarget)
-        .filter(Objects::nonNull)
-        .map(target -> RouteConfiguration.forSessionScope().getUrl(target))
-        .orElseGet(JCustosServiceResolver::loginRouteName);
-    String contextPath = request.getContextPath();
-    return (contextPath == null ? "" : contextPath) + "/" + route;
+  /**
+   * JS-SEC-155 (CWE-384): start-up diagnostic for {@code @Push(transport = Transport.WEBSOCKET)}.
+   * The lifetime, revocation and drift checks run for WebSocket messages through the request
+   * interceptor, but an HTTP session id cannot be rotated over a WebSocket frame - there is
+   * no response that could carry {@code Set-Cookie}. A login that arrives through the push
+   * channel keeps its pre-login session id.
+   *
+   * @return {@code true} when the transport is WebSocket-only
+   */
+  boolean warnIfWebSocketOnly(PushConfiguration push) {
+    if (push == null || !push.getPushMode().isEnabled() || push.getTransport() != Transport.WEBSOCKET) {
+      return false;
+    }
+    if (WEBSOCKET_TRANSPORT_WARNED.compareAndSet(false, true)) {
+      logger().warn("Push transport WEBSOCKET is active. Session lifetime, revocation and "
+          + "security-version checks run per client message through the request interceptor, but "
+          + "the HTTP session id cannot be rotated over a WebSocket frame (no Set-Cookie): a login "
+          + "that arrives through the push channel keeps its pre-login session id and loses the "
+          + "session-fixation protection. Use Transport.WEBSOCKET_XHR (the Vaadin default), which "
+          + "sends client messages over XHR.");
+    }
+    return true;
   }
 
   private Optional<?> currentSubject(SubjectStore store) {
-    Class<?> subjectType = resolveSubjectType();
+    Class<?> subjectType = SessionTermination.resolveSubjectType();
     if (subjectType == null) {
       return Optional.empty();
     }
     return store.currentSubject(subjectType);
-  }
-
-  private static Class<?> resolveSubjectType() {
-    try {
-      return JCustosServiceResolver.<Object, Object>authenticationService().subjectType();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
-  }
-
-  @SuppressWarnings({"rawtypes", "unchecked"})
-  private static void removeSubjectUnchecked(SubjectStore store, Class<?> subjectType) {
-    Class raw = subjectType;
-    store.deleteCurrentSubject(raw);
   }
 
   private static String subjectIdOf(Object subject) {

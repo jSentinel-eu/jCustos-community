@@ -955,8 +955,9 @@ and the PKCE verifier of an honest server to the token endpoint of a malicious o
 `CallbackParams` the `iss` parameter of the response (RFC 9207), and `OidcProviderMetadata` the
 discovery flag `authorization_response_iss_parameter_supported`. `HttpAuthorizationCodeFlow` rejects
 a response that names another issuer — or none, when the issuer announces the parameter — before it
-consumes the state or contacts the token endpoint; the REST `OAuth2CallbackHandler` passes the
-parameter through.
+consumes the state or contacts the token endpoint; the REST `OAuth2CallbackHandler` and the Vaadin
+`AbstractOAuth2CallbackView` pass the parameter through, and the view refuses a response that names
+several issuers.
 
 `JdkInMemoryStateStore` and `InMemoryNonceStore` used to throw once they were full, so an anonymous
 script calling the login start could make every login fail; they now evict the entry that expires
@@ -1029,6 +1030,61 @@ saturated limiter or a retired algorithm switched the history off; the new `chec
 must exclude `temporarilyUnavailable()`; after an algorithm or pepper migration a history entry that
 can no longer be verified blocks a password change through `evaluate(...)` until it is resolved —
 `check(...)` exposes the reason.
+
+## The per-request session checks take the session lock, consume the request, ignore polls and cover WebSocket messages (SA55, JS-SEC-155, CWE-667, CWE-362, CWE-613)
+
+The fix for JS-SEC-082 was itself defective. Vaadin calls a plain `RequestHandler` without the
+session lock, so `SessionLifetimeListener` and `JCustosVersionEnforcerListener` read and wrote
+session state unsynchronised, and with `sessionLockCheckStrategy=throw` — which Vaadin applies
+outside production mode — every UIDL request ended in "Internal error". Both listeners now take the
+lock for their check and, on expiry or drift, consume the request: the identity is cleared, the
+Vaadin session closed, the HTTP session invalidated, and the client receives Vaadin's
+session-expired message instead of having its RPC executed. Activity is tracked in the listener's
+own attribute; an automatic poll (`UI.setPollInterval`) restores the previous value, so a polling
+view no longer keeps an unattended session alive, and `getLastRequestTimestamp()` is no longer
+consulted.
+
+Both listeners are also `VaadinRequestInterceptor`s, which is the only hook Vaadin calls for
+messages sent over a WebSocket-only push channel;
+`JCustosVersionEnforcerListener.register(ServiceInitEvent)` wires all three entry points, and a
+start-up warning points out that `Transport.WEBSOCKET` cannot rotate a session id. The tests drive
+`VaadinService.handleRequest` from a thread without the session lock and with the strict lock check;
+the WebSocket path is verified at the service level, not with a live Atmosphere connection.
+**Consumers:** the server no longer calls `Page.setLocation(login)` on expiry — the client reloads
+on the session-expired message, and `SystemMessages.sessionExpiredURL` can redirect; a listener
+registered by hand needs `event.addVaadinRequestInterceptor(listener)` or the new `register(event)`.
+
+## "Revoke" ends the session (SA31, JS-SEC-131, CWE-613, CWE-684)
+
+Pressing Revoke in the session management only removed a record from the `SessionStore`; nothing on
+the request path read it, so the revoked user kept working until a timeout, and the wiring the
+Javadoc recommended logged out the administrator who clicked. The new `VaadinSessionRevocation` ends
+the live session on the same node at once — subject, security-version snapshot and token credential
+cleared, `SessionInvalidated` audited with the reason `Revoked`, Vaadin session closed, HTTP session
+invalidated — and `SessionLifetimeListener` checks the record of the current session on every client
+message and navigation, so a session revoked on another node is refused on its next request.
+`SessionManagementContext.publish` registers the store for that check and makes the real termination
+the default revoke of `SessionManagementRoute`. A record with the status `EXPIRED` does not end a
+session: that status is derived from the lifetime policy, which the listener evaluates against the
+live session itself. A store failure during the check is logged and the request proceeds.
+**Consumers:** applications that pass their own revoke callback or store must call
+`VaadinSessionRevocation.revoke` / `terminate` or register the store with `useSessionStore`; the
+REST adapter does not read the session status yet.
+
+## The federated login rotates the session id (SA46, JS-SEC-146, CWE-384)
+
+`AbstractOAuth2CallbackView` bound the tokens into the session the browser had arrived with and
+forwarded; only `LoginView` rotated the session id, in private code. An attacker able to plant a
+session cookie in the victim's browser was therefore logged in as the victim after an OAuth2 or OIDC
+login. The post-login sequence — id rotation, `SessionPolicy.onLogin`, rotation audit,
+`onSessionRotated` hook, security-version snapshot — now lives in the public
+`LoginSessionRotation.afterLogin(...)`, which `LoginView` and the callback view both call. The
+callback view fails closed: if the id cannot be rotated, the login is undone, `SessionInvalidated`
+is audited with the reason `RotationAfterLoginFailed`, the session is ended and the view forwards to
+its error target. `LoginView` keeps its "warn and continue" behaviour, with one correction: a
+rotation that leaves the id unchanged is no longer reported and audited as a rotation.
+**Consumers:** callback views that do not extend the base class must call
+`LoginSessionRotation.afterLogin()` themselves.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

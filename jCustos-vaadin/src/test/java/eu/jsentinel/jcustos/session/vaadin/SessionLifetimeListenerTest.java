@@ -253,8 +253,8 @@ class SessionLifetimeListenerTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-082: Vaadin's last UIDL request timestamp counts as activity")
-  void vaadinLastRequestTimestamp_countsAsActivity() {
+  @DisplayName("JS-SEC-155: Vaadin's last request timestamp is no activity signal, the listener's own attribute is")
+  void vaadinLastRequestTimestamp_isNoActivitySignal() {
     InMemoryVaadinSession session = bindSession(T0);
     SubjectStores.setSubjectStore(new InMemorySubjectStore());
     SubjectStores.subjectStore().setCurrentSubject("alice", String.class);
@@ -263,18 +263,19 @@ class SessionLifetimeListenerTest {
     JCustosServiceResolver.setSessionPolicy(new TimeoutSessionPolicy<>(
         new TimeoutSessionPolicy.Config(Duration.ofMinutes(30), Duration.ofHours(12), false, "/login"),
         Clock.fixed(now, ZoneOffset.UTC), audit));
-    // an RPC round-trip five minutes ago, no navigation since the session was created
-    session.setLastRequestTimestamp(T0.plus(Duration.ofMinutes(40)).toEpochMilli());
-
     SessionLifetimeListener listener = new SessionLifetimeListener(Clock.fixed(now, ZoneOffset.UTC));
+
+    // the listener's own stamp, five minutes old: the session is active
+    session.setAttribute(SessionLifetimeListener.LAST_ACTIVITY_ATTRIBUTE, T0.plus(Duration.ofMinutes(40)));
     RecordingEvent active = new RecordingEvent();
     listener.beforeEnter(active);
-    assertNull(active.forwardTarget, "RPC activity must keep the session alive");
+    assertNull(active.forwardTarget, "recorded user activity must keep the session alive");
     assertTrue(audit.events().isEmpty());
 
-    // without the stamp the very same navigation is an idle timeout (45 min since creation)
-    session.setLastRequestTimestamp(0);
+    // Vaadin stamps getLastRequestTimestamp() for every UIDL message, automatic polls
+    // included. A fresh Vaadin stamp without recorded user activity is an idle session.
     session.setAttribute(SessionLifetimeListener.LAST_ACTIVITY_ATTRIBUTE, null);
+    session.setLastRequestTimestamp(T0.plus(Duration.ofMinutes(44)).toEpochMilli());
     RecordingEvent expired = new RecordingEvent();
     listener.beforeEnter(expired);
     assertSame(StubLoginView.class, expired.forwardTarget);

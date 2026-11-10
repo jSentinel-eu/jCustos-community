@@ -48,9 +48,19 @@ import static java.util.Objects.requireNonNull;
  * {@link SessionStore} as a {@link Grid} row showing tenant,
  * subject, session id, status, created-at, last-activity-at, and
  * the security version snapshot. Each row carries a Revoke button;
- * clicking it invokes the supplied revoke callback (typically
- * {@code LogoutService.logout(subjectId, CurrentSession)} or a
- * direct {@code SessionStore.delete}).
+ * clicking it invokes the supplied revoke callback.
+ *
+ * <p><strong>What Revoke does (JS-SEC-131, CWE-613).</strong> The view
+ * only calls the callback; whether the session ends is the callback's
+ * business. Use {@code VaadinSessionRevocation::revoke}: it removes the
+ * record from the store registered with
+ * {@code VaadinSessionRevocation.useSessionStore(...)}, ends the live
+ * session on this node at once and lets every other node refuse the
+ * session on its next request. A callback that only edits the store ends
+ * nothing unless that store is registered there. Do <em>not</em> wire
+ * {@code LogoutService.logout(subjectId, CurrentSession)}: "current
+ * session" is the session of whoever clicks, so it logs the administrator
+ * out and audits the logout under the target's subject id.
  *
  * <p>Apps integrate by subclassing, annotating with
  * {@code @Route(...)} and the desired permission annotation:
@@ -59,7 +69,7 @@ import static java.util.Objects.requireNonNull;
  *   @RequiresPermission("admin:sessions")
  *   public class AdminSessionsView extends SessionManagementView {
  *     public AdminSessionsView() {
- *       super(MyServices.sessionStore(), MyServices.revoker());
+ *       super(MyServices.sessionStore(), VaadinSessionRevocation::revoke);
  *     }
  *   }
  * }</pre>
@@ -101,10 +111,11 @@ public class SessionManagementView extends Composite<VerticalLayout> implements 
    *
    * @param sessionStore source of session records; non-null
    * @param revoke       callback invoked when an admin clicks
-   *                     Revoke on a row; non-null. Implementations
-   *                     typically delete the record from the store
-   *                     and emit a {@code LogoutPerformed} audit
-   *                     event
+   *                     Revoke on a row; non-null. Use
+   *                     {@code VaadinSessionRevocation::revoke} to end
+   *                     the session; a callback that only deletes the
+   *                     record leaves the live session running
+   *                     (JS-SEC-131)
    */
   public SessionManagementView(SessionStore sessionStore,
                                Consumer<SessionRecord> revoke) {
@@ -135,9 +146,12 @@ public class SessionManagementView extends Composite<VerticalLayout> implements 
     root.addClassName("session-management-view");
     root.setSizeFull();
     root.add(new H1("Active Sessions"));
+    // JS-SEC-131 (CWE-613): the text promises only what the view itself guarantees - it hands
+    // the session to the revoke handler; the handler ends it.
     root.add(new Paragraph(
-        "Inventory of every persisted session. Use Revoke to invalidate "
-            + "a session — the user's next request will be refused."));
+        "Inventory of every persisted session. Revoke hands the selected session to the "
+            + "configured revoke handler. The handler of the session-management route ends "
+            + "the session at once on this server and on its next request on any other."));
     root.add(grid);
 
     refresh();
@@ -162,10 +176,11 @@ public class SessionManagementView extends Composite<VerticalLayout> implements 
         refresh();
       });
       revokeBtn.addThemeVariants(ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_SMALL);
-      // already-revoked / already-expired rows: keep the button
-      // but disable it so the admin sees what happened to the
-      // record without being able to double-revoke.
-      if (record.status() != SessionStatus.ACTIVE) {
+      // already-revoked rows: keep the button but disable it so the admin sees what
+      // happened to the record without being able to double-revoke. JS-SEC-131: an
+      // EXPIRED row stays revocable - a sweeping store derives that status from the
+      // record's own lastActivityAt, so the session behind it may still be live.
+      if (record.status() == SessionStatus.REVOKED) {
         revokeBtn.setEnabled(false);
       }
       return revokeBtn;
