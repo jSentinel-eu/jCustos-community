@@ -3,8 +3,9 @@ package eu.jsentinel.jcustos.oidc.api;
 import static java.util.Objects.requireNonNull;
 
 import java.net.URI;
-import java.util.Arrays;
 import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -57,8 +58,32 @@ public interface PostLogoutRedirectValidator {
    * allowlist ends up permitting the very thing it was written to stop. Query
    * strings and fragments are ignored — they carry no authority.
    *
+   * <p>JS-SEC-119 (CWE-601, CWE-20) — what "exactly" means since 00.84.00:
+   * <ul>
+   *   <li>An {@code http}/{@code https} URI needs a host Java can parse. A name
+   *       such as {@code my_app.example.com} (underscore) leaves
+   *       {@link URI#getHost()} {@code null}; the comparison used to fall back
+   *       to an empty host and thereby matched <em>every</em> other
+   *       unparsable host with the same scheme and path. Such an entry is now
+   *       refused here with an {@link IllegalArgumentException}, and a
+   *       candidate without a parsable host is never allowed.</li>
+   *   <li>A URI with user information ({@code https://anything@app.example.com/})
+   *       is refused as an entry and never allowed as a candidate — the part
+   *       before the {@code @} exists to mislead the reader about the host.</li>
+   *   <li>The default port equals no port: {@code https://app.example.com:443/bye}
+   *       matches the entry {@code https://app.example.com/bye}, and
+   *       {@code :80} likewise for {@code http}.</li>
+   *   <li>For other schemes (native-app redirects) a URI without a parsable
+   *       host is compared on its raw authority, and an opaque URI on its
+   *       scheme-specific part, so that nothing that decides the target drops
+   *       out of the comparison.</li>
+   * </ul>
+   *
    * @param allowed the permitted redirect targets, at least one
    * @return a validator restricted to those targets
+   * @throws IllegalArgumentException when no URI is given, or an entry is an
+   *         {@code http}/{@code https} URI without a parsable host, or an
+   *         entry carries user information
    */
   static PostLogoutRedirectValidator allowOnly(URI... allowed) {
     requireNonNull(allowed, "allowed must not be null");
@@ -68,19 +93,50 @@ public interface PostLogoutRedirectValidator {
               + "use permitAll() if that is what you mean");
     }
     Set<String> permitted = new LinkedHashSet<>();
-    Arrays.stream(allowed)
-        .map(uri -> requireNonNull(uri, "allowed must not contain null"))
-        .map(PostLogoutRedirectValidator::normalize)
-        .forEach(permitted::add);
-    return candidate -> permitted.contains(normalize(candidate));
+    for (URI uri : allowed) {
+      requireNonNull(uri, "allowed must not contain null");
+      // JS-SEC-119 (CWE-601, CWE-20): an entry that cannot be compared on its host is a
+      // configuration error, not an entry with an empty host.
+      permitted.add(normalize(uri).orElseThrow(() -> new IllegalArgumentException(
+          "allowOnly cannot compare '" + uri + "' exactly: an http/https entry needs a host "
+              + "java.net.URI can parse (letters, digits, '-' and '.'; no underscore) and no entry "
+              + "may carry user information ('user@host')")));
+    }
+    // JS-SEC-119: a candidate that cannot be normalised (no parsable host, user information)
+    // is never allowed - it used to match every entry that was equally unparsable.
+    return candidate -> candidate != null
+        && normalize(candidate).map(permitted::contains).orElse(false);
   }
 
-  /** Scheme, host, port and path — the parts that decide where a browser goes. */
-  private static String normalize(URI uri) {
-    String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
-    String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(java.util.Locale.ROOT);
+  /**
+   * Scheme, host, port and path — the parts that decide where a browser goes.
+   * Empty when the URI cannot be compared on those parts (JS-SEC-119).
+   */
+  private static Optional<String> normalize(URI uri) {
+    String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+    if (uri.isOpaque()) {
+      // e.g. a native-app scheme without slashes: everything after the scheme decides
+      return Optional.of(scheme + ":" + uri.getRawSchemeSpecificPart());
+    }
+    boolean web = "http".equals(scheme) || "https".equals(scheme);
+    String rawAuthority = uri.getRawAuthority();
+    if (uri.getRawUserInfo() != null || (rawAuthority != null && rawAuthority.indexOf('@') >= 0)) {
+      return Optional.empty();
+    }
+    String host;
+    if (uri.getHost() != null) {
+      host = uri.getHost().toLowerCase(Locale.ROOT);
+    } else if (web) {
+      return Optional.empty();
+    } else {
+      // registry-based or absent authority of a non-web scheme: compare it as written
+      host = rawAuthority == null ? "" : rawAuthority.toLowerCase(Locale.ROOT);
+    }
     int port = uri.getPort();
+    if (("https".equals(scheme) && port == 443) || ("http".equals(scheme) && port == 80)) {
+      port = -1;
+    }
     String path = uri.getPath() == null || uri.getPath().isEmpty() ? "/" : uri.getPath();
-    return scheme + "://" + host + ":" + port + path;
+    return Optional.of(scheme + "://" + host + ":" + port + path);
   }
 }

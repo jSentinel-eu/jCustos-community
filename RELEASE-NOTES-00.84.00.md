@@ -672,6 +672,22 @@ the token itself. **Consumers:** `SessionStale.sessionId` of REST events is a re
 Verified with the real filter and the real composite audit service: after a version drift no field
 of the event contains the token, and two events of one token share the reference.
 
+## `PostLogoutRedirectValidator.allowOnly` compares the host in every case (SA19, JS-SEC-119, CWE-601, CWE-20)
+
+`allowOnly` promised an exact comparison of scheme, host, port and path, but fell back to an empty
+host when `URI.getHost()` returned `null`. That happens for names Java does not accept as a server
+authority — an underscore as in `my_app.example.com` is enough — and an allow-list with such an
+entry matched every other unparsable host with the same scheme and path, for instance
+`https://evil_site.attacker.test/bye`.
+
+An `http`/`https` entry without a parsable host is now refused with an `IllegalArgumentException`
+when the validator is built, and a candidate without one is never allowed. URIs with user
+information (`https://anything@app.example.com/bye`) are refused on both sides, and the default port
+is normalised, so `https://app.example.com:443/bye` matches the entry without a port. Non-web
+schemes with an unparsable host compare on the raw authority, opaque URIs on their scheme-specific
+part. **Consumers:** an allow-list containing an underscore host or user information now fails at
+start-up; use a name `java.net.URI` parses. The default validator `permitAll()` is unchanged.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
