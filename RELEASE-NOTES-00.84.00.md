@@ -930,6 +930,22 @@ below 2048 bit from any `JwksClient`, drops JSON `null` claims instead of throwi
 `NullPointerException`, and turns any late `RuntimeException` into `MalformedJwt`. **Consumers:** an
 issuer that publishes only weak or encryption keys no longer validates.
 
+## GitHub subjects are keyed on the numeric account id only; pass-through honours the declared audience (SA51, JS-SEC-151, CWE-290, CWE-441)
+
+`GitHubProfile` promised to key a principal on GitHub's immutable numeric account id, yet accepted
+any non-blank `sub` — even with the numeric `id` present. An integrator's adapter that put the
+`login` into `sub` therefore produced `github#<login>`, a name that can change hands. The profile
+now reads the numeric `id` first, accepts a `sub` only if it consists of digits, and throws
+otherwise. `PassThroughStrategy`, the default of `@PropagateToken`, ignored the declared audience
+and forwarded the caller's token unchanged to any downstream service; with a declared audience it
+now forwards the token only when it is known to be issued for that audience and logs
+`propagation/audience-mismatch` otherwise. A call without a declared audience keeps forwarding and
+is reported once as `propagation/pass-through-without-audience`. **Consumers:**
+`@PropagateToken(audience = …)` with pass-through needs an inbound credential whose audience is
+known (for example `OidcAccessToken.fromValidated`) — the stock `RestTokenCredentialFilter` binds a
+bearer token of unknown audience, which is then not forwarded; use the `exchange` strategy for a
+service outside the token's audience. Subjects stored as `github#<login>` no longer map.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

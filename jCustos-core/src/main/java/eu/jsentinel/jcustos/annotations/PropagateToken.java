@@ -39,7 +39,11 @@ import java.lang.annotation.Target;
  *       {@code .propagation(p -> p.strategy(name, ...))}.</li>
  *   <li>{@link #audience()} flows into {@code OutboundCall} so strategy
  *       implementations (in particular {@code TokenExchangeStrategy})
- *       know which downstream audience to mint a token for.</li>
+ *       know which downstream audience to mint a token for. The default
+ *       {@code "pass-through"} strategy honours it as well (JS-SEC-151,
+ *       CWE-441): it forwards the inbound token only when that token is
+ *       known to be issued for the declared audience, and forwards
+ *       nothing otherwise.</li>
  *   <li>{@link #header()} overrides the strategy's default header name
  *       (e.g. {@code "X-Service-Token"} for a custom flow).</li>
  *   <li>{@link #service()} is a logical service name used in
@@ -53,10 +57,26 @@ import java.lang.annotation.Target;
 @JCustosAnnotation(PropagateTokenAdvisor.class)
 public @interface PropagateToken {
 
-  /** Lookup key against the named strategies. Default {@code "pass-through"}. */
+  /**
+   * Lookup key against the named strategies. Default {@code "pass-through"}.
+   *
+   * <p>{@code "pass-through"} hands the downstream service the very token the caller presented.
+   * That service can then act as the user wherever the token is accepted, so pass-through fits
+   * only a downstream service that belongs to the token's audience. For every other service use
+   * {@code "exchange"} (RFC 8693), which obtains a token issued for that service alone.
+   */
   String strategy() default "pass-through";
 
-  /** Declared audience for the downstream call. Default empty. */
+  /**
+   * Declared audience for the downstream call. Default empty.
+   *
+   * <p>With {@code "exchange"} it names the audience the new token is requested for. With
+   * {@code "pass-through"} it is a guard (JS-SEC-151, CWE-441): the inbound token is forwarded
+   * only if its known audience contains this value; a token for another audience, or one whose
+   * audience is unknown, is not forwarded and the call goes out without the header. Leaving it
+   * empty keeps the unguarded pass-through and is reported as
+   * {@code propagation/pass-through-without-audience}.
+   */
   String audience() default "";
 
   /** Override of the strategy's default header name. Default empty (use strategy default). */

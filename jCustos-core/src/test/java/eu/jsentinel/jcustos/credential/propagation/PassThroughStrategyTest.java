@@ -76,4 +76,72 @@ class PassThroughStrategyTest {
   void instanceShared() {
     assertSame(PassThroughStrategy.INSTANCE, PassThroughStrategy.INSTANCE);
   }
+
+  // ── JS-SEC-151 (CWE-441): the declared audience guards the pass-through ──────────
+
+  private static final OutboundCall BILLING_CALL =
+      new OutboundCall("BillingClient", "charge", "billing", Map.of());
+
+  private static OidcAccessToken validatedTokenFor(Object aud) {
+    eu.jsentinel.jcustos.jwt.api.ValidatedJwt jwt = new eu.jsentinel.jcustos.jwt.api.ValidatedJwt(
+        "compact",
+        new eu.jsentinel.jcustos.jwt.api.JoseHeader("RS256", Optional.empty(), Optional.empty()),
+        Map.of("iss", "https://op.example.com", "aud", aud),
+        java.time.Instant.parse("2026-11-10T12:00:00Z"));
+    return OidcAccessToken.fromValidated("user-token", jwt);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-151: aud=api-a with declared audience 'billing' → nothing is forwarded")
+  void foreignAudienceNotForwarded() {
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(validatedTokenFor("api-a"))).isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-151: aud=billing with declared audience 'billing' → the header is forwarded")
+  void matchingAudienceForwarded() {
+    Optional<HeaderValue> r = PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(validatedTokenFor("billing")));
+    assertEquals(new HeaderValue("Authorization", "Bearer user-token"), r.orElseThrow());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-151: a multi-valued aud that contains the declared audience is forwarded")
+  void multiValuedAudienceForwarded() {
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(validatedTokenFor(java.util.List.of("api-a", "billing"))))
+        .isPresent());
+    // the comma-joined form without the validation result is understood as well
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(new BearerToken("t", Optional.empty(),
+            Optional.of("api-a, billing"), Optional.empty()))).isPresent());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-151: a substring of an audience is not a match")
+  void audienceSubstringIsNoMatch() {
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(validatedTokenFor("billing-internal"))).isEmpty());
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(new BearerToken("t", Optional.empty(),
+            Optional.of("not-billing"), Optional.empty()))).isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-151: a token of UNKNOWN audience is not forwarded to a declared audience (fail closed)")
+  void unknownAudienceNotForwarded() {
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(new BearerToken("abc"))).isEmpty());
+    assertTrue(PassThroughStrategy.INSTANCE
+        .resolve(BILLING_CALL, Optional.of(new OidcAccessToken("xyz",
+            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()))).isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-151: without a declared audience the token is forwarded as before, whatever its aud")
+  void noDeclaredAudienceKeepsForwarding() {
+    assertEquals(new HeaderValue("Authorization", "Bearer user-token"),
+        PassThroughStrategy.INSTANCE.resolve(CALL, Optional.of(validatedTokenFor("api-a"))).orElseThrow());
+  }
 }

@@ -36,7 +36,10 @@ class Phase1SmokeTest {
   @DisplayName("InMemoryTokenCredentialStore + PassThroughStrategy → Authorization header")
   void bearerEndToEnd() {
     TokenCredentialStore store = new InMemoryTokenCredentialStore();
-    BearerToken token = new BearerToken("inbound-bearer-value");
+    // JS-SEC-151: CALL declares the audience "api.example.com"; pass-through forwards only a
+    // token that is known to be issued for it.
+    BearerToken token = new BearerToken("inbound-bearer-value",
+        Optional.empty(), Optional.of("api.example.com"), Optional.empty());
     store.bind(token);
 
     Optional<HeaderValue> header = PassThroughStrategy.INSTANCE

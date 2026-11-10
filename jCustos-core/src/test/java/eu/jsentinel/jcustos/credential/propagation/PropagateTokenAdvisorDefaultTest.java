@@ -43,7 +43,9 @@ class PropagateTokenAdvisorDefaultTest {
   void registeredStrategyHappyPath() {
     JCustosServiceResolver.registerOutboundTokenStrategy(
         PassThroughStrategy.NAME, PassThroughStrategy.INSTANCE);
-    store.bind(new BearerToken("abc"));
+    // JS-SEC-151: CALL declares the audience "api.example.com"; pass-through forwards only a
+    // token that is known to be issued for it.
+    store.bind(new BearerToken("abc", Optional.empty(), Optional.of("api.example.com"), Optional.empty()));
 
     Optional<HeaderValue> h = PropagateTokenAdvisor.Default.INSTANCE
         .adviseFor(annotation("pass-through", "", "", ""), CALL, store);
@@ -75,7 +77,9 @@ class PropagateTokenAdvisorDefaultTest {
   void headerOverride() {
     JCustosServiceResolver.registerOutboundTokenStrategy(
         PassThroughStrategy.NAME, PassThroughStrategy.INSTANCE);
-    store.bind(new BearerToken("abc"));
+    // JS-SEC-151: CALL declares the audience "api.example.com"; pass-through forwards only a
+    // token that is known to be issued for it.
+    store.bind(new BearerToken("abc", Optional.empty(), Optional.of("api.example.com"), Optional.empty()));
 
     Optional<HeaderValue> h = PropagateTokenAdvisor.Default.INSTANCE
         .adviseFor(annotation("pass-through", "", "X-Service-Token", ""), CALL, store);
