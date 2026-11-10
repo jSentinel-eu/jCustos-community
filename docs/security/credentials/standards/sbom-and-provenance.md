@@ -28,7 +28,7 @@ includes:
 | Module                          | Cryptographic third-party deps     |
 |---------------------------------|------------------------------------|
 | `jSentinel-core`                 | none — JDK-only                    |
-| `jSentinel-crypto-bc`            | `org.bouncycastle:bcprov-jdk18on:1.78.1` |
+| `jSentinel-crypto-bc`            | `org.bouncycastle:bcprov-jdk18on:1.86` |
 | `jSentinel-credentials-hibp`     | none — JDK-only (`HttpClient`)     |
 | `jSentinel-persistence-eclipsestore` | none crypto-relevant            |
 

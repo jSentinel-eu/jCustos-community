@@ -35,7 +35,10 @@
   </description>
 
   <properties>
-    <proxybuilder.version>00.11.00</proxybuilder.version>
+    <!-- 00.11.01 is the first proxybuilder release whose annotations artefact
+         exists on Maven Central; proxybuilder-annotations 00.11.00 was never
+         published, so the 00.11.00 pin only resolved from a local repository. -->
+    <proxybuilder.version>00.11.01</proxybuilder.version>
   </properties>
 
   <dependencies>

@@ -35,18 +35,22 @@
 
   <properties>
     <!--
-      Pinned at 1.84 — first version that closes both V00.74.10-era
-      Dependabot advisories:
-        * GHSA-p93r-85wp-75v3 / CVE-2026-5598 — Covert timing channel
-          in FrodoEngine (post-quantum KEM). Affected: [1.71, 1.84).
-        * GHSA-c3fc-8qff-9hwx / CVE-2026-0636 — LDAP injection in
-          LDAPStoreHelper. Affected: [1.74, 1.84).
-      Neither code path is exercised by jCustos-crypto-bc (we only
-      use Argon2id / bcrypt / scrypt low-level primitives), so the
-      real exploitation surface is zero. The bump is the right hygiene
-      step anyway and keeps the SBOM clean.
+      Pinned at 1.86. Advisory history of the pin:
+        * 1.84 closed GHSA-p93r-85wp-75v3 / CVE-2026-5598 (covert timing
+          channel in FrodoEngine, affected [1.71, 1.84)) and
+          GHSA-c3fc-8qff-9hwx / CVE-2026-0636 (LDAP injection in
+          LDAPStoreHelper, affected [1.74, 1.84)).
+        * 1.85 closed GHSA-9pwp-9qqc-pr26 / CVE-2026-8763 (name
+          constraints bypassed by a trailing dot) and
+          GHSA-qp49-qgx5-5m26 / CVE-2026-13506 (ASN.1 nesting guard is
+          reset). 1.86 is the current release of the same line.
+      None of these code paths is exercised by jCustos-crypto-bc (it
+      only uses the Argon2id / bcrypt / scrypt low-level primitives),
+      but the jar sits on the consumer's class path, where the
+      application may well use X.509 or ASN.1 parsing. Do not go below
+      1.85.
     -->
-    <bouncycastle.version>1.84</bouncycastle.version>
+    <bouncycastle.version>1.86</bouncycastle.version>
   </properties>
 
   <dependencies>

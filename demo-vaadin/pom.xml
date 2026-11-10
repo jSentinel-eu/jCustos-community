@@ -88,11 +88,27 @@
           the processor need the annotation types on their compile
           classpath even though RetentionPolicy.RUNTIME makes them stay
           around at runtime too.
+
+          The annotations artefact inherits the dependencies of the
+          proxybuilder parent (Dropwizard Metrics 4.1.0, JavaPoet) although
+          its classes reference none of them. Only the processor needs
+          them, and it gets them on the annotation processor path, so they
+          are kept out of the WAR here.
         -->
         <dependency>
             <groupId>com.svenruppert</groupId>
             <artifactId>proxybuilder-annotations</artifactId>
-            <version>00.11.00</version>
+            <version>00.11.01</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.dropwizard.metrics</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.squareup</groupId>
+                    <artifactId>javapoet</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

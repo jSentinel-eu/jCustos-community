@@ -161,9 +161,18 @@
         <failOnMissingWebXml>false</failOnMissingWebXml>
         <vaadin.version>25.3.3</vaadin.version>
         <drivers.downloader.phase>pre-integration-test</drivers.downloader.phase>
-        <jetty.version>12.1.8</jetty.version>
+        <!-- 12.1.15: the Jetty Maven plugin runs the demos only. 12.1.8 pulled
+             a jetty-server with GHSA-7p3p-8qv8-m2vh and GHSA-f4v5-65jj-pcr2
+             (fixed in 12.1.9 and 12.1.10) into the build. -->
+        <jetty.version>12.1.15</jetty.version>
         <slf4j-api.version>2.0.17</slf4j-api.version>
         <junit-jupiter.version>6.1.0</junit-jupiter.version>
+        <!-- Jackson 3 reaches the class path through Vaadin Flow only, Jackson 2
+             through test scope only. Both lines are pinned in
+             <dependencyManagement> and guarded by the enforcer execution
+             ban-vulnerable-jackson; raise the three places together. -->
+        <jackson3.version>3.2.4</jackson3.version>
+        <jackson2.version>2.22.4</jackson2.version>
     </properties>
 
     <!-- Second source next to Maven Central. Central itself is published through
@@ -182,54 +191,28 @@
         </snapshotRepository>
     </distributionManagement>
 
+    <!-- Maven Central is the only repository this build and its published
+         parent POM declare. Everything the reactor needs, Vaadin included, is
+         released there; a third-party host listed here would be asked for every
+         artefact Central does not know, in this build and in every consumer
+         that inherits or resolves this POM. The enforcer execution
+         enforce-repository-hygiene keeps it that way. -->
     <repositories>
-        <!-- The order of definitions matters. Explicitly defining central here to make sure it has the highest priority. -->
         <repository>
             <id>central</id>
             <url>https://repo.maven.apache.org/maven2</url>
             <snapshots>
                 <enabled>false</enabled>
             </snapshots>
-        </repository>
-        <repository>
-            <id>vaadin-prereleases</id>
-            <url>
-                https://maven.vaadin.com/vaadin-prereleases/
-            </url>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </repository>
-        <!-- Repository used by many Vaadin add-ons -->
-        <repository>
-            <id>Vaadin Directory</id>
-            <url>https://maven.vaadin.com/vaadin-addons</url>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        <repository>
-            <id>apache snapshots</id>
-            <url>https://repository.apache.org/content/repositories/snapshots</url>
         </repository>
     </repositories>
 
     <pluginRepositories>
-        <!-- The order of definitions matters. Explicitly defining central here to make sure it has the highest priority. -->
         <pluginRepository>
             <id>central</id>
             <url>https://repo.maven.apache.org/maven2</url>
             <snapshots>
                 <enabled>false</enabled>
-            </snapshots>
-        </pluginRepository>
-        <pluginRepository>
-            <id>vaadin-prereleases</id>
-            <url>
-                https://maven.vaadin.com/vaadin-prereleases/
-            </url>
-            <snapshots>
-                <enabled>true</enabled>
             </snapshots>
         </pluginRepository>
     </pluginRepositories>
@@ -247,6 +230,38 @@
                 <artifactId>core</artifactId>
                 <version>06.02.02</version>
             </dependency>
+            <!--
+              Jackson: com.svenruppert:dependencies:06.02.04 manages
+              tools.jackson.core at 3.2.0 and com.fasterxml.jackson.core at
+              2.22.0. An inherited direct entry beats the Vaadin BOM import, so
+              the reactor resolved 3.2.0 although Flow itself asks for a
+              patched 3.1.x. Both versions carry published advisories
+              (jackson-core: GHSA-7hhh-6rmp-j9qf, GHSA-p6pp-m3f8-5c89;
+              jackson-databind: GHSA-cxp5-3px4-pw24, GHSA-wv8q-qhhj-9h54,
+              GHSA-q4xh-88c3-wmh7 and four of moderate severity). A direct
+              entry here beats the inherited one. Remove these entries only
+              together with a parent that no longer pins a vulnerable version.
+            -->
+            <dependency>
+                <groupId>tools.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>tools.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson2.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson2.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.vaadin</groupId>
                 <artifactId>vaadin-bom</artifactId>
@@ -261,6 +276,21 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <dependencies>
+        <!-- com.svenruppert:dependencies declares spotbugs-annotations for every
+             child in compile scope, which put it and its jsr305 dependency on
+             the class path of every consumer. The annotations only address
+             static analysis and nothing reads them at run time, so they stay
+             available to the compiler and to SpotBugs but are neither exported
+             to consumers nor packaged into the demo applications. -->
+        <dependency>
+            <groupId>com.github.spotbugs</groupId>
+            <artifactId>spotbugs-annotations</artifactId>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
 
     <build>
         <defaultGoal>jetty:run</defaultGoal>
@@ -366,6 +396,73 @@
                             <fail>true</fail>
                         </configuration>
                     </execution>
+                    <!--
+                      Security analysis 2026-11-10, SA38: fails the build as
+                      soon as a Jackson version with a published advisory is
+                      resolved in any scope, directly or transitively. The
+                      pins live in <dependencyManagement>; this rule catches
+                      the case in which a parent upgrade, a BOM import or an
+                      explicit version in a module moves the reactor back.
+                      Jackson 3 is fixed from 3.2.3 on the 3.2 line (the rule
+                      asks for the pinned 3.2.4), Jackson 2 from 2.22.3.
+                      jackson-annotations is versioned separately (2.22) and
+                      therefore not part of the Jackson 2 patterns.
+                    -->
+                    <execution>
+                        <id>ban-vulnerable-jackson</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <excludes>
+                                        <exclude>tools.jackson.core:*:(,3.2.4)</exclude>
+                                        <exclude>com.fasterxml.jackson.core:jackson-core:(,2.22.3)</exclude>
+                                        <exclude>com.fasterxml.jackson.core:jackson-databind:(,2.22.3)</exclude>
+                                    </excludes>
+                                    <message>A Jackson version with published advisories is on the class path. Keep jackson3.version / jackson2.version in the community parent at or above the fixed versions.</message>
+                                </bannedDependencies>
+                            </rules>
+                            <fail>true</fail>
+                        </configuration>
+                    </execution>
+                    <!--
+                      Security analysis 2026-11-10, SA41: plugins are code that
+                      runs inside the build, and a repository is a host that
+                      is trusted to deliver it. The first rule fails the build
+                      when a module or an activated profile adds a repository
+                      other than Maven Central or the project's own registry
+                      repo.jsentinel.eu; the second one fails it when a plugin
+                      is used without a pinned version, because Maven would
+                      then pick whatever the repository metadata names.
+                    -->
+                    <execution>
+                        <id>enforce-repository-hygiene</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedRepositories>
+                                    <allowedRepositories>
+                                        <allowedRepository>https://repo.maven.apache.org/maven2</allowedRepository>
+                                        <allowedRepository>https://repo.jsentinel.eu/*</allowedRepository>
+                                    </allowedRepositories>
+                                    <allowedPluginRepositories>
+                                        <allowedPluginRepository>https://repo.maven.apache.org/maven2</allowedPluginRepository>
+                                        <allowedPluginRepository>https://repo.jsentinel.eu/*</allowedPluginRepository>
+                                    </allowedPluginRepositories>
+                                </bannedRepositories>
+                                <requirePluginVersions>
+                                    <banLatest>true</banLatest>
+                                    <banRelease>true</banRelease>
+                                    <banSnapshots>true</banSnapshots>
+                                </requirePluginVersions>
+                            </rules>
+                            <fail>true</fail>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
 
@@ -404,11 +501,6 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-resources-plugin</artifactId>
-            </plugin>
-
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-repository-plugin</artifactId>
             </plugin>
 
             <!--Enable mutation testing-->

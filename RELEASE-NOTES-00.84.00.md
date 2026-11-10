@@ -1118,6 +1118,49 @@ declare that version yourself or import the vendor's BOM (for Vaadin: `com.vaadi
 dependency without a version that the BOM used to cover now fails with "version is missing", which
 names exactly the entries to add. The jCustos coordinates and versions are unchanged.
 
+## Jackson is pinned to patched releases and the build rejects vulnerable ones (SA38, JS-SEC-138, CWE-1395, CWE-400)
+
+The inherited parent POM managed Jackson 3 at 3.2.0. That entry took precedence over the version
+Vaadin Flow asks for, so every Vaadin-facing module resolved `jackson-core` and `jackson-databind`
+3.2.0, which carry nine published advisories between them, three of them rated high. The community
+parent now manages both artefacts at 3.2.4, and the Jackson 2 line used in test scope at 2.22.4. A
+new enforcer rule fails the build of any module in which a Jackson 3 release below 3.2.4, or a
+`jackson-core` or `jackson-databind` 2.x release below 2.22.3, is resolved in any scope.
+**Consumers:** applications that depend on `jCustos-vaadin` and build with Maven 4 now receive
+Jackson 3.2.4 instead of 3.2.0; with Maven 3 the version declared by Vaadin Flow applies as before.
+If you pin Jackson yourself, keep it at 3.1.7 or later on the 3.1 line, or 3.2.3 or later on the 3.2
+line.
+
+## Bouncy Castle 1.86 and Jetty Maven plugin 12.1.15 (SA40, JS-SEC-140, CWE-295, CWE-674, CWE-400)
+
+`jCustos-crypto-bc` shipped Bouncy Castle 1.84, which is affected by CVE-2026-8763 (name constraints
+bypassed by a trailing dot, rated critical) and CVE-2026-13506 (the ASN.1 nesting guard is reset,
+rated high). jCustos itself only calls the Argon2id, bcrypt and scrypt primitives, but the jar is on
+the class path of every application that uses the module. It is now 1.86. The Jetty Maven plugin
+that runs the demo applications moves from 12.1.8 to 12.1.15, which removes two moderate advisories
+from the build. **Consumers:** applications using `jCustos-crypto-bc` receive `bcprov-jdk18on` 1.86;
+if you pin Bouncy Castle yourself, do not go below 1.85. Stored password hashes are unaffected.
+
+## The build resolves from Maven Central only, and annotation-only artefacts no longer reach consumers (SA41, JS-SEC-141, CWE-829, CWE-494, CWE-1357, CWE-1104)
+
+Four things are corrected. Both annotation processors depended on `proxybuilder-annotations`
+00.11.00, a version that was never published, so the released processors could only be resolved on a
+machine that had it installed locally; they now use 00.11.01, which is on Maven Central. The
+community parent POM declared three third-party repositories, two of them with snapshots enabled,
+and used one plugin without a version; every consumer resolving that POM inherited the repositories.
+It now declares Maven Central only, the build no longer forces update checks, and an enforcer rule
+fails the build when a repository other than Maven Central and the project's own registry or an
+unversioned plugin appears. `spotbugs-annotations`, and with it `jsr305`, was a compile dependency
+of every module and therefore of every consumer; it is now provided and optional. The demo
+applications no longer package Dropwizard Metrics 4.1.0 and JavaPoet, which arrived through the
+annotations artefact.
+
+**Consumers:** `jsr305` and `spotbugs-annotations` disappear from your class path; add them yourself
+if your own code uses them. If you wire `jCustos-processor` or `jCustos-propagation-processor` and
+declare `proxybuilder-annotations`, use 00.11.01 and exclude `io.dropwizard.metrics` and
+`com.squareup:javapoet` from it. Builds that relied on the Vaadin pre-release or add-on repositories
+being inherited from the jCustos parent must declare them themselves.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
