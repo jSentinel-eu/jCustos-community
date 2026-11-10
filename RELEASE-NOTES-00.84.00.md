@@ -688,6 +688,23 @@ schemes with an unparsable host compare on the raw authority, opaque URIs on the
 part. **Consumers:** an allow-list containing an underscore host or user information now fails at
 start-up; use a name `java.net.URI` parses. The default validator `permitAll()` is unchanged.
 
+## The OAuth2 REST callback is bound to the browser by default, and the binding cannot be weakened (SA20, JS-SEC-120, CWE-352, CWE-565)
+
+The two-argument constructor of `OAuth2CallbackHandler` installed `CallbackStateBinding.unbound()`
+and merely logged a warning: any caller presenting a still-open `state` completed the login, which
+is the login CSRF the binding of 00.81.00 was introduced to stop. That constructor now binds with
+`CallbackStateBinding.hostCookie()`; a callback without the `__Host-JCustosOAuth2State` cookie is
+answered with a generic `400` and the single-use `state` stays unconsumed. An integration that binds
+`state` itself says so by name with `OAuth2CallbackHandler.withoutUserAgentBinding(flow, sink)`, and
+every handler built without a binding logs `oauth2/state-unbound`.
+
+The cookie binding itself is tightened: `hostCookie(String)` and `hostCookieHeader(String, String)`
+reject names without the `__Host-` prefix — without it the browser guarantees neither the host
+binding nor `Path=/` — and a callback carrying the binding cookie twice, or several `Cookie` header
+lines, does not match. **Consumers:** code that used the two-argument constructor must emit
+`CallbackStateBinding.hostCookieHeader(state)` when it starts the flow, or switch to the explicitly
+unbound factory; custom cookie names need the `__Host-` prefix.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

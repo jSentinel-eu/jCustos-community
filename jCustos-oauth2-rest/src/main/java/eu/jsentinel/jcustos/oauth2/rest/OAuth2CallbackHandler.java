@@ -74,12 +74,18 @@ import java.util.Optional;
  * {@code 400} and the single-use {@code state} stays unconsumed. Use
  * {@link CallbackStateBinding#hostCookie()} together with
  * {@link CallbackStateBinding#hostCookieHeader(String)} on the start side.
- * The two-argument constructor keeps the pre-V00.81 unbound behavior for
- * integrations that bind state themselves (e.g. in the {@link TokenSink}) and
- * logs the open login-CSRF surface once at construction
- * ({@code oauth2/state-unbound}). The Vaadin adapter's
- * {@code VaadinSessionStateStore} already binds state to the
- * {@code VaadinSession} and needs no extra step.
+ *
+ * <p>JS-SEC-120 (CWE-352, CWE-565): since 00.84.00 the binding is the default.
+ * The two-argument constructor binds with
+ * {@link CallbackStateBinding#hostCookie()}; up to 00.83.00 it installed
+ * {@link CallbackStateBinding#unbound()} and merely logged a warning, which
+ * left the login-CSRF surface open for every integration that took the short
+ * constructor. An integration that binds {@code state} itself (e.g. in the
+ * {@link TokenSink}) says so by name through
+ * {@link #withoutUserAgentBinding(AuthorizationCodeFlow, TokenSink)}; a handler
+ * built without a binding logs {@code oauth2/state-unbound} at construction.
+ * The Vaadin adapter's {@code VaadinSessionStateStore} already binds state to
+ * the {@code VaadinSession} and needs no extra step.
  */
 public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
 
@@ -101,27 +107,33 @@ public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
   private final CallbackStateBinding stateBinding;
 
   /**
-   * Pre-V00.81 constructor — no user-agent binding. Only for integrations that
-   * bind {@code state} to the caller themselves; logs the open login-CSRF
-   * surface once at construction.
+   * Binds the callback to the user-agent with
+   * {@link CallbackStateBinding#hostCookie()}: the callback is accepted only
+   * when it carries the {@code __Host-JCustosOAuth2State} cookie the
+   * application set with {@link CallbackStateBinding#hostCookieHeader(String)}
+   * when it started the flow.
+   *
+   * <p><strong>Behaviour change in 00.84.00 (JS-SEC-120, CWE-352).</strong> Up
+   * to 00.83.00 this constructor installed no binding. An integration that
+   * does not emit the cookie on the start side now receives {@code 400} on
+   * every callback; either emit the cookie or state the exception explicitly
+   * with {@link #withoutUserAgentBinding(AuthorizationCodeFlow, TokenSink)}.
    *
    * @param flow      the authorization-code flow
    * @param tokenSink receives the callback outcome
    */
   public OAuth2CallbackHandler(AuthorizationCodeFlow flow, TokenSink tokenSink) {
-    this(flow, tokenSink, CallbackStateBinding.unbound());
-    logger().warn("oauth2/state-unbound: callback state is not bound to the user-agent — "
-        + "any caller presenting a valid state completes the login (login-CSRF surface). "
-        + "Pass CallbackStateBinding.hostCookie() and emit "
-        + "CallbackStateBinding.hostCookieHeader(state) at startRequest(...) time, "
-        + "or keep binding state yourself in the TokenSink.");
+    // JS-SEC-120 (CWE-352): secure default - the short constructor no longer means "unbound".
+    this(flow, tokenSink, CallbackStateBinding.hostCookie());
   }
 
   /**
    * @param flow         the authorization-code flow
    * @param tokenSink    receives the callback outcome
    * @param stateBinding binds the callback to the user-agent that started the
-   *                     flow; evaluated fail-closed before the flow runs
+   *                     flow; evaluated fail-closed before the flow runs.
+   *                     Passing {@link CallbackStateBinding#unbound()} is
+   *                     allowed and logged as {@code oauth2/state-unbound}
    * @since 00.81.00
    */
   public OAuth2CallbackHandler(AuthorizationCodeFlow flow, TokenSink tokenSink,
@@ -129,6 +141,43 @@ public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
     this.flow = Objects.requireNonNull(flow, "flow");
     this.tokenSink = Objects.requireNonNull(tokenSink, "tokenSink");
     this.stateBinding = Objects.requireNonNull(stateBinding, "stateBinding");
+    if (!isUserAgentBound()) {
+      // JS-SEC-120 (CWE-352): choosing no binding is possible, never silent.
+      logger().warn("oauth2/state-unbound: callback state is not bound to the user-agent — "
+          + "any caller presenting a valid state completes the login (login-CSRF surface). "
+          + "Use CallbackStateBinding.hostCookie() and emit "
+          + "CallbackStateBinding.hostCookieHeader(state) at startRequest(...) time, "
+          + "unless the TokenSink binds state to the caller itself.");
+    }
+  }
+
+  /**
+   * A handler <em>without</em> user-agent binding — the explicitly named way to
+   * the pre-00.84.00 behaviour of the two-argument constructor (JS-SEC-120).
+   * Only for integrations that bind {@code state} to the caller themselves,
+   * for example in the {@link TokenSink} or in a wrapping filter. Logs
+   * {@code oauth2/state-unbound} at construction.
+   *
+   * @param flow      the authorization-code flow
+   * @param tokenSink receives the callback outcome
+   * @return a handler that accepts every callback with a valid {@code state}
+   * @since 00.84.00
+   */
+  public static OAuth2CallbackHandler withoutUserAgentBinding(AuthorizationCodeFlow flow,
+                                                              TokenSink tokenSink) {
+    return new OAuth2CallbackHandler(flow, tokenSink, CallbackStateBinding.unbound());
+  }
+
+  /**
+   * Whether this handler binds the callback to the user-agent, that is:
+   * whether it was built with anything but {@link CallbackStateBinding#unbound()}.
+   * For start-up diagnostics.
+   *
+   * @return {@code false} only for a handler without user-agent binding
+   * @since 00.84.00
+   */
+  public boolean isUserAgentBound() {
+    return !(stateBinding instanceof UnboundCallbackStateBinding);
   }
 
   @Override

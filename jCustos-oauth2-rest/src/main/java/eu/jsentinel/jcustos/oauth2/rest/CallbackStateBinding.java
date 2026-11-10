@@ -42,11 +42,12 @@ package eu.jsentinel.jcustos.oauth2.rest;
  */
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.rest.RestHeaderLines;
 import eu.jsentinel.jcustos.rest.RestRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Map;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -70,14 +71,31 @@ import java.util.Objects;
  * constant time). The {@code __Host-} prefix pins the cookie to this origin,
  * {@code Secure; HttpOnly; SameSite=Lax; Path=/}.
  *
+ * <p>JS-SEC-120 (CWE-352, CWE-565): the prefix is what makes the binding hold —
+ * a browser refuses a {@code __Host-} cookie that a sibling subdomain tries to
+ * set for the parent domain. Cookie names without the prefix are therefore
+ * rejected, and a callback that carries the binding cookie more than once (or
+ * several {@code Cookie} header lines) does not match: with two candidates the
+ * binding would be whichever one an attacker managed to plant first.
+ *
  * @since 00.81.00
  */
 @ExperimentalJCustosApi
 @FunctionalInterface
 public interface CallbackStateBinding {
 
+  /**
+   * Cookie-name prefix every binding cookie must carry (JS-SEC-120). The
+   * browser accepts a {@code __Host-} cookie only with {@code Secure},
+   * {@code Path=/} and without a {@code Domain} attribute, which pins it to
+   * the exact origin.
+   *
+   * @since 00.84.00
+   */
+  String HOST_COOKIE_PREFIX = "__Host-";
+
   /** Default cookie carrying the state binding. */
-  String DEFAULT_COOKIE_NAME = "__Host-JCustosOAuth2State";
+  String DEFAULT_COOKIE_NAME = HOST_COOKIE_PREFIX + "JCustosOAuth2State";
 
   /** Cookie attributes for the binding cookie (5-minute lifetime, origin-pinned). */
   String COOKIE_ATTRIBUTES = "; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300";
@@ -103,17 +121,18 @@ public interface CallbackStateBinding {
 
   /**
    * The {@code __Host-} cookie binding with a custom cookie name. The callback
-   * matches only when the named cookie is present and its value equals the
-   * {@code state} parameter (constant-time comparison).
+   * matches only when the named cookie is present exactly once and its value
+   * equals the {@code state} parameter (constant-time comparison).
    *
-   * @param cookieName cookie name; must not be {@code null} or blank
+   * @param cookieName cookie name; must start with {@link #HOST_COOKIE_PREFIX}
+   *                   and must not be {@code null} or blank
    * @return fail-closed cookie binding
+   * @throws IllegalArgumentException when the name is blank, contains
+   *         characters illegal in a cookie name, or lacks the {@code __Host-}
+   *         prefix (JS-SEC-120)
    */
   static CallbackStateBinding hostCookie(String cookieName) {
-    Objects.requireNonNull(cookieName, "cookieName");
-    if (cookieName.isBlank()) {
-      throw new IllegalArgumentException("cookieName must not be blank");
-    }
+    requireHostCookieName(cookieName);
     return (state, request) -> {
       String cookieValue = cookieValue(request, cookieName);
       if (cookieValue == null || cookieValue.isBlank()) {
@@ -130,10 +149,16 @@ public interface CallbackStateBinding {
    * integrations that already bind {@code state} to the caller themselves
    * (e.g. in the {@code TokenSink} or a wrapping filter).
    *
+   * <p>JS-SEC-120: this is never a default. A handler gets it only when the
+   * application asks for it by name — through this factory or
+   * {@link OAuth2CallbackHandler#withoutUserAgentBinding} — and
+   * {@link OAuth2CallbackHandler} logs the open login-CSRF surface
+   * ({@code oauth2/state-unbound}) whenever it is constructed with it.
+   *
    * @return permissive binding
    */
   static CallbackStateBinding unbound() {
-    return (state, request) -> true;
+    return UnboundCallbackStateBinding.INSTANCE;
   }
 
   /**
@@ -151,13 +176,31 @@ public interface CallbackStateBinding {
    * Builds the {@code Set-Cookie} header value for a custom cookie name.
    * Rejects control characters in {@code state} (header-injection guard).
    *
-   * @param cookieName cookie name; must not be {@code null} or blank
+   * @param cookieName cookie name; must start with {@link #HOST_COOKIE_PREFIX}
+   *                   and must not be {@code null} or blank
    * @param state      the state key returned by {@code startRequest(...)}
    * @return {@code Set-Cookie} header value
+   * @throws IllegalArgumentException when the name lacks the {@code __Host-}
+   *         prefix (JS-SEC-120) or name or state contain illegal characters
    */
   static String hostCookieHeader(String cookieName, String state) {
-    Objects.requireNonNull(cookieName, "cookieName");
+    requireHostCookieName(cookieName);
     Objects.requireNonNull(state, "state");
+    for (int i = 0; i < state.length(); i++) {
+      char c = state.charAt(i);
+      if (c < 0x20 || c == 0x7F || c == ';' || c == ',') {
+        throw new IllegalArgumentException("state contains characters illegal in a cookie value");
+      }
+    }
+    return cookieName + "=" + state + COOKIE_ATTRIBUTES;
+  }
+
+  /**
+   * Validates a binding-cookie name: non-blank, legal cookie-name characters
+   * and the {@code __Host-} prefix followed by at least one character.
+   */
+  private static void requireHostCookieName(String cookieName) {
+    Objects.requireNonNull(cookieName, "cookieName");
     if (cookieName.isBlank()) {
       throw new IllegalArgumentException("cookieName must not be blank");
     }
@@ -170,42 +213,41 @@ public interface CallbackStateBinding {
         throw new IllegalArgumentException("cookieName contains characters illegal in a cookie name");
       }
     }
-    for (int i = 0; i < state.length(); i++) {
-      char c = state.charAt(i);
-      if (c < 0x20 || c == 0x7F || c == ';' || c == ',') {
-        throw new IllegalArgumentException("state contains characters illegal in a cookie value");
-      }
+    // JS-SEC-120 (CWE-352, CWE-565): without the prefix the browser guarantees neither the host
+    // binding nor Path=/ - a sibling subdomain could plant the cookie for the parent domain and
+    // satisfy the binding with the attacker's own state (login CSRF).
+    if (!cookieName.startsWith(HOST_COOKIE_PREFIX) || cookieName.length() == HOST_COOKIE_PREFIX.length()) {
+      throw new IllegalArgumentException(
+          "cookieName must start with '" + HOST_COOKIE_PREFIX + "' followed by a name: "
+              + "only a __Host- cookie binds the callback to this origin");
     }
-    return cookieName + "=" + state + COOKIE_ATTRIBUTES;
   }
 
+  /**
+   * The value of the binding cookie, or {@code null} when the request does not
+   * carry it exactly once.
+   */
   private static String cookieValue(RestRequest request, String cookieName) {
-    String header = header(request, "Cookie");
-    if (header == null) {
+    // adapters differ in header-name casing; headerValues compares case-insensitively
+    List<String> cookieLines = request.headerValues(RestHeaderLines.COOKIE);
+    // JS-SEC-120 / JS-SEC-113: no Cookie header, or more than one line of it - a user-agent
+    // sends exactly one. Several lines are no basis for a binding decision.
+    if (cookieLines == null || cookieLines.size() != 1 || cookieLines.get(0) == null) {
       return null;
     }
     String prefix = cookieName + "=";
-    for (String part : header.split(";")) {
+    String found = null;
+    for (String part : cookieLines.get(0).split(";")) {
       String candidate = part.trim();
       if (candidate.startsWith(prefix)) {
-        return candidate.substring(prefix.length());
+        if (found != null) {
+          // JS-SEC-120 (CWE-565): two cookies of the binding name. Taking the first one is the
+          // known weakness of double-submit cookies - a planted cookie would win. Fail closed.
+          return null;
+        }
+        found = candidate.substring(prefix.length());
       }
     }
-    return null;
-  }
-
-  private static String header(RestRequest request, String name) {
-    Map<String, String> headers = request.headers();
-    String direct = headers.get(name);
-    if (direct != null) {
-      return direct;
-    }
-    // adapters differ in header-name casing; fall back to a case-insensitive scan
-    for (Map.Entry<String, String> entry : headers.entrySet()) {
-      if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(name)) {
-        return entry.getValue();
-      }
-    }
-    return null;
+    return found;
   }
 }
