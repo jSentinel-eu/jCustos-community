@@ -1277,6 +1277,20 @@ characters with the `sref-` marker, in the log line and in `SessionStale.session
 alike; dashboards call `SessionRef.of` to compute it. An identifier of 16 hex characters without the
 marker is still hashed.
 
+## The stock REST credential filter binds a token with a known audience (addition to SA51, JS-SEC-151, CWE-441)
+
+Since pass-through honours the declared audience, `@PropagateToken(audience = ...)` forwarded
+nothing behind `RestTokenCredentialFilter`, which bound every bearer token as a `BearerToken` of
+unknown audience. The filter now keeps a credential that is already bound for the token of the
+request, and otherwise validates the token through a `JwtValidator` — the one passed to the new
+constructor `RestTokenCredentialFilter(store, validator)`, or the one a `.jwt(...)` bootstrap
+installed — and binds `OidcAccessToken.fromValidated(...)`, whose audience is the validated `aud`
+claim. Without a validator, or for a token the validator does not accept, it binds a `BearerToken`
+of unknown audience as before. `PassThroughStrategy` is unchanged: a token issued for another
+audience, or of unknown audience, is not forwarded to a declared one. **Consumers:** applications
+with `.jwt(...)` and the stock filter get the known audience without a change, at the cost of one
+more validation per request; a resolver that binds the validated token itself avoids it.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
