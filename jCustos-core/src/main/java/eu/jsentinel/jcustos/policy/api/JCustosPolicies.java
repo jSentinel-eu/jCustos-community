@@ -80,6 +80,12 @@ public final class JCustosPolicies {
    * {@code [start, end)} window in the JVM-default timezone.
    * Useful for "business hours only" patterns.
    *
+   * <p>JS-SEC-157: the gate looks at no subject, but it is not an anonymous
+   * gate. {@code @RequiresPolicy} and {@code JCustosEnforcer.requirePolicy}
+   * refuse a request without an authenticated subject before the window is
+   * checked; wrap the policy in {@link #anonymous(Policy)} if anonymous
+   * callers inside the window are intended.
+   *
    * @param policyName non-blank policy name
    * @param start      inclusive lower bound (e.g. {@code 09:00})
    * @param end        exclusive upper bound (e.g. {@code 17:00})
@@ -305,6 +311,12 @@ public final class JCustosPolicies {
    * prefixes only; for IPv6 / proxy-chain scenarios use a custom
    * predicate.
    *
+   * <p>JS-SEC-157: the allow-list restricts <em>authenticated</em> requests to
+   * the listed networks. {@code @RequiresPolicy} and
+   * {@code JCustosEnforcer.requirePolicy} refuse a request without an
+   * authenticated subject before the address is looked at; wrap the policy in
+   * {@link #anonymous(Policy)} if the address alone is meant to open the door.
+   *
    * @param policyName     non-blank policy name
    * @param ipAttributeKey context attribute key holding the request IP
    * @param allowedCidrs   IPv4 CIDR ranges (e.g. {@code "10.0.0.0/8"})
@@ -329,6 +341,35 @@ public final class JCustosPolicies {
         .allowIf(allowed)
         .deny("request IP not in allow-list " + cidrs)
         .build();
+  }
+
+  /**
+   * Opts a policy in to anonymous evaluation (JS-SEC-157, CWE-306): the
+   * returned copy is evaluated by {@code @RequiresPolicy} and
+   * {@code JCustosEnforcer.requirePolicy} even when the request carries no
+   * authenticated subject. Without the opt-in those paths answer
+   * <em>unauthenticated</em> and never consult the policy.
+   *
+   * <pre>
+   * registry.register(JCustosPolicies.anonymous(
+   *     JCustosPolicies.ipAllowList("status.office-only", "clientAddress", "10.0.0.0/8")));
+   * </pre>
+   *
+   * <p>Use it only where a resource is meant to be reachable without signing
+   * in. The opt-in belongs to the registered policy itself: for
+   * {@link #allOf(String, Policy...)} and {@link #anyOf(String, Policy...)}
+   * the combined policy decides, the flags of its children are not consulted.
+   *
+   * @param policy the policy to open for anonymous requests; non-null
+   * @return a copy of {@code policy} with {@link Policy#allowsAnonymous()} set
+   * @see PolicyBuilder#allowAnonymous()
+   * @since 00.84.00
+   */
+  public static Policy anonymous(Policy policy) {
+    Objects.requireNonNull(policy, "policy");
+    return switch (policy) {
+      case NamedPolicy named -> named.allowingAnonymous();
+    };
   }
 
   /**

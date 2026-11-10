@@ -20,6 +20,7 @@ import eu.jsentinel.jcustos.authorization.annotations.RequiresPolicy;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
+import eu.jsentinel.jcustos.policy.api.JCustosPolicies;
 import eu.jsentinel.jcustos.policy.api.Policy;
 import eu.jsentinel.jcustos.policy.api.PolicyDecision;
 import eu.jsentinel.jcustos.policy.api.SubjectPredicates;
@@ -111,8 +112,8 @@ class RestPolicyIntegrationTest {
   }
 
   @Test
-  @DisplayName("anonymous request is forbidden (403); policy treats absence of subject as no role")
-  void anonymousForbidden() throws NoSuchMethodException {
+  @DisplayName("JS-SEC-157: anonymous request is unauthenticated (401 + Bearer challenge), the policy is not consulted")
+  void anonymousUnauthenticated() throws NoSuchMethodException {
     RecordingResponse response = new RecordingResponse();
     AtomicBoolean executed = new AtomicBoolean();
     RestAuthorizationFilter filter = new RestAuthorizationFilter(request -> Optional.empty());
@@ -124,10 +125,55 @@ class RestPolicyIntegrationTest {
         securedMethod());
 
     // Subject resolves to empty → filter skips session check, AccessContext
-    // carries Optional.empty() subject → policy returns Denied → 403.
-    assertEquals(403, response.status);
-    assertEquals("Forbidden", response.body);
+    // carries Optional.empty() subject → RequiresPolicyEvaluator answers
+    // Unauthenticated before the policy runs → 401. Up to 00.83.00 the policy ran
+    // with an empty subject and this was a 403.
+    assertEquals(401, response.status);
+    assertEquals("Unauthorized", response.body);
+    assertEquals(HttpStatusDecisionMapper.BEARER_CHALLENGE,
+        response.headers.get(RestHeaders.WWW_AUTHENTICATE));
     assertFalse(executed.get());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: a subject-free policy (ipAllowList) does not open the route to an anonymous request")
+  void anonymousSubjectFreePolicyUnauthenticated() throws NoSuchMethodException {
+    registry.register(JCustosPolicies.ipAllowList(
+        "test.policy", RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE, "10.0.0.0/8"));
+    RecordingResponse response = new RecordingResponse();
+    AtomicBoolean executed = new AtomicBoolean();
+    RestAuthorizationFilter filter = new RestAuthorizationFilter(request -> Optional.empty());
+
+    filter.authorizeAndHandle(
+        requestFrom("10.1.2.3"),
+        response,
+        (req, res) -> executed.set(true),
+        securedMethod());
+
+    assertEquals(401, response.status);
+    assertFalse(executed.get(), "an address inside the allow-list is not an authentication");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: the same policy, opted in with JCustosPolicies.anonymous, admits the anonymous request")
+  void anonymousOptInPolicyGranted() throws NoSuchMethodException {
+    registry.register(JCustosPolicies.anonymous(JCustosPolicies.ipAllowList(
+        "test.policy", RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE, "10.0.0.0/8")));
+    RecordingResponse response = new RecordingResponse();
+    AtomicBoolean executed = new AtomicBoolean();
+    RestAuthorizationFilter filter = new RestAuthorizationFilter(request -> Optional.empty());
+
+    filter.authorizeAndHandle(
+        requestFrom("10.1.2.3"),
+        response,
+        (req, res) -> {
+          executed.set(true);
+          res.status(204);
+        },
+        securedMethod());
+
+    assertTrue(executed.get(), "the explicit opt-in keeps anonymous policies possible");
+    assertEquals(204, response.status);
   }
 
   @Test
@@ -182,6 +228,36 @@ class RestPolicyIntegrationTest {
   private static RestRequest request() {
     return new RestAuthorizationFilterTest.SimpleRestRequest(
         "DELETE", "/api/documents/42", Map.of(), Map.of());
+  }
+
+  /** A request whose transport reports {@code peer} as the connection peer (default resolver). */
+  private static RestRequest requestFrom(String peer) {
+    return new RestRequest() {
+      @Override
+      public String method() {
+        return "DELETE";
+      }
+
+      @Override
+      public String path() {
+        return "/api/documents/42";
+      }
+
+      @Override
+      public Map<String, String> headers() {
+        return Map.of();
+      }
+
+      @Override
+      public Map<String, String> queryParameters() {
+        return Map.of();
+      }
+
+      @Override
+      public String remoteAddress() {
+        return peer;
+      }
+    };
   }
 
   private static JCustosSubject subject(Set<RoleName> roles) {

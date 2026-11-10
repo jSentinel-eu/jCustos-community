@@ -27,6 +27,7 @@ import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
+import eu.jsentinel.jcustos.policy.api.JCustosPolicies;
 import eu.jsentinel.jcustos.policy.api.Policy;
 import eu.jsentinel.jcustos.policy.api.PolicyDecision;
 import eu.jsentinel.jcustos.policy.api.PolicyDecisions;
@@ -37,14 +38,20 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.lang.annotation.Annotation;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -138,7 +145,7 @@ class RequiresPolicyEvaluatorTest {
   }
 
   @Test
-  @DisplayName("anonymous subject + policy that denies anonymous → Forbidden with empty subjectId in audit")
+  @DisplayName("JS-SEC-157: anonymous subject → Unauthenticated(no-subject), audited with empty subjectId")
   void anonymousSubjectAudited() {
     registry.register(Policy.named("p")
         .allowIf(SubjectPredicates.hasRole("ADMIN"))
@@ -148,18 +155,147 @@ class RequiresPolicyEvaluatorTest {
     AuthorizationDecision decision = new RequiresPolicyEvaluator()
         .evaluate(anonymousCtx(), annotationFor("p"));
 
-    assertInstanceOf(AuthorizationDecision.Forbidden.class, decision);
+    // Up to 00.83.00 this was Forbidden: the policy ran with an empty subject. A missing
+    // subject is a missing authentication, whatever the policy would have said.
+    AuthorizationDecision.Unauthenticated unauthenticated =
+        assertInstanceOf(AuthorizationDecision.Unauthenticated.class, decision);
+    assertEquals(RequiresPolicyEvaluator.REASON_NO_SUBJECT, unauthenticated.reason());
 
     PolicyEvaluated audit = auditSink.singlePolicyEvent();
     // JCustosSubject is absent, subjectId reflects that.
     assertNull(audit.subjectId());
+    assertEquals("p", audit.policyName());
+    assertEquals("Denied", audit.decision());
+    assertEquals(RequiresPolicyEvaluator.REASON_NO_SUBJECT, audit.reason());
+  }
+
+  // ── JS-SEC-157 (CWE-306, CWE-684): policy paths require authentication ──
+
+  /** 12:00 UTC, inside the window of {@link #businessHours()}. */
+  private static final Clock NOON = Clock.fixed(Instant.parse("2026-11-10T12:00:00Z"), ZoneOffset.UTC);
+
+  private static Policy businessHours() {
+    return JCustosPolicies.timeWindow(
+        "business-hours", LocalTime.of(9, 0), LocalTime.of(17, 0), ZoneOffset.UTC, NOON);
+  }
+
+  private static AccessContext ctxFromAddress(Optional<JCustosSubject> subject, String address) {
+    return new AccessContext(
+        subject, "rest-endpoint", "/reports", "read", Map.of("clientAddress", address));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: timeWindow inside the window grants no anonymous request")
+  void timeWindowDoesNotGrantAnonymously() {
+    registry.register(businessHours());
+
+    AuthorizationDecision decision = new RequiresPolicyEvaluator()
+        .evaluate(anonymousCtx(), annotationFor("business-hours"));
+
+    assertInstanceOf(AuthorizationDecision.Unauthenticated.class, decision);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: ipAllowList with a matching address grants no anonymous request")
+  void ipAllowListDoesNotGrantAnonymously() {
+    registry.register(JCustosPolicies.ipAllowList("office", "clientAddress", "10.0.0.0/8"));
+
+    AuthorizationDecision decision = new RequiresPolicyEvaluator()
+        .evaluate(ctxFromAddress(Optional.empty(), "10.66.66.66"), annotationFor("office"));
+
+    assertInstanceOf(AuthorizationDecision.Unauthenticated.class, decision);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: without a subject the policy is not consulted at all")
+  void anonymousRequestDoesNotEvaluateThePolicy() {
+    AtomicInteger evaluations = new AtomicInteger();
+    registry.register(Policy.named("p")
+        .allowIf(c -> {
+          evaluations.incrementAndGet();
+          return true;
+        })
+        .build());
+
+    AuthorizationDecision decision = new RequiresPolicyEvaluator()
+        .evaluate(anonymousCtx(), annotationFor("p"));
+
+    assertInstanceOf(AuthorizationDecision.Unauthenticated.class, decision);
+    assertEquals(0, evaluations.get(), "an anonymous request must not reach the predicates");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: with a subject the subject-free policies decide as before")
+  void subjectFreePoliciesUnchangedWithSubject() {
+    registry.register(businessHours());
+    registry.register(JCustosPolicies.ipAllowList("office", "clientAddress", "10.0.0.0/8"));
+    JCustosSubject user = new JCustosSubject("u-1", "user", Set.of(), Set.of());
+
+    assertInstanceOf(AuthorizationDecision.Granted.class, new RequiresPolicyEvaluator()
+        .evaluate(ctxWithSubject(user), annotationFor("business-hours")));
+    assertInstanceOf(AuthorizationDecision.Granted.class, new RequiresPolicyEvaluator()
+        .evaluate(ctxFromAddress(Optional.of(user), "10.1.2.3"), annotationFor("office")));
+    assertInstanceOf(AuthorizationDecision.Forbidden.class, new RequiresPolicyEvaluator()
+        .evaluate(ctxFromAddress(Optional.of(user), "203.0.113.50"), annotationFor("office")));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: a policy that opted in through JCustosPolicies.anonymous grants anonymously")
+  void optInThroughWrapperGrantsAnonymously() {
+    registry.register(JCustosPolicies.anonymous(businessHours()));
+    registry.register(JCustosPolicies.anonymous(
+        JCustosPolicies.ipAllowList("office", "clientAddress", "10.0.0.0/8")));
+
+    assertInstanceOf(AuthorizationDecision.Granted.class, new RequiresPolicyEvaluator()
+        .evaluate(anonymousCtx(), annotationFor("business-hours")));
+    assertInstanceOf(AuthorizationDecision.Granted.class, new RequiresPolicyEvaluator()
+        .evaluate(ctxFromAddress(Optional.empty(), "10.1.2.3"), annotationFor("office")));
+    // opted in means "evaluated", not "granted": outside the allow-list the policy still denies
+    assertInstanceOf(AuthorizationDecision.Forbidden.class, new RequiresPolicyEvaluator()
+        .evaluate(ctxFromAddress(Optional.empty(), "203.0.113.50"), annotationFor("office")));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: a policy that opted in through PolicyBuilder.allowAnonymous grants anonymously")
+  void optInThroughBuilderGrantsAnonymously() {
+    registry.register(Policy.named("status.public").allowIf(c -> true).allowAnonymous().build());
+
+    AuthorizationDecision decision = new RequiresPolicyEvaluator()
+        .evaluate(anonymousCtx(), annotationFor("status.public"));
+
+    assertInstanceOf(AuthorizationDecision.Granted.class, decision);
+    assertEquals("Allowed", auditSink.singlePolicyEvent().decision());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: the opt-in is explicit — default false, the wrapper copies and leaves the original closed")
+  void optInIsExplicit() {
+    Policy closed = businessHours();
+    Policy open = JCustosPolicies.anonymous(closed);
+
+    assertFalse(closed.allowsAnonymous(), "a shipped subject-free policy is not anonymous by default");
+    assertTrue(open.allowsAnonymous());
+    assertEquals(closed.name(), open.name());
+    assertFalse(Policy.named("p").allowIf(c -> true).build().allowsAnonymous());
+    assertFalse(registry.allowsAnonymous("not-registered"), "an unknown policy never allows anonymous");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: an unknown policy answers an anonymous request with Unauthenticated")
+  void unknownPolicyAnonymousIsUnauthenticated() {
+    AuthorizationDecision decision = new RequiresPolicyEvaluator()
+        .evaluate(anonymousCtx(), annotationFor("missing"));
+
+    assertInstanceOf(AuthorizationDecision.Unauthenticated.class, decision);
   }
 
   @Test
   @DisplayName("unknown policy → Forbidden(\"unknown policy: ...\") and emits PolicyEvaluated(Denied)")
   void unknownPolicyDeniesGracefully() {
+    // JS-SEC-157: evaluated with a subject - an anonymous request no longer reaches the lookup.
+    JCustosSubject user = new JCustosSubject("u-user", "user", Set.of(), Set.of());
     AuthorizationDecision decision = new RequiresPolicyEvaluator()
-        .evaluate(anonymousCtx(), annotationFor("missing"));
+        .evaluate(ctxWithSubject(user), annotationFor("missing"));
 
     AuthorizationDecision.Forbidden forbidden =
         assertInstanceOf(AuthorizationDecision.Forbidden.class, decision);
@@ -226,8 +362,9 @@ class RequiresPolicyEvaluatorTest {
   @Test
   @DisplayName("non-ResourceRef attribute value is ignored, resourceRef stays empty")
   void nonResourceRefAttributeIgnored() {
+    // JS-SEC-157: needs a subject, otherwise the capturing predicate is never reached.
     AccessContext ctx = new AccessContext(
-        Optional.empty(),
+        Optional.of(new JCustosSubject("u-1", "u-1", Set.of(), Set.of())),
         "rest-endpoint",
         "/x",
         "read",

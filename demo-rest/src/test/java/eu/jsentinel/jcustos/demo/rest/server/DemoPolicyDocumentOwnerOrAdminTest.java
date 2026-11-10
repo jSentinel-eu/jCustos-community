@@ -126,16 +126,15 @@ class DemoPolicyDocumentOwnerOrAdminTest {
   }
 
   @Test
-  @DisplayName("Unauthenticated request falls through to default-deny → 403")
-  void unauthenticatedIs403() throws IOException, InterruptedException {
-    // Without a subject the policy chain's allowIf hasRole(...) is
-    // false and orIf ownerMatchesSubject is false (no subject id to
-    // compare against), so the default deny branch wins. The
-    // RequiresPolicyEvaluator maps Denied → Forbidden, not
-    // Unauthenticated, so the perimeter response is 403.
+  @DisplayName("Unauthenticated request is refused before the policy runs → 401")
+  void unauthenticatedIs401() throws IOException, InterruptedException {
+    // JS-SEC-157: without a subject the RequiresPolicyEvaluator answers
+    // Unauthenticated before the policy is consulted, so the perimeter
+    // response is 401 (it used to fall through to the policy's default
+    // deny and came back as 403).
     HttpResponse<String> response = client.call(
         "GET", DemoEndpoints.OWNED_DOCUMENT_BY_ID + "1", null, null);
-    assertEquals(FORBIDDEN.code(), response.statusCode());
+    assertEquals(UNAUTHORIZED.code(), response.statusCode());
   }
 
   private String login(String username, String password)

@@ -62,6 +62,7 @@ public final class PolicyBuilder {
   private final List<StepUpRule> stepUpRules = new ArrayList<>();
   private final List<Predicate<PolicyContext>> allowPredicates = new ArrayList<>();
   private String defaultDenyReason = GENERIC_DEFAULT_DENY_REASON;
+  private boolean allowAnonymous;
 
   /**
    * Internal step-up rule: a predicate plus the step-up method and
@@ -164,6 +165,25 @@ public final class PolicyBuilder {
   }
 
   /**
+   * Opts the policy in to anonymous evaluation (JS-SEC-157, CWE-306).
+   *
+   * <p>Without this call a request that carries no authenticated subject is
+   * refused as <em>unauthenticated</em> by {@code @RequiresPolicy} and
+   * {@code JCustosEnforcer.requirePolicy(...)} before the policy is consulted.
+   * Call it only for a policy that is meant to guard something reachable
+   * without signing in — an office-network gate in front of a status page,
+   * say — and whose predicates do not assume a subject.
+   *
+   * @return this builder
+   * @see Policy#allowsAnonymous()
+   * @since 00.84.00
+   */
+  public PolicyBuilder allowAnonymous() {
+    this.allowAnonymous = true;
+    return this;
+  }
+
+  /**
    * Builds the policy.
    *
    * @return policy
@@ -181,6 +201,7 @@ public final class PolicyBuilder {
         List.copyOf(denyPredicates),
         List.copyOf(stepUpRules),
         List.copyOf(allowPredicates),
-        defaultDenyReason);
+        defaultDenyReason,
+        allowAnonymous);
   }
 }

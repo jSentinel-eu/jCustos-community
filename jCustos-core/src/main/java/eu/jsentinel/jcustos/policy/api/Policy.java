@@ -57,6 +57,28 @@ public sealed interface Policy permits NamedPolicy {
   PolicyDecision evaluate(PolicyContext context);
 
   /**
+   * Whether this policy may decide a request that carries no authenticated
+   * subject (JS-SEC-157, CWE-306).
+   *
+   * <p>The enforcement paths — {@code @RequiresPolicy} through
+   * {@code RequiresPolicyEvaluator} and {@code JCustosEnforcer.requirePolicy(...)} —
+   * answer an anonymous request with <em>unauthenticated</em> before the policy
+   * is evaluated at all. A policy that looks at no subject
+   * ({@code timeWindow}, {@code ipAllowList}) would otherwise admit everybody
+   * who happens to match, signed in or not. Only a policy that opted in
+   * explicitly, through {@link PolicyBuilder#allowAnonymous()} or
+   * {@link JCustosPolicies#anonymous(Policy)}, is evaluated for an anonymous
+   * request.
+   *
+   * @return {@code true} when the policy opted in to anonymous evaluation;
+   *         {@code false} by default
+   * @since 00.84.00
+   */
+  default boolean allowsAnonymous() {
+    return false;
+  }
+
+  /**
    * Starts a fluent builder for a policy with the given name.
    *
    * @param name unique, non-blank policy name

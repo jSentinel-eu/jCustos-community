@@ -31,17 +31,40 @@ final class NamedPolicy implements Policy {
   private final List<PolicyBuilder.StepUpRule> stepUpRules;
   private final List<Predicate<PolicyContext>> allowPredicates;
   private final String defaultDenyReason;
+  private final boolean allowAnonymous;
 
   NamedPolicy(String name,
               List<Predicate<PolicyContext>> denyPredicates,
               List<PolicyBuilder.StepUpRule> stepUpRules,
               List<Predicate<PolicyContext>> allowPredicates,
               String defaultDenyReason) {
+    this(name, denyPredicates, stepUpRules, allowPredicates, defaultDenyReason, false);
+  }
+
+  NamedPolicy(String name,
+              List<Predicate<PolicyContext>> denyPredicates,
+              List<PolicyBuilder.StepUpRule> stepUpRules,
+              List<Predicate<PolicyContext>> allowPredicates,
+              String defaultDenyReason,
+              boolean allowAnonymous) {
     this.name = name;
     this.denyPredicates = denyPredicates;
     this.stepUpRules = stepUpRules;
     this.allowPredicates = allowPredicates;
     this.defaultDenyReason = defaultDenyReason;
+    this.allowAnonymous = allowAnonymous;
+  }
+
+  /** JS-SEC-157 (CWE-306): the explicit opt-in to anonymous evaluation. */
+  @Override
+  public boolean allowsAnonymous() {
+    return allowAnonymous;
+  }
+
+  /** @return a copy of this policy that opted in to anonymous evaluation */
+  NamedPolicy allowingAnonymous() {
+    return new NamedPolicy(
+        name, denyPredicates, stepUpRules, allowPredicates, defaultDenyReason, true);
   }
 
   @Override

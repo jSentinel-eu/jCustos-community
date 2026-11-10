@@ -44,6 +44,12 @@ import java.util.Optional;
  * <ol>
  *   <li>Resolve the configured {@link PolicyRegistry} via
  *       {@link JCustosServiceResolver#policyRegistry()}.</li>
+ *   <li>JS-SEC-157 (CWE-306): a request without an authenticated subject is
+ *       answered with {@code Unauthenticated} before the policy runs, unless
+ *       the policy opted in to anonymous evaluation
+ *       ({@link eu.jsentinel.jcustos.policy.api.Policy#allowsAnonymous()}). A
+ *       policy that looks at no subject — a time window, an address
+ *       allow-list — used to admit anonymous callers.</li>
  *   <li>Build a {@link PolicyContext} from the inbound
  *       {@link AccessContext}.</li>
  *   <li>Evaluate the named policy. If the policy is not registered, the
@@ -66,6 +72,15 @@ import java.util.Optional;
 public final class RequiresPolicyEvaluator
     implements AuthorizationEvaluator<RequiresPolicy> {
 
+  /**
+   * Reason carried by the {@code Unauthenticated} decision and the
+   * {@link PolicyEvaluated} audit event when a policy that did not opt in to
+   * anonymous evaluation meets a request without a subject (JS-SEC-157).
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_NO_SUBJECT = "no-subject";
+
   /** Creates a new evaluator instance. */
   public RequiresPolicyEvaluator() {
   }
@@ -78,6 +93,15 @@ public final class RequiresPolicyEvaluator
         context, policyName, resourceRef, Map.of());
 
     PolicyRegistry registry = JCustosServiceResolver.policyRegistry();
+
+    // JS-SEC-157 (CWE-306, CWE-684): a policy path is an authenticated path. Without a subject
+    // the policy is not consulted - a subject-free policy (timeWindow, ipAllowList) would grant
+    // to anybody who matches. Only a policy that opted in explicitly decides anonymous requests.
+    if (context.subject().isEmpty() && !registry.allowsAnonymous(policyName)) {
+      publish(PolicyDecision.denied(REASON_NO_SUBJECT), policyContext);
+      return AuthorizationDecision.unauthenticated(REASON_NO_SUBJECT);
+    }
+
     PolicyDecision policyDecision = registry.evaluate(policyName, policyContext);
 
     publish(policyDecision, policyContext);

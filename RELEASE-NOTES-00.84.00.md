@@ -636,6 +636,24 @@ as an immediate measure let HAProxy replace the header with `http-request set-he
 `HttpServer`: two lines, the client's first, resolve to the proxy's value, and an `ipAllowList`
 policy denies.
 
+## Policy paths require an authenticated subject (SA57, JS-SEC-157, CWE-306, CWE-684)
+
+`JCustosEnforcer.requirePolicy` promised an `AccessDeniedException` when no subject is bound, but
+evaluated the policy with an empty subject, and `RequiresPolicyEvaluator` did the same. A policy
+that looks at no subject — `JCustosPolicies.timeWindow`, `ipAllowList` — therefore admitted
+anonymous callers: a route carrying only `@RequiresPolicy("business-hours")` was open to everybody
+during business hours.
+
+Both paths now answer a request without a subject as unauthenticated before the policy is consulted:
+`RequiresPolicyEvaluator` returns `Unauthenticated("no-subject")`, `requirePolicy` throws. A policy
+that is meant to decide anonymous requests says so explicitly, with `PolicyBuilder.allowAnonymous()`
+or `JCustosPolicies.anonymous(policy)`; `Policy.allowsAnonymous()` and
+`PolicyRegistry.allowsAnonymous(name)` expose the opt-in. **Consumers:** an anonymous request to a
+policy-protected REST route now receives `401` with a `Bearer` challenge instead of `403`, and
+deployments that relied on a subject-free policy as a public gate must opt that policy in. A custom
+`PolicyRegistry` whose `find` does not return its policies overrides `allowsAnonymous(String)` to
+opt in. With a subject nothing changes.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

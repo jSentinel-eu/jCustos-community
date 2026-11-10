@@ -69,4 +69,23 @@ public interface PolicyRegistry {
    * @return decision
    */
   PolicyDecision evaluate(String name, PolicyContext context);
+
+  /**
+   * Whether the named policy may decide a request without an authenticated
+   * subject (JS-SEC-157, CWE-306). The enforcement paths ask this before they
+   * evaluate a policy for an anonymous request; {@code false} makes them answer
+   * <em>unauthenticated</em>.
+   *
+   * <p>The default looks the policy up through {@link #find(String)} and reads
+   * {@link Policy#allowsAnonymous()}; an unknown policy does not allow
+   * anonymous evaluation. Registries that keep policies elsewhere override it.
+   *
+   * @param name policy name
+   * @return {@code true} only when the policy is known and opted in
+   * @since 00.84.00
+   */
+  default boolean allowsAnonymous(String name) {
+    Optional<Policy> policy = find(name);
+    return policy != null && policy.map(Policy::allowsAnonymous).orElse(false);
+  }
 }

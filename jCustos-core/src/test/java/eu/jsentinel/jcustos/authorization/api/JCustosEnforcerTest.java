@@ -34,9 +34,11 @@ import eu.jsentinel.jcustos.authorization.api.roles.HasRoles;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
+import eu.jsentinel.jcustos.policy.api.JCustosPolicies;
 import eu.jsentinel.jcustos.policy.api.Policy;
 import eu.jsentinel.jcustos.policy.api.PolicyContext;
 import eu.jsentinel.jcustos.policy.api.PolicyDecision;
+import eu.jsentinel.jcustos.policy.impl.InMemoryPolicyRegistry;
 import eu.jsentinel.jcustos.policy.spi.PolicyRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,6 +46,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -319,6 +325,69 @@ class JCustosEnforcerTest {
     assertEquals("document", captured[0].resourceType());
     assertEquals("doc-42", captured[0].resourceName());
     assertEquals("read", captured[0].operation());
+  }
+
+  // ── JS-SEC-157 (CWE-306, CWE-684): requirePolicy requires a subject ──
+
+  /** A window that contains the fixed clock: the policy itself always allows. */
+  private static Policy businessHours() {
+    return JCustosPolicies.timeWindow("business-hours", LocalTime.of(9, 0), LocalTime.of(17, 0),
+        ZoneOffset.UTC, Clock.fixed(Instant.parse("2026-11-10T12:00:00Z"), ZoneOffset.UTC));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: requirePolicy without a bound subject throws, although the policy would allow")
+  void requirePolicyWithoutSubjectThrows() {
+    InMemoryPolicyRegistry registry = new InMemoryPolicyRegistry();
+    registry.register(businessHours());
+    JCustosServiceResolver.setPolicyRegistry(registry);
+
+    AccessDeniedException ex = assertThrows(AccessDeniedException.class,
+        () -> JCustosEnforcer.requirePolicy("business-hours"));
+    assertTrue(ex.getMessage().contains("business-hours"));
+    assertTrue(ex.getMessage().contains("no subject"));
+    assertThrows(AccessDeniedException.class,
+        () -> JCustosEnforcer.requirePolicy("business-hours", "document", "doc-42", "read"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: requirePolicy without a subject does not evaluate the policy")
+  void requirePolicyWithoutSubjectDoesNotEvaluate() {
+    // FixedRegistry.evaluate would answer Allowed; it must not be asked.
+    policies.bind("any-policy", PolicyDecision.allowed("ok"));
+
+    assertThrows(AccessDeniedException.class, () -> JCustosEnforcer.requirePolicy("any-policy"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: with a bound subject the same policy passes as before")
+  void requirePolicyWithSubjectUnchanged() {
+    InMemoryPolicyRegistry registry = new InMemoryPolicyRegistry();
+    registry.register(businessHours());
+    JCustosServiceResolver.setPolicyRegistry(registry);
+    bind(new TestUser("alice", Set.of(), Set.of()));
+
+    assertDoesNotThrow(() -> JCustosEnforcer.requirePolicy("business-hours"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: a policy that opted in to anonymous evaluation passes without a subject")
+  void requirePolicyAnonymousOptIn() {
+    InMemoryPolicyRegistry registry = new InMemoryPolicyRegistry();
+    registry.register(JCustosPolicies.anonymous(businessHours()));
+    JCustosServiceResolver.setPolicyRegistry(registry);
+
+    assertDoesNotThrow(() -> JCustosEnforcer.requirePolicy("business-hours"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-157: enforce on @RequiresPolicy without a subject throws, although the policy would allow")
+  void enforceRequiresPolicyWithoutSubjectThrows() throws Exception {
+    policies.bind("doc.policy", PolicyDecision.allowed("ok"));
+    Method m = MixedClass.class.getMethod("policy");
+
+    assertThrows(AccessDeniedException.class,
+        () -> JCustosEnforcer.enforce(m, MixedClass.class));
   }
 
   // ── enforce(...) generic path ─────────────────────────────────────

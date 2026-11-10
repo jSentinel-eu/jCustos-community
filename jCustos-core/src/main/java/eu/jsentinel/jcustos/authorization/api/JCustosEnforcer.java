@@ -229,26 +229,41 @@ public final class JCustosEnforcer {
    * Asserts the named policy admits the current subject for the supplied
    * resource type / operation.
    *
+   * <p>JS-SEC-157 (CWE-306, CWE-684): without a bound subject the call is
+   * refused before the policy is evaluated. The only exception is a policy
+   * that opted in to anonymous evaluation through
+   * {@code PolicyBuilder.allowAnonymous()} or
+   * {@code JCustosPolicies.anonymous(policy)}; it is evaluated with an empty
+   * subject.
+   *
    * @param policyName     the registered policy name
    * @param resourceType   adapter-neutral resource type
    * @param resourceName   adapter-neutral resource name
    * @param operation      requested operation
-   * @throws AccessDeniedException when no subject is bound, the policy
-   *                               is unknown, or evaluation does not
-   *                               return {@code Allowed}
+   * @throws AccessDeniedException when no subject is bound (and the policy
+   *                               did not opt in to anonymous evaluation),
+   *                               the policy is unknown, or evaluation does
+   *                               not return {@code Allowed}
    */
   public static void requirePolicy(String policyName,
                                    String resourceType,
                                    String resourceName,
                                    String operation) {
+    Optional<JCustosSubject> subject = currentSubject();
+    PolicyRegistry registry = JCustosServiceResolver.policyRegistry();
+    // JS-SEC-157 (CWE-306, CWE-684): the Javadoc always promised a refusal without a subject;
+    // the policy used to run with an empty one and subject-free policies granted anonymously.
+    if (subject.isEmpty() && !registry.allowsAnonymous(policyName)) {
+      throw new AccessDeniedException("Policy '" + policyName
+          + "' requires an authenticated subject: no subject is bound");
+    }
     AccessContext access = new AccessContext(
-        currentSubject(),
+        subject,
         resourceType,
         resourceName,
         operation,
         Map.of());
     PolicyContext context = new PolicyContext(access, policyName);
-    PolicyRegistry registry = JCustosServiceResolver.policyRegistry();
     PolicyDecision decision = registry.evaluate(policyName, context);
     switch (decision) {
       case PolicyDecision.Allowed ignored -> { /* fall through */ }
@@ -267,7 +282,8 @@ public final class JCustosEnforcer {
    * path that has no domain-specific context.
    *
    * @param policyName the registered policy name
-   * @throws AccessDeniedException when access is denied
+   * @throws AccessDeniedException when access is denied, including the case
+   *                               that no subject is bound (JS-SEC-157)
    */
   public static void requirePolicy(String policyName) {
     requirePolicy(policyName, "method", policyName, "invoke");
