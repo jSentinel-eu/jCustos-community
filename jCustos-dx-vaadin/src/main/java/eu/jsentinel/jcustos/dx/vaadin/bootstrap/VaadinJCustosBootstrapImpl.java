@@ -24,6 +24,8 @@ import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
+import eu.jsentinel.jcustos.dx.vaadin.diagnostics.RouteNameCheck;
+import eu.jsentinel.jcustos.dx.vaadin.diagnostics.VaadinDiagnosticContributor;
 import eu.jsentinel.jcustos.dx.vaadin.routes.SecureRouteDiscovery;
 import eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext;
 import eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementRoute;
@@ -215,6 +217,10 @@ final class VaadinJCustosBootstrapImpl
     // cross-validation if discovery is opt-in.
     crossCheckSecureRoutes(warnings);
 
+    // JS-SEC-152 (CWE-636, CWE-285): the names the listener reroutes a denied visitor to
+    // must resolve to registered routes.
+    checkRerouteTargets(warnings);
+
     // V00.73 (Prompt 009): auto-wire VaadinSessionSubjectStore as the
     // default SubjectStore when the consumer didn't register one.
     // Caller-provided SubjectStore (via SubjectStores.setSubjectStore
@@ -304,6 +310,60 @@ final class VaadinJCustosBootstrapImpl
   @SuppressWarnings("unused")
   private static void discard(Object ignored) {
     // intentional no-op
+  }
+
+  /**
+   * JS-SEC-152 (CWE-636, CWE-285): {@code AuthorizationListener} answers
+   * {@code Unauthenticated} with a reroute to the login route name and
+   * {@code StepUpRequired} with a reroute to the step-up route name. Vaadin ignores a
+   * reroute to a name no route is registered under, so the listener falls back to the
+   * error view - safe, but the visitor never reaches the login or step-up screen.
+   * <ul>
+   *   <li>{@code vaadin/login-route-unresolved} - WARNING; ERROR in STRICT and PRODUCTION.</li>
+   *   <li>{@code vaadin/step-up-route-unresolved} - WARNING; ERROR in STRICT and PRODUCTION
+   *       when the name was configured explicitly ({@code .stepUpRoute(...)} or
+   *       {@code JCustosServiceResolver.setStepUpRouteName}). An application that never
+   *       configured a step-up route and issues no step-up decision keeps the default name
+   *       {@code "step-up"} without a view; that stays a WARNING in every mode, so STRICT
+   *       does not force an unused view into existence.</li>
+   *   <li>{@code vaadin/route-check-unavailable} - INFO when the route registry cannot be
+   *       read where {@code install()} runs; the two checks are then skipped.</li>
+   * </ul>
+   */
+  private void checkRerouteTargets(List<JCustosBootstrapWarning> warnings) {
+    Severity gated = switch (state.mode()) {
+      case STRICT, PRODUCTION -> Severity.ERROR;
+      default -> Severity.WARNING;
+    };
+    String login = JCustosServiceResolver.loginRouteName();
+    RouteNameCheck.Result loginResult = RouteNameCheck.check(login);
+    if (loginResult == RouteNameCheck.Result.UNAVAILABLE) {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.INFO,
+          "vaadin/route-check-unavailable",
+          "The Vaadin route registry could not be read at bootstrap, so the login route '"
+              + login + "' and the step-up route '" + JCustosServiceResolver.stepUpRouteName()
+              + "' were not checked against the registered routes.",
+          "Nothing to do if both routes exist. To have them checked, run "
+              + "JCustosDiagnostics.inspect() once a VaadinService is current."));
+      return;
+    }
+    if (loginResult == RouteNameCheck.Result.UNREGISTERED) {
+      warnings.add(new JCustosBootstrapWarning(
+          gated,
+          VaadinDiagnosticContributor.LOGIN_ROUTE_UNRESOLVED,
+          VaadinDiagnosticContributor.loginRouteUnresolvedMessage(login),
+          VaadinDiagnosticContributor.LOGIN_ROUTE_UNRESOLVED_FIX));
+    }
+    String stepUp = JCustosServiceResolver.stepUpRouteName();
+    if (RouteNameCheck.check(stepUp) == RouteNameCheck.Result.UNREGISTERED) {
+      boolean configured = JCustosServiceResolver.findStepUpRouteName().isPresent();
+      warnings.add(new JCustosBootstrapWarning(
+          configured ? gated : Severity.WARNING,
+          VaadinDiagnosticContributor.STEP_UP_ROUTE_UNRESOLVED,
+          VaadinDiagnosticContributor.stepUpRouteUnresolvedMessage(stepUp),
+          VaadinDiagnosticContributor.STEP_UP_ROUTE_UNRESOLVED_FIX));
+    }
   }
 
   /**

@@ -22,12 +22,16 @@ import eu.jsentinel.jcustos.audit.AccessGranted;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.StepUpChallenged;
+import eu.jsentinel.jcustos.authorization.LoginListener;
+import eu.jsentinel.jcustos.authorization.LoginListeners;
+import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationEvaluator;
 import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;
 import com.vaadin.flow.component.UI;
@@ -35,6 +39,7 @@ import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
 import com.vaadin.flow.router.HasErrorParameter;
 import com.vaadin.flow.router.ListenerPriority;
+import com.vaadin.flow.router.RouterLayout;
 import com.vaadin.flow.server.*;
 import com.vaadin.flow.shared.Registration;
 
@@ -43,6 +48,7 @@ import java.io.Serializable;
 import java.lang.annotation.Annotation;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
@@ -69,6 +75,28 @@ import static java.util.Objects.requireNonNull;
  * un-annotated route then fails closed unless it is marked {@link PublicRoute};
  * a STRICT startup diagnostic enumerates the routes it would deny.
  * <p>
+ * <strong>Layout chain (JS-SEC-154 / CWE-862):</strong> a restriction may be declared on the
+ * navigation target or on any {@link RouterLayout} the target is rendered in
+ * ({@code @Route(layout = AdminLayout.class)}, {@code @ParentLayout}, an automatic
+ * {@code @Layout}). The listener evaluates the restriction of every layout in the chain
+ * and the restriction of the target - outermost layout first, the target last - and
+ * <em>all</em> of them must grant; the first denial ends the navigation. {@link PublicRoute}
+ * on the target does <strong>not</strong> lift a restriction declared on a layout: it only
+ * opts a target that carries no restriction at all out of deny-by-default. A view that must
+ * stay public has to live outside the restricted layout. {@link RouteRestrictionResolver}
+ * holds this decision; the start-up discovery asks the same class.
+ * <p>
+ * <strong>Fail closed (JS-SEC-152 / CWE-636, CWE-285):</strong> a denial always leaves the
+ * event with a reroute or forward target. When the route a decision points to - the login
+ * route for {@code Unauthenticated}, the step-up route for {@code StepUpRequired} - is not
+ * registered, the visitor is sent to the error view for {@link SecurityException}; Vaadin
+ * would otherwise render the protected view. The login view and the step-up view have to
+ * be reachable for the visitors who are sent there: no restriction of their own that
+ * those visitors fail, and not inside a layout that carries one. One exception keeps
+ * existing applications
+ * working: an anonymous visitor is forwarded to the login view of the registered
+ * {@link LoginListener} when the login route name does not resolve.
+ * <p>
  * Registered as a {@link VaadinServiceInitListener} via
  * {@code META-INF/services}.
  */
@@ -81,6 +109,9 @@ public class AuthorizationListener
 
   /** Cached scanner for restriction annotations. */
   private final JCustosAnnotationScanner scanner = new JCustosAnnotationScanner();
+
+  /** JS-SEC-154: resolves the restrictions of the navigation target and its layout chain. */
+  private final RouteRestrictionResolver restrictionResolver = new RouteRestrictionResolver(scanner);
 
   /** Creates core contexts from Vaadin events. */
   private final VaadinAccessContextFactory contextFactory = new VaadinAccessContextFactory();
@@ -107,55 +138,72 @@ public class AuthorizationListener
   @Override
   public void beforeEnter(BeforeEnterEvent event) {
     Class<?> navigationTarget = event.getNavigationTarget();
+    List<Class<? extends RouterLayout>> layouts = event.getLayouts();
 
-    var scanned = scanner.scan(navigationTarget);
-    if (scanned.isEmpty()) {
+    // JS-SEC-154 (CWE-862): the restriction of the navigation target AND the restriction of
+    // every layout in its chain apply. Only the target used to be scanned, so
+    // `@RequiresRole("ADMIN")` on a parent layout protected none of its child routes.
+    List<RouteRestrictionResolver.Restriction> restrictions =
+        restrictionResolver.resolve(navigationTarget, layouts);
+    if (restrictions.isEmpty()) {
       // JS-SEC-024 (CWE-862): no security annotation — allow-by-omission unless
       // deny-by-default is enabled (then fail closed unless @PublicRoute).
-      denyByDefaultIfEnabled(navigationTarget, event);
+      denyByDefaultIfEnabled(navigationTarget, layouts, event);
       return;
     }
-    var pair = scanned.get();
 
-    // 1. Resolve evaluator via Vaadin instantiator
-    Class<?> evaluatorClass = pair.evaluatorClass();
-    requireNonNull(evaluatorClass,
-        "AccessEvaluator class must not be null for " + navigationTarget.getName());
-
-    Object evaluator = VaadinService.getCurrent()
-        .getInstantiator()
-        .getOrCreate(evaluatorClass);
-    requireNonNull(evaluator,
-        "Could not instantiate AccessEvaluator: " + evaluatorClass.getName());
-
-    // 2. Evaluate — obtain a Vaadin-free decision plus the original
-    //    AuthorizationDecision (when the evaluator produced one), so
-    //    audit can record StepUp specifics that get lost in the
-    //    AccessDecision mapping.
-    Annotation annotation = pair.annotation();
-    logger().info("Evaluating access for {} with {}", event.getLocation(), annotation);
     AccessContext context = contextFactory.create(event);
-    EvaluatedDecision evaluated = evaluateWithOriginal(evaluator, context, annotation);
+    EvaluatedDecision granted = null;
+    for (RouteRestrictionResolver.Restriction restriction : restrictions) {
+      // 1. Resolve evaluator via Vaadin instantiator
+      Class<?> evaluatorClass = restriction.evaluatorClass();
+      requireNonNull(evaluatorClass,
+          "AccessEvaluator class must not be null for " + restriction.source().getName());
 
-    // 3. Audit the decision
-    audit(evaluated, context);
+      Object evaluator = VaadinService.getCurrent()
+          .getInstantiator()
+          .getOrCreate(evaluatorClass);
+      requireNonNull(evaluator,
+          "Could not instantiate AccessEvaluator: " + evaluatorClass.getName());
 
-    // 4. Apply the decision to the Vaadin event
-    decisionMapper.apply(evaluated.mapped(), event);
+      // 2. Evaluate — obtain a Vaadin-free decision plus the original
+      //    AuthorizationDecision (when the evaluator produced one), so
+      //    audit can record StepUp specifics that get lost in the
+      //    AccessDecision mapping.
+      Annotation annotation = restriction.annotation();
+      logger().info("Evaluating access for {} with {} (declared for {})",
+          event.getLocation(), annotation, restriction.source().getSimpleName());
+      EvaluatedDecision evaluated = evaluateWithOriginal(evaluator, context, annotation);
+
+      if (!(evaluated.mapped() instanceof AccessDecision.Granted)) {
+        // 3. Audit the denial - the first restriction that does not grant ends the navigation
+        audit(evaluated, context);
+
+        // 4. Apply the decision to the Vaadin event
+        applyDenial(evaluated.mapped(), event);
+        return;
+      }
+      granted = evaluated;
+    }
+
+    // 3. Audit the decision - one AccessGranted per navigation, once every restriction granted
+    audit(granted, context);
   }
 
   /**
-   * JS-SEC-024 (CWE-862): when deny-by-default is enabled and the target carries
-   * neither a security annotation (scanner empty) nor {@link PublicRoute}, fail
+   * JS-SEC-024 (CWE-862): when deny-by-default is enabled and neither the target nor a
+   * layout carries a security annotation and the target is not {@link PublicRoute}, fail
    * closed — reroute to the generic error view exactly as an
    * {@link AuthorizationDecision.Forbidden} would, and audit the denial. When
    * deny-by-default is off (the default) this is a no-op, preserving
    * allow-by-omission and full backward compatibility.
    */
-  private void denyByDefaultIfEnabled(Class<?> navigationTarget, BeforeEnterEvent event) {
+  private void denyByDefaultIfEnabled(Class<?> navigationTarget,
+                                      List<Class<? extends RouterLayout>> layouts,
+                                      BeforeEnterEvent event) {
+    // JS-SEC-154: the same classification the start-up discovery reports.
     if (!JCustosServiceResolver.isDenyByDefault()
-        || navigationTarget.isAnnotationPresent(PublicRoute.class)
-        || isDenyByDefaultExempt(navigationTarget)) {
+        || !restrictionResolver.isOpenByOmission(navigationTarget, layouts)) {
       return;
     }
     logger().warn(
@@ -164,7 +212,91 @@ public class AuthorizationListener
     AccessContext context = contextFactory.create(event);
     AccessDecision denied = AccessDecision.deniedWithError(SecurityException.class, "Access denied");
     audit(new EvaluatedDecision(denied, Optional.empty()), context);
+    applyDenial(denied, event);
+  }
+
+  /**
+   * Applies a denial to the event and enforces the post-condition that it took effect.
+   */
+  private void applyDenial(AccessDecision denied, BeforeEnterEvent event) {
+    if (forwardToLoginListenerTarget(denied, event)) {
+      return;
+    }
     decisionMapper.apply(denied, event);
+    failClosedIfUnhandled(denied, event);
+  }
+
+  /**
+   * JS-SEC-152 (CWE-636, CWE-285) - the post-condition of every denial, independent of the
+   * mapper: a decision other than {@link AccessDecision.Granted} that left the event
+   * without a reroute or forward target ends in the error view for
+   * {@link SecurityException}. {@code BeforeEvent.rerouteTo(String)} with a route that is
+   * not registered only records an "unknown reroute"; Vaadin then goes on to instantiate
+   * and render the protected view while the audit trail already says {@code AccessDenied}.
+   * <p>
+   * The post-condition checks that a target is set, not where it points.
+   *
+   * @param decision the decision that was applied to the event
+   * @param event    the navigation event
+   */
+  static void failClosedIfUnhandled(AccessDecision decision, BeforeEnterEvent event) {
+    if (decision instanceof AccessDecision.Granted || VaadinAccessDecisionMapper.hasTarget(event)) {
+      return;
+    }
+    HasLogger.staticLogger().warn(
+        "Access to {} was denied, but the decision {} left the navigation without a target "
+            + "- rerouting to the error view", event.getNavigationTarget().getName(), decision);
+    VaadinAccessDecisionMapper.failClosed(event);
+  }
+
+  /**
+   * JS-SEC-152: keeps a configuration working that was valid before the fail-closed
+   * post-condition. An application whose login view is registered under another name than
+   * {@link JCustosServiceResolver#loginRouteName()} used to be rescued by its
+   * {@link LoginListener}, which runs after this listener and forwards an anonymous
+   * visitor to its login view by class. The listener now ends the navigation itself, so it
+   * takes that step on the login listener's behalf - only for a visitor without a bound
+   * subject (the login listener's own condition) and only when the login route name does
+   * not resolve. In every other case the mapper and the post-condition decide.
+   *
+   * @return {@code true} when the event was forwarded to the login listener's login view
+   */
+  private boolean forwardToLoginListenerTarget(AccessDecision denied, BeforeEnterEvent event) {
+    if (!(denied instanceof AccessDecision.Reroute(String route, boolean _))
+        || !route.equals(JCustosServiceResolver.loginRouteName())
+        || VaadinAccessDecisionMapper.resolves(event, route)) {
+      return false;
+    }
+    try {
+      Optional<LoginListener<Object>> loginListener = LoginListeners.findLoginListener();
+      if (loginListener.isEmpty() || subjectBound()) {
+        return false;
+      }
+      Class<? extends LoginView> loginTarget = loginListener.get().loginNavigationTarget();
+      if (!VaadinAccessDecisionMapper.isRegistered(event, loginTarget)) {
+        return false;
+      }
+      event.forwardTo(loginTarget);
+      logger().warn("The login route '{}' is not registered - forwarded the anonymous visitor "
+          + "to the login view of the LoginListener ({}). Publish the route name with "
+          + "VaadinSecurity.bootstrap().loginRoute(...).", route, loginTarget.getName());
+      return VaadinAccessDecisionMapper.hasTarget(event);
+    } catch (RuntimeException unresolvable) {
+      // no usable login listener, or its login view is not a registered route:
+      // the mapper answers with the error view
+      return false;
+    }
+  }
+
+  /** Mirrors the subject check of {@link LoginListener}; "cannot tell" counts as bound. */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static boolean subjectBound() {
+    try {
+      Class subjectType = JCustosServiceResolver.<Object, Object>authenticationService().subjectType();
+      return SubjectStores.subjectStore().currentSubject(subjectType).isPresent();
+    } catch (RuntimeException unknown) {
+      return true;
+    }
   }
 
   /**
@@ -185,7 +317,7 @@ public class AuthorizationListener
     // JS-SEC-068 (CWE-306): SessionManagementView subclasses are no longer exempt.
     // The framework's own route now carries @ProtectedBy and evaluates the requirement
     // configured at bootstrap; consumer subclasses carry their own annotation.
-    return HasErrorParameter.class.isAssignableFrom(navigationTarget);
+    return RouteRestrictionResolver.isDenyByDefaultExempt(navigationTarget);
   }
 
   /**

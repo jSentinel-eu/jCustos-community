@@ -22,16 +22,24 @@ import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static java.util.Arrays.stream;
-
 /**
  * Scans annotated elements for {@link JCustosAnnotation}-meta-annotated
  * restriction annotations and resolves the corresponding evaluator class.
+ * <p>
+ * A restriction is found in three places: written on the element itself, inherited
+ * from the superclass or an implemented interface (JS-SEC-040, JS-SEC-081), or
+ * declared on an annotation type the element carries - a <em>composed</em>
+ * annotation such as {@code @RequiresRole("ADMIN") @interface AdminOnly}
+ * (JS-SEC-154). Composition is resolved exactly one level deep: an annotation on
+ * an annotation on an annotation is not followed. An element may carry one
+ * restriction only, however it is written; a second one raises
+ * {@link IllegalStateException}.
  * <p>
  * Results are cached per class. This class is Vaadin-free and can be
  * unit-tested independently.
@@ -136,9 +144,24 @@ public final class JCustosAnnotationScanner {
     // @Inherited annotations surfaced from a superclass, so the explicit superclass walk in
     // doScan() stays the single, authoritative inheritance mechanism (most-derived wins) and a
     // subclass that overrides its base's restriction is never counted as "more than one".
-    List<Annotation> list = stream(element.getDeclaredAnnotations())
-        .filter(a -> a.annotationType().isAnnotationPresent(JCustosAnnotation.class))
-        .toList();
+    List<Annotation> list = new ArrayList<>();
+    for (Annotation declared : element.getDeclaredAnnotations()) {
+      if (isRestriction(declared)) {
+        list.add(declared);
+      }
+      // JS-SEC-154 (CWE-862): a composed annotation - an annotation type that itself carries a
+      // restriction, e.g. `@RequiresRole("ADMIN") @interface AdminOnly` - used to compile and
+      // then protect nothing, because only annotations carrying @JCustosAnnotation directly
+      // were recognised. The restriction declared on the annotation type is resolved one level
+      // deep and counts like a restriction written on the element itself, so the "more than
+      // one restriction" rule below covers every combination: two restrictions on the composed
+      // type, a composed annotation next to a direct one, or two composed annotations.
+      for (Annotation meta : declared.annotationType().getDeclaredAnnotations()) {
+        if (isRestriction(meta)) {
+          list.add(meta);
+        }
+      }
+    }
 
     return switch (list.size()) {
       case 0 -> Optional.empty();
@@ -153,5 +176,9 @@ public final class JCustosAnnotationScanner {
       default -> throw new IllegalStateException(
           "More than one @JCustosAnnotation is not allowed on " + element);
     };
+  }
+
+  private static boolean isRestriction(Annotation annotation) {
+    return annotation.annotationType().isAnnotationPresent(JCustosAnnotation.class);
   }
 }

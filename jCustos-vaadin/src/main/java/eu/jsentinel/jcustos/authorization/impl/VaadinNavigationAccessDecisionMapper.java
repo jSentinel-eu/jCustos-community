@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authorization.impl;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.navigation.NavigationAccessDecision;
 import com.vaadin.flow.component.Component;
@@ -25,8 +26,14 @@ import java.util.function.Supplier;
 
 /**
  * Maps authentication-phase navigation decisions to Vaadin navigation operations.
+ * <p>
+ * <strong>Fail closed (JS-SEC-152, CWE-636, CWE-285):</strong> {@code LoginRequired} and
+ * {@code AccessDenied} never leave the event without a usable target. A route name that is
+ * not registered, or a login view that is not a registered route, is answered with
+ * {@link BeforeEnterEvent#rerouteToError} for {@link SecurityException} - Vaadin would
+ * otherwise go on and render the navigation target.
  */
-public final class VaadinNavigationAccessDecisionMapper {
+public final class VaadinNavigationAccessDecisionMapper implements HasLogger {
 
   /** Creates a new mapper. */
   public VaadinNavigationAccessDecisionMapper() {
@@ -46,10 +53,28 @@ public final class VaadinNavigationAccessDecisionMapper {
                     Supplier<Class<? extends Component>> defaultTarget) {
     switch (decision) {
       case NavigationAccessDecision.Allowed() -> { /* nothing to do */ }
-      case NavigationAccessDecision.LoginRequired() -> event.forwardTo(loginTarget.get());
+      case NavigationAccessDecision.LoginRequired() -> {
+        // JS-SEC-152 (CWE-636): a login target that is null or not a registered route must
+        // not end the denial. forwardTo(Class) accepts any class and fails only while the
+        // forward is carried out, so the target is checked first.
+        Class<? extends LoginView> login = loginTarget.get();
+        if (VaadinAccessDecisionMapper.isRegistered(event, login)) {
+          event.forwardTo(login);
+        } else {
+          logger().warn("Login is required, but the login view {} is not a registered route "
+              + "- rerouting to the error view instead", login == null ? null : login.getName());
+          VaadinAccessDecisionMapper.failClosed(event);
+        }
+      }
       case NavigationAccessDecision.AlreadyLoggedIn() -> event.forwardTo(defaultTarget.get());
       case NavigationAccessDecision.AccessDenied(String route, boolean asForward) -> {
-        if (asForward) {
+        // JS-SEC-152 (CWE-636, CWE-285): resolve the target first, as in
+        // VaadinAccessDecisionMapper - an unknown route is a no-op for Vaadin.
+        if (!VaadinAccessDecisionMapper.resolves(event, route)) {
+          logger().warn("Access was denied, but the route '{}' the decision points to is not "
+              + "registered - rerouting to the error view instead", route);
+          VaadinAccessDecisionMapper.failClosed(event);
+        } else if (asForward) {
           event.forwardTo(route);
         } else {
           event.rerouteTo(route);

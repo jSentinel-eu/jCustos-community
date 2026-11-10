@@ -44,6 +44,39 @@ class VaadinJCustosBootstrapTest {
     JCustosServiceResolver.resetAll();
   }
 
+  /**
+   * JS-SEC-152: this plain unit test has no VaadinService, so the route registry cannot be
+   * read. The bootstrap says so (INFO) instead of reporting the login and step-up routes as
+   * unresolved - and STRICT / PRODUCTION must not turn "could not check" into an error.
+   */
+  @Test
+  void routeRegistryUnavailable_reportsSkippedRouteCheckAsInfo() {
+    for (JCustosBootstrapMode mode : JCustosBootstrapMode.values()) {
+      JCustosServiceResolver.resetAll();
+      java.util.List<eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning> warnings;
+      try {
+        warnings = VaadinSecurity.bootstrap()
+            .mode(mode)
+            .authentication(FakeAuthenticationService.forType(String.class))
+            .authorization(new FakeAuthorizationService<String>())
+            .loginRoute("no-such-login")
+            .stepUpRoute("no-such-step-up")
+            .install()
+            .warnings();
+      } catch (JCustosBootstrapException strict) {
+        warnings = strict.warnings();
+      }
+
+      assertTrue(warnings.stream().anyMatch(w ->
+              "vaadin/route-check-unavailable".equals(w.code()) && w.severity() == Severity.INFO),
+          mode + ": the skipped check must be reported as INFO; got " + warnings);
+      assertTrue(warnings.stream().noneMatch(w ->
+              "vaadin/login-route-unresolved".equals(w.code())
+                  || "vaadin/step-up-route-unresolved".equals(w.code())),
+          mode + ": nothing can be said about the routes without a registry");
+    }
+  }
+
   @Test
   void happyPath_registersBothServicesAndReturnsRuntime() {
     FakeAuthenticationService<String, String> authn = FakeAuthenticationService.forType(String.class);

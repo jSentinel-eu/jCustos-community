@@ -191,7 +191,15 @@ class LoginListenerBeforeEnterTest {
     }
   }
 
+  /**
+   * A real registry that knows the login view. Since JS-SEC-152 the decision mapper
+   * forwards to the login view only when it is a registered route.
+   */
   private static final class TestRouteRegistry extends AbstractRouteRegistry {
+    TestRouteRegistry() {
+      setRoute("login", StubLoginView.class, List.of());
+    }
+
     @Override public VaadinContext getContext() { return null; }
   }
 

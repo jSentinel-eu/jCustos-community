@@ -852,6 +852,41 @@ authenticated subject. **Consumers:** an affordance meant for everyone needs no 
 code that passed an empty array now fails when the component is built instead of silently opening
 it.
 
+## A denial whose reroute target is not registered no longer renders the protected view (SA52, JS-SEC-152, CWE-636, CWE-285)
+
+`AuthorizationListener` answered `Unauthenticated` and `StepUpRequired` with
+`event.rerouteTo(route)`. Vaadin treats a reroute to an unregistered route as a no-op, so without a
+view under the login route (and no `LoginListener`) or under the step-up route, the protected view
+was instantiated and rendered while the audit trail recorded `AccessDenied`. Both decision mappers
+now resolve the target first, and the listener enforces a post-condition: every denial that leaves
+the event without a reroute or forward target ends in the error view for `SecurityException`. An
+application whose login view is registered under another name keeps working, because an anonymous
+visitor is forwarded to the login view of the registered `LoginListener`.
+
+The bootstrap reports `vaadin/login-route-unresolved` and `vaadin/step-up-route-unresolved` where
+the route registry is readable — a WARNING, and an ERROR in STRICT and PRODUCTION for the login
+route and for an explicitly configured step-up route; the default step-up route without a view stays
+a WARNING in every mode. **Consumers:** register a view under the step-up route before using step-up
+policies, and publish a non-default login route with `.loginRoute(...)`. A `Reroute` marked as
+forward to a route that is not a server-side route no longer becomes a client-side forward; it ends
+in the error view.
+
+## Restrictions on router layouts and composed annotations are enforced (SA54, JS-SEC-154, CWE-862)
+
+The navigation listener scanned only the navigation target, and the scanner recognised only
+annotations carrying `@JCustosAnnotation` directly. `@RequiresRole("ADMIN")` on a parent layout, or
+on an annotation type such as `@AdminOnly`, compiled and protected nothing. The listener now
+evaluates the restriction of every layout in the chain together with that of the target, and all of
+them must grant; the scanner resolves a restriction declared on an annotation type one level deep,
+with the "one restriction per element" rule unchanged. `@PublicRoute` on a view does not lift the
+restriction of its layout — a public view, the login view and the step-up view have to live outside
+a restricted layout.
+
+The start-up discovery uses the same `RouteRestrictionResolver` as the listener, so a route
+protected through its layout is no longer reported as un-annotated and policies referenced from
+layouts are cross-checked. Composed annotations take effect in the REST and standalone adapters as
+well.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

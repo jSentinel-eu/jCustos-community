@@ -38,6 +38,12 @@ public interface VaadinJCustosBootstrap
    * {@code JCustosServiceResolver.setLoginRouteName}, so the authorisation
    * listener, the session-lifetime listener and the logout default send
    * unauthenticated or expired users to this route instead of {@code "login"}.
+   * <p>
+   * The name has to resolve to a registered route (JS-SEC-152). Where the route
+   * registry is readable, {@code install()} reports a name without a route as
+   * {@code vaadin/login-route-unresolved} - a warning, and an error in STRICT and
+   * PRODUCTION. At run time the listener sends the visitor to the error view when
+   * the login route does not resolve.
    *
    * @param route non-null route name (e.g. {@code "signin"})
    * @return this builder
@@ -47,6 +53,14 @@ public interface VaadinJCustosBootstrap
   /**
    * Configures the step-up authentication route. Forwarded to
    * {@code JCustosServiceResolver.setStepUpRouteName(...)}.
+   * <p>
+   * A view has to be registered under the name (JS-SEC-152). Where the route
+   * registry is readable, {@code install()} reports a configured name without a
+   * route as {@code vaadin/step-up-route-unresolved} - a warning, and an error in
+   * STRICT and PRODUCTION. Without this call the default name {@code "step-up"}
+   * applies; a missing view is then a warning in every mode. At run time a
+   * {@code StepUpRequired} decision ends in the error view when the step-up route
+   * does not resolve.
    *
    * @param route non-blank route name
    * @return this builder

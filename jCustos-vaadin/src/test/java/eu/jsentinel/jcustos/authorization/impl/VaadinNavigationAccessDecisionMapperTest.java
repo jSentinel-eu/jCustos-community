@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 @DisplayName("VaadinNavigationAccessDecisionMapper")
@@ -114,6 +115,68 @@ class VaadinNavigationAccessDecisionMapperTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-152: access denied with a route that is not registered ends in rerouteToError")
+  void accessDeniedToUnregisteredRoute_failsClosed() {
+    RecordingBeforeEnterEvent event = new RecordingBeforeEnterEvent();
+
+    mapper.apply(
+        NavigationAccessDecision.accessDenied("not-registered", false),
+        event,
+        () -> TestLoginView.class,
+        () -> TestDefaultView.class);
+
+    assertNull(event.rerouteRoute,
+        "rerouteTo(String) with an unknown route is a no-op in Vaadin and must not be relied on");
+    assertInstanceOf(SecurityException.class, event.error);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: access denied as forward to a route that is not registered ends in rerouteToError")
+  void accessDeniedAsForwardToUnregisteredRoute_failsClosed() {
+    RecordingBeforeEnterEvent event = new RecordingBeforeEnterEvent();
+
+    mapper.apply(
+        NavigationAccessDecision.accessDenied("not-registered", true),
+        event,
+        () -> TestLoginView.class,
+        () -> TestDefaultView.class);
+
+    assertNull(event.forwardRoute);
+    assertInstanceOf(SecurityException.class, event.error);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: login required with a login view that is not a registered route ends in rerouteToError")
+  void loginRequiredWithUnroutedLoginView_failsClosed() {
+    RecordingBeforeEnterEvent event = new RecordingBeforeEnterEvent();
+
+    mapper.apply(
+        NavigationAccessDecision.loginRequired(),
+        event,
+        () -> UnroutedLoginView.class,
+        () -> TestDefaultView.class);
+
+    assertNull(event.forwardTarget,
+        "forwardTo(Class) accepts any class and only fails while the forward is carried out");
+    assertInstanceOf(SecurityException.class, event.error);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: login required without a login view ends in rerouteToError")
+  void loginRequiredWithoutLoginView_failsClosed() {
+    RecordingBeforeEnterEvent event = new RecordingBeforeEnterEvent();
+
+    mapper.apply(
+        NavigationAccessDecision.loginRequired(),
+        event,
+        () -> null,
+        () -> TestDefaultView.class);
+
+    assertNull(event.forwardTarget);
+    assertInstanceOf(SecurityException.class, event.error);
+  }
+
+  @Test
   @DisplayName("allowed does not resolve navigation targets")
   void allowed_doesNotResolveTargets() {
     RecordingBeforeEnterEvent event = new RecordingBeforeEnterEvent();
@@ -187,6 +250,7 @@ class VaadinNavigationAccessDecisionMapperTest {
     private Class<? extends Component> forwardTarget;
     private String forwardRoute;
     private String rerouteRoute;
+    private Exception error;
 
     private RecordingBeforeEnterEvent() {
       super(
@@ -201,6 +265,11 @@ class VaadinNavigationAccessDecisionMapperTest {
     @Override
     public void forwardTo(Class<? extends Component> navigationTarget) {
       this.forwardTarget = navigationTarget;
+    }
+
+    @Override
+    public void rerouteToError(Exception exception, String customMessage) {
+      this.error = exception;
     }
 
     @Override
@@ -230,10 +299,36 @@ class VaadinNavigationAccessDecisionMapperTest {
     }
   }
 
+  /** A login view no route is registered for. */
+  private static final class UnroutedLoginView extends LoginView {
+
+    @Override
+    public void reactOnFailedLogin() {
+    }
+
+    @Override
+    public void navigateToApp() {
+    }
+
+    @Override
+    public boolean checkCredentials() {
+      return false;
+    }
+  }
+
   private static final class TestDefaultView extends Component {
   }
 
+  /**
+   * A real registry holding the route the access-denied tests point to. Since JS-SEC-152
+   * the mapper resolves the route before it reroutes.
+   */
   private static final class TestRouteRegistry extends AbstractRouteRegistry {
+
+    TestRouteRegistry() {
+      setRoute("login", TestDefaultView.class, List.of());
+      setRoute("signin", TestLoginView.class, List.of());
+    }
 
     @Override
     public VaadinContext getContext() {

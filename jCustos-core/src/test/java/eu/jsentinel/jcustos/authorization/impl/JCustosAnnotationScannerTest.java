@@ -17,7 +17,9 @@
 package eu.jsentinel.jcustos.authorization.impl;
 
 import eu.jsentinel.jcustos.authorization.annotations.JCustosAnnotation;
+import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;
 import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;
+import eu.jsentinel.jcustos.authorization.api.roles.RequiresRoleEvaluator;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;
 import org.junit.jupiter.api.BeforeEach;
@@ -170,6 +172,73 @@ class JCustosAnnotationScannerTest {
     assertTrue(scanner.scan(PlainSubContract.class).isEmpty());
   }
 
+  @Test
+  @DisplayName("JS-SEC-154: a composed @AdminOnly yields the @RequiresRole declared on the annotation type")
+  void composedAnnotation_yieldsTheMetaRestriction() {
+    var result = scanner.scan(ComposedAdminView.class);
+
+    assertTrue(result.isPresent(),
+        "@AdminOnly carries @RequiresRole(\"ADMIN\"); the view must not scan as unprotected");
+    RequiresRole restriction = assertInstanceOf(RequiresRole.class, result.get().annotation());
+    assertArrayEquals(new String[] {"ADMIN"}, restriction.value(),
+        "the attribute values of the restriction on the annotation type must be preserved");
+    assertEquals(RequiresRoleEvaluator.class, result.get().evaluatorClass());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: a composed annotation on a method is resolved as well")
+  void composedAnnotationOnMethod_yieldsTheMetaRestriction() throws NoSuchMethodException {
+    Method method = ComposedHandler.class.getDeclaredMethod("delete");
+
+    var result = scanner.scan(method);
+
+    assertTrue(result.isPresent());
+    assertInstanceOf(StubRestriction.class, result.get().annotation());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: a subclass inherits the composed restriction of its base class")
+  void composedAnnotation_isInheritedBySubclass() {
+    var result = scanner.scan(SubclassOfComposed.class);
+
+    assertTrue(result.isPresent());
+    assertInstanceOf(RequiresRole.class, result.get().annotation());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: a composed annotation next to a direct restriction is 'more than one'")
+  void composedPlusDirectRestriction_throws() {
+    assertThrows(IllegalStateException.class,
+        () -> scanner.scan(ComposedAndDirectView.class));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: an annotation type carrying two restrictions is 'more than one'")
+  void composedAnnotationWithTwoRestrictions_throws() {
+    assertThrows(IllegalStateException.class,
+        () -> scanner.scan(DoublyComposedView.class));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: a restriction annotation that is itself meta-annotated with a restriction is 'more than one'")
+  void restrictionCarryingAnotherRestriction_throws() {
+    assertThrows(IllegalStateException.class,
+        () -> scanner.scan(RestrictionOnRestrictionView.class));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: composition is resolved one level deep, not transitively")
+  void compositionIsNotTransitive() {
+    assertTrue(scanner.scan(TwoLevelsDeepView.class).isEmpty(),
+        "@TwoLevels -> @ComposedStub -> @StubRestriction is two levels away and is not followed");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-154: an annotation type without a restriction contributes nothing")
+  void plainMetaAnnotation_contributesNothing() {
+    assertTrue(scanner.scan(PlainMarkedView.class).isEmpty());
+  }
+
   // ── Test fixtures ─────────────────────────────────────────────
 
   @Retention(RetentionPolicy.RUNTIME)
@@ -257,5 +326,71 @@ class JCustosAnnotationScannerTest {
   }
 
   interface PlainSubContract extends PlainContract {
+  }
+
+  // JS-SEC-154: composed ("meta") annotation fixtures.
+  @RequiresRole("ADMIN")
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface AdminOnly {
+  }
+
+  @AdminOnly
+  static class ComposedAdminView {
+  }
+
+  static class SubclassOfComposed extends ComposedAdminView {
+  }
+
+  @StubRestriction
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface ComposedStub {
+  }
+
+  static class ComposedHandler {
+    @ComposedStub
+    void delete() {
+    }
+  }
+
+  @AdminOnly
+  @StubRestriction
+  static class ComposedAndDirectView {
+  }
+
+  @StubRestriction
+  @AnotherRestriction
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface DoublyComposed {
+  }
+
+  @DoublyComposed
+  static class DoublyComposedView {
+  }
+
+  @StubRestriction
+  @Retention(RetentionPolicy.RUNTIME)
+  @JCustosAnnotation(StubEvaluator.class)
+  @interface RestrictionOnRestriction {
+  }
+
+  @RestrictionOnRestriction
+  static class RestrictionOnRestrictionView {
+  }
+
+  @ComposedStub
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface TwoLevels {
+  }
+
+  @TwoLevels
+  static class TwoLevelsDeepView {
+  }
+
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface PlainMarker {
+  }
+
+  @PlainMarker
+  static class PlainMarkedView {
   }
 }

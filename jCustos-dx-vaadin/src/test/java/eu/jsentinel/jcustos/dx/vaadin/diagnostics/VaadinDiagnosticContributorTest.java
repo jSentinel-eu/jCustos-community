@@ -64,6 +64,24 @@ class VaadinDiagnosticContributorTest {
     assertTrue(true);
   }
 
+  /**
+   * JS-SEC-152: without a current VaadinService the route registry cannot be read. The
+   * contributor must not guess - neither "resolved" nor "unresolved" - and must not fail.
+   */
+  @Test
+  void withoutVaadinService_routeNameRulesStaySilent() {
+    assertEquals(RouteNameCheck.Result.UNAVAILABLE, RouteNameCheck.check("login"));
+
+    Recorder r = new Recorder();
+    contributor.contribute(r);
+
+    assertEquals(false, r.warnings.stream().anyMatch(w ->
+            VaadinDiagnosticContributor.LOGIN_ROUTE_UNRESOLVED.equals(w.code())
+                || VaadinDiagnosticContributor.STEP_UP_ROUTE_UNRESOLVED.equals(w.code())
+                || "vaadin/rule-failed".equals(w.code())),
+        "an unreadable registry is not a finding of inspect(); got: " + r.warnings);
+  }
+
   @Test
   void implementsDiagnosticContributor() {
     assertTrue(contributor instanceof DiagnosticContributor);

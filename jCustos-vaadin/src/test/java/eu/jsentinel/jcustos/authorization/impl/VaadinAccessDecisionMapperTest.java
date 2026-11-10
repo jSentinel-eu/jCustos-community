@@ -31,6 +31,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -73,6 +74,68 @@ class VaadinAccessDecisionMapperTest {
 
     assertEquals("login", event.rerouteRoute);
     assertNull(event.forwardRoute);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: Reroute to a route that is not registered ends in rerouteToError(SecurityException)")
+  void rerouteToUnregisteredRoute_failsClosed() {
+    RecordingEvent event = new RecordingEvent();
+
+    mapper.apply(new AccessDecision.Reroute("not-registered", false), event);
+
+    assertNull(event.rerouteRoute,
+        "rerouteTo(String) with an unknown route is a no-op in Vaadin and must not be relied on");
+    assertNull(event.forwardRoute);
+    assertInstanceOf(SecurityException.class, event.errorInstance,
+        "an unresolvable reroute target must fall back to the error view");
+    assertEquals("Access denied", event.errorMessage,
+        "the user-facing message stays generic");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: Reroute(asForward = true) to a route that is not registered ends in rerouteToError")
+  void forwardToUnregisteredRoute_failsClosed() {
+    RecordingEvent event = new RecordingEvent();
+
+    mapper.apply(new AccessDecision.Reroute("not-registered", true), event);
+
+    assertNull(event.forwardRoute,
+        "forwardTo(String) with an unknown route only records a client-side forward");
+    assertInstanceOf(SecurityException.class, event.errorInstance);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: a route name the router cannot parse counts as not registered")
+  void rerouteToInvalidLocation_failsClosed() {
+    RecordingEvent event = new RecordingEvent();
+
+    mapper.apply(new AccessDecision.Reroute("/../login", false), event);
+
+    assertNull(event.rerouteRoute);
+    assertInstanceOf(SecurityException.class, event.errorInstance);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: RerouteWithParameter that cannot be built ends in rerouteToError")
+  void rerouteWithParameterFailure_failsClosed() {
+    RecordingEvent event = new RecordingEvent();
+    event.failParameterReroute = true;
+
+    mapper.apply(new AccessDecision.RerouteWithParameter<>("docs", 42), event);
+
+    assertInstanceOf(SecurityException.class, event.errorInstance,
+        "an IllegalArgumentException from rerouteTo(route, parameter) must not end the denial");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-152: RerouteWithParameters that cannot be built ends in rerouteToError")
+  void rerouteWithParametersFailure_failsClosed() {
+    RecordingEvent event = new RecordingEvent();
+    event.failParameterReroute = true;
+
+    mapper.apply(new AccessDecision.RerouteWithParameters<>("docs", List.of("a", "b")), event);
+
+    assertInstanceOf(SecurityException.class, event.errorInstance);
   }
 
   @Test
@@ -155,6 +218,7 @@ class VaadinAccessDecisionMapperTest {
     String errorMessage;
     Object singleParameter;
     List<?> parameters;
+    boolean failParameterReroute;
 
     private RecordingEvent() {
       super(
@@ -169,12 +233,21 @@ class VaadinAccessDecisionMapperTest {
     @Override public void forwardTo(String location) { this.forwardRoute = location; }
     @Override public void rerouteTo(String route)    { this.rerouteRoute = route; }
     @Override public <T> void rerouteTo(String route, T parameter) {
+      failIfRequested(route);
       this.rerouteRoute = route;
       this.singleParameter = parameter;
     }
     @Override public <T> void rerouteTo(String route, List<T> parameters) {
+      failIfRequested(route);
       this.rerouteRoute = route;
       this.parameters = parameters;
+    }
+    /** Vaadin's own answer when no route accepts the parameters. */
+    private void failIfRequested(String route) {
+      if (failParameterReroute) {
+        throw new IllegalArgumentException(
+            "No route '" + route + "' accepting the parameters was found.");
+      }
     }
     @Override public void rerouteToError(Class<? extends Exception> type) {
       this.errorType = type;
@@ -185,7 +258,17 @@ class VaadinAccessDecisionMapperTest {
     }
   }
 
+  /**
+   * A real registry holding the two routes the reroute tests point to. Since JS-SEC-152
+   * the mapper resolves the route before it reroutes, so an empty registry would turn
+   * every named reroute into the fail-closed fallback.
+   */
   private static final class TestRouteRegistry extends AbstractRouteRegistry {
+    TestRouteRegistry() {
+      setRoute("admin", DummyTarget.class, List.of());
+      setRoute("login", DummyTarget.class, List.of());
+    }
+
     @Override public VaadinContext getContext() { return null; }
   }
 
