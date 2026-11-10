@@ -59,7 +59,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("SetupView — initial-admin creation form")
 class SetupViewBrowserlessTest extends BrowserlessTest {
 
-  private static final String KNOWN_TOKEN = "TEST-TOKN-1111-2222-AAAA";
+  // Must be in the generator's format (JS-SEC-130): five groups of four from
+  // the alphabet without O, I, 0 and 1 - a token file with any other value is
+  // not adopted by the store.
+  private static final String KNOWN_TOKEN = "TEST-TKNS-2222-3333-AAAA";
 
   private Path tokenFile;
 

@@ -172,7 +172,7 @@ class MyLoginViewExtendedBrowserlessTest extends BrowserlessTest {
     // bootstrapRequired() returns true.
     Path tokenFile = Files.createTempFile("test-bootstrap", ".txt");
     Files.writeString(tokenFile,
-        "token=TEST-TOKN-9999-AAAA-BBBB" + System.lineSeparator()
+        "token=TEST-TKNS-9999-AAAA-BBBB" + System.lineSeparator()
             + "createdAt=" + Instant.now() + System.lineSeparator());
     System.setProperty("security.bootstrap.mode", "PERSISTENT_FILE");
     System.setProperty("security.bootstrap.token.file", tokenFile.toString());
