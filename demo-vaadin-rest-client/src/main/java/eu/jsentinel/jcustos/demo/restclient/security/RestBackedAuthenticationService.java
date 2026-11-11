@@ -21,9 +21,6 @@ import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.autoservice.api.JCustosAutoService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
-import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
-import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.demo.restclient.backend.BackendClientProvider;
 import eu.jsentinel.jcustos.demo.restclient.backend.Credentials;
 import eu.jsentinel.jcustos.demo.restclient.backend.LoginResult;
@@ -42,10 +39,13 @@ import java.time.Instant;
  * ({@code loadSubject}, {@code SubjectStore.currentSubject(...)}) return
  * them without another round-trip.
  * <p>
- * Repeated failures are throttled locally via the
- * {@link LoginAttemptPolicy} resolved through
- * {@link JCustosServiceResolver}, so a brute-force attempt stops at the
- * Vaadin layer before issuing yet another HTTP call against the backend.
+ * Repeated failures are throttled locally, but not from here: since 00.84.00
+ * the library {@code LoginView} runs the complete {@code LoginAttemptPolicy}
+ * protocol around {@link #checkCredentials(Credentials)} (JS-SEC-124). A
+ * locked-out attempt never reaches this service, so a brute-force attempt
+ * still stops at the Vaadin layer before issuing yet another HTTP call
+ * against the backend; a second policy call from here would reserve and count
+ * every attempt twice.
  */
 @JCustosAutoService(AuthenticationService.class)
 public class RestBackedAuthenticationService
@@ -57,23 +57,12 @@ public class RestBackedAuthenticationService
       return false;
     }
 
-    LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
-    LoginAttemptContext attempt = LoginAttemptContext.now(
-        credentials.username(), currentClientAddress(), null);
-
-    LoginAttemptDecision decision = policy.beforeAttempt(attempt);
-    if (decision instanceof LoginAttemptDecision.LockedOut) {
-      return false;
-    }
-
     LoginResult result = BackendClientProvider.client().login(credentials);
     if (result instanceof LoginResult.Authenticated(String token, RemoteUser user)) {
       ClientJCustosContext.setActiveLogin(token, user);
-      policy.recordSuccess(attempt);
-      auditLoginSucceeded(user, attempt.clientAddress());
+      auditLoginSucceeded(user, currentClientAddress());
       return true;
     }
-    policy.recordFailure(attempt);
     return false;
   }
 

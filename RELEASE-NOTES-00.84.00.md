@@ -1333,6 +1333,22 @@ is per node and holds 10 000 sessions; deployments with several nodes revoke by 
 `RestSessionRevocation.requireRecord(true)`, which refuses every session id without a record.
 `.storeBacked(...)` on a REST bootstrap is no longer reported as `rest/session-store-unused`.
 
+## The Vaadin `LoginView` consults the login-attempt policy itself (addition to SA24, JS-SEC-124, CWE-307, CWE-1188)
+
+The throttling default of 00.84.00 did not reach an application that used the library `LoginView`
+with a plain `AuthenticationService`: the view called `checkCredentials()` directly, and a limit on
+password guessing existed only where the service implemented it. The view now runs the complete
+protocol around `checkCredentials()` — `beforeAttempt`, then exactly one of `confirmSuccess`,
+`recordFailure` or `abandonAttempt` — keyed on the typed user name and on the address of the
+registered `ClientAddressResolver`. A locked-out attempt does not reach the credential check; a
+`CredentialVerificationUnavailableException` gives the attempt back and counts nothing; a login the
+policy refuses after the check (the key was locked meanwhile) is undone: `LoginFailed` is audited
+and the session ended with the reason `LoginNotConfirmed`. New hooks: `reactOnLockedOut(lockout)`
+and `reactOnVerificationUnavailable()`, both defaulting to `reactOnFailedLogin()`. **Consumers:** an
+`AuthenticationService` that calls the `LoginAttemptPolicy` itself now counts every attempt twice
+behind this view — remove those calls, as the in-repo demos did, or override
+`throttleLoginAttempts()` to return `false` when the service must keep them.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

@@ -6,9 +6,6 @@ import eu.jsentinel.jcustos.audit.LoginSucceeded;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.autoservice.api.JCustosAutoService;
-import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
-import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
-import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.UserDirectoryProvider;
@@ -23,9 +20,11 @@ import java.time.Instant;
  * {@code META-INF/services/eu.jsentinel.jcustos.authentication.AuthenticationService}
  * entry at compile time. No hand-written service file required.
  *
- * <p>Consults the active {@link LoginAttemptPolicy} for throttling
- * before delegating to the user directory; records success / failure
- * back into the policy so brute-force protection works.
+ * <p>The login throttle is not consulted here. Since 00.84.00 the library
+ * {@code LoginView} runs the complete {@code LoginAttemptPolicy} protocol
+ * around {@link #checkCredentials(Credentials)} (JS-SEC-124): it asks before
+ * the call and reports success, failure or "no verdict" afterwards. A second
+ * call from this service would reserve and count every attempt twice.
  */
 @JCustosAutoService(AuthenticationService.class)
 public class MyAuthenticationService
@@ -37,23 +36,9 @@ public class MyAuthenticationService
       return false;
     }
 
-    LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
-    LoginAttemptContext attempt = LoginAttemptContext.now(
-        credentials.username(), currentClientAddress(), null);
-
-    LoginAttemptDecision decision = policy.beforeAttempt(attempt);
-    if (decision instanceof LoginAttemptDecision.LockedOut lockout) {
-      logger().warn("Login throttled for username={} (remaining={}s, failedAttempts={})",
-          credentials.username(), lockout.remaining().toSeconds(), lockout.failedAttempts());
-      return false;
-    }
-
     boolean ok = UserDirectoryProvider.directory().checkCredentials(credentials);
     if (ok) {
-      policy.recordSuccess(attempt);
-      auditLoginSucceeded(credentials.username(), attempt.clientAddress());
-    } else {
-      policy.recordFailure(attempt);
+      auditLoginSucceeded(credentials.username(), currentClientAddress());
     }
     return ok;
   }

@@ -40,7 +40,6 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -76,35 +75,30 @@ class MyAuthenticationServiceTest {
   @DisplayName("null credentials → false, policy never consulted, no audit")
   void nullCredentialsRejected() {
     assertFalse(service.checkCredentials(null));
-    assertEquals(0, policy.beforeAttemptCalls);
+    assertEquals(0, policy.calls);
     assertEquals(0, audit.events().size());
   }
 
   @Test
-  @DisplayName("Lockout decision short-circuits — no directory check, no success audit")
-  void lockoutShortCircuits() {
+  @DisplayName("JS-SEC-124: the service never consults the LoginAttemptPolicy — the library LoginView owns the protocol")
+  void serviceLeavesThrottlingToTheView() {
+    // A policy that would refuse everything: the service must not even ask it. Asked from
+    // here as well, every attempt would be reserved and counted twice.
     policy.next = new LoginAttemptDecision.LockedOut(Duration.ofMinutes(5), 7);
 
-    assertFalse(service.checkCredentials(new Credentials("admin", "admin")));
+    assertTrue(service.checkCredentials(new Credentials("admin", "admin")));
+    assertFalse(service.checkCredentials(new Credentials("admin", "WRONG")));
 
-    assertEquals(1, policy.beforeAttemptCalls);
-    assertEquals(0, policy.recordSuccessCalls,
-        "recordSuccess must not fire when the gate denies the attempt");
-    assertEquals(0, policy.recordFailureCalls,
-        "recordFailure must not fire when the policy itself shorted the attempt");
-    assertTrue(audit.events().stream().noneMatch(LoginSucceeded.class::isInstance),
-        "no LoginSucceeded event for a lockout");
+    assertEquals(0, policy.calls,
+        "beforeAttempt / recordSuccess / recordFailure / confirmSuccess / abandonAttempt "
+            + "belong to LoginView.validate(), not to the AuthenticationService");
   }
 
   @Test
-  @DisplayName("Valid credentials → true, recordSuccess + LoginSucceeded audit")
-  void successPathRecordsAndAudits() {
-    policy.next = new LoginAttemptDecision.Allowed();
-
+  @DisplayName("Valid credentials → true + LoginSucceeded audit carrying the user name")
+  void successPathAudits() {
     assertTrue(service.checkCredentials(new Credentials("admin", "admin")));
 
-    assertEquals(1, policy.recordSuccessCalls);
-    assertEquals(0, policy.recordFailureCalls);
     LoginSucceeded event = audit.events().stream()
         .filter(LoginSucceeded.class::isInstance)
         .map(LoginSucceeded.class::cast)
@@ -114,14 +108,10 @@ class MyAuthenticationServiceTest {
   }
 
   @Test
-  @DisplayName("Wrong password → false, recordFailure, no audit")
-  void failurePathRecords() {
-    policy.next = new LoginAttemptDecision.Allowed();
-
+  @DisplayName("Wrong password → false, no audit from the service")
+  void failurePathIsSilent() {
     assertFalse(service.checkCredentials(new Credentials("admin", "WRONG")));
 
-    assertEquals(0, policy.recordSuccessCalls);
-    assertEquals(1, policy.recordFailureCalls);
     assertTrue(audit.events().stream().noneMatch(LoginSucceeded.class::isInstance),
         "failed logins must not emit LoginSucceeded");
   }
@@ -129,7 +119,6 @@ class MyAuthenticationServiceTest {
   @Test
   @DisplayName("Audit-sink RuntimeException is swallowed — login still returns true")
   void auditFailureDoesNotBlockLogin() {
-    policy.next = new LoginAttemptDecision.Allowed();
     JCustosServiceResolver.setJCustosAuditService(new JCustosAuditService() {
       @Override public void publish(AuditEvent event) { throw new RuntimeException("boom"); }
       @Override public List<AuditEvent> query(AuditQuery q) { return List.of(); }
@@ -156,42 +145,32 @@ class MyAuthenticationServiceTest {
     assertSame(MyUser.class, service.subjectType());
   }
 
-  @Test
-  @DisplayName("LoginAttemptContext is built from the credentials' username")
-  void contextCarriesUsername() {
-    policy.next = new LoginAttemptDecision.Allowed();
-    service.checkCredentials(new Credentials("admin", "wrong"));
-
-    assertEquals(1, policy.beforeAttemptCalls);
-    assertNotNull(policy.lastContext);
-    assertEquals("admin", policy.lastContext.username());
-  }
-
-  @Test
-  @DisplayName("Lockout decision is recognised by sealed-type pattern match")
-  void lockoutIsLockedOutInstance() {
-    policy.next = new LoginAttemptDecision.LockedOut(Duration.ofSeconds(30), 3);
-    service.checkCredentials(new Credentials("admin", "admin"));
-    assertInstanceOf(LoginAttemptDecision.LockedOut.class, policy.next);
-  }
-
   // ── Fixtures ──────────────────────────────────────────────────
 
+  /** Counts every call of the protocol, including the 00.84.00 default methods. */
   private static final class CountingPolicy implements LoginAttemptPolicy {
     LoginAttemptDecision next = new LoginAttemptDecision.Allowed();
-    int beforeAttemptCalls = 0;
-    int recordSuccessCalls = 0;
-    int recordFailureCalls = 0;
-    LoginAttemptContext lastContext;
+    int calls = 0;
 
     @Override public LoginAttemptDecision beforeAttempt(LoginAttemptContext ctx) {
-      beforeAttemptCalls++;
-      lastContext = ctx;
+      calls++;
       return next;
     }
 
-    @Override public void recordSuccess(LoginAttemptContext ctx) { recordSuccessCalls++; }
+    @Override public LoginAttemptDecision peek(LoginAttemptContext ctx) {
+      calls++;
+      return next;
+    }
 
-    @Override public void recordFailure(LoginAttemptContext ctx) { recordFailureCalls++; }
+    @Override public void recordSuccess(LoginAttemptContext ctx) { calls++; }
+
+    @Override public void recordFailure(LoginAttemptContext ctx) { calls++; }
+
+    @Override public LoginAttemptDecision confirmSuccess(LoginAttemptContext ctx) {
+      calls++;
+      return next;
+    }
+
+    @Override public void abandonAttempt(LoginAttemptContext ctx) { calls++; }
   }
 }

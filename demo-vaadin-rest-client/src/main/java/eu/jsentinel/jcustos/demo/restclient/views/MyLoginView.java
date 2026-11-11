@@ -83,8 +83,9 @@ public class MyLoginView extends LoginView implements HasLogger, BeforeEnterObse
 
   /**
    * Queries the locally configured {@link LoginAttemptPolicy} for the
-   * username. {@code RestBackedAuthenticationService} consults the same
-   * policy <em>before</em> hitting the backend, so a lockout produced
+   * username. The library {@link LoginView} consults the same policy
+   * <em>before</em> the backend is called and records the failure before
+   * {@link #reactOnFailedLogin()} runs (JS-SEC-124), so a lockout found
    * here is the local-side throttle (defeats brute-force loops at the
    * Vaadin layer regardless of what the backend does).
    */
@@ -106,6 +107,17 @@ public class MyLoginView extends LoginView implements HasLogger, BeforeEnterObse
   /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
     return VaadinClientAddress.current().orElse(null);
+  }
+
+  /**
+   * JS-SEC-124: the library {@link LoginView} asks the {@link LoginAttemptPolicy} before
+   * it checks the credentials and calls this method when the attempt is refused - the
+   * decision arrives here, there is nothing to look up.
+   */
+  @Override
+  protected void reactOnLockedOut(LoginAttemptDecision.LockedOut lockout) {
+    logger().info("Login throttled for user {}", username());
+    showLockoutBanner(lockout);
   }
 
   private static void showLockoutBanner(LoginAttemptDecision.LockedOut lockout) {

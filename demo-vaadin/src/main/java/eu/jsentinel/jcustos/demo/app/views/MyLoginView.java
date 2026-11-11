@@ -92,10 +92,10 @@ public class MyLoginView
 
   /**
    * Asks the configured {@link LoginAttemptPolicy} whether the username
-   * is currently throttled. The decision returned by the policy reflects
-   * the state <em>after</em> {@code MyAuthenticationService.checkCredentials}
-   * has recorded the failure — so a lockout produced by the just-rejected
-   * attempt surfaces here.
+   * is currently throttled. The library {@link LoginView} has recorded the
+   * failure before it calls {@link #reactOnFailedLogin()} (JS-SEC-124), so
+   * the decision reflects the state <em>after</em> the just-rejected
+   * attempt — a lockout that attempt produced surfaces here.
    */
   private static LoginAttemptDecision currentLockoutDecision(String username) {
     if (username == null || username.isBlank()) {
@@ -115,6 +115,17 @@ public class MyLoginView
   /** JS-SEC-061: resolved through the registered ClientAddressResolver, never getRemoteAddr() directly. */
   private static String currentClientAddress() {
     return VaadinClientAddress.current().orElse(null);
+  }
+
+  /**
+   * JS-SEC-124: the library {@link LoginView} asks the {@link LoginAttemptPolicy} before
+   * it checks the credentials and calls this method when the attempt is refused - the
+   * decision arrives here, there is nothing to look up.
+   */
+  @Override
+  protected void reactOnLockedOut(LoginAttemptDecision.LockedOut lockout) {
+    logger().info("Login throttled for user {}", username());
+    showLockoutBanner(lockout);
   }
 
   private static void showLockoutBanner(LoginAttemptDecision.LockedOut lockout) {

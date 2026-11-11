@@ -18,6 +18,9 @@ package eu.jsentinel.jcustos.demo.app.browserless;
 
 import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptConfiguration;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
@@ -39,15 +42,19 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.EnumSet;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Browserless adapter test for the lockout banner in
- * {@link MyLoginView}. After a failed login attempt, the view re-queries
- * {@link LoginAttemptPolicy#beforeAttempt(LoginAttemptContext)} and, when
- * it now reports {@link LoginAttemptDecision.LockedOut}, surfaces a red
- * Notification with the remaining lockout time and failure count instead
- * of the generic "Credentials not accepted" toast.
+ * {@link MyLoginView}. Since 00.84.00 the library {@link LoginView} runs the
+ * {@link LoginAttemptPolicy} protocol itself (JS-SEC-124): a refused attempt
+ * reaches the view through {@code reactOnLockedOut}, and after a failed
+ * attempt the view looks at the policy with
+ * {@link LoginAttemptPolicy#peek(LoginAttemptContext)}. In both cases a
+ * {@link LoginAttemptDecision.LockedOut} surfaces as a red Notification with
+ * the remaining lockout time and failure count instead of the generic
+ * "Credentials not accepted" toast.
  */
 @DisplayName("MyLoginView — lockout banner via BrowserlessTest")
 class LockoutBannerBrowserlessTest extends BrowserlessTest {
@@ -106,6 +113,61 @@ class LockoutBannerBrowserlessTest extends BrowserlessTest {
         "Notification must include the failure count from the policy: " + message);
     assertTrue(message.contains("5 min"),
         "Notification must include the formatted remaining time: " + message);
+  }
+
+  private void submit(String username, String password) {
+    test($view(TextField.class).id(LoginView.TF_USERNAME_ID)).setValue(username);
+    test($view(PasswordField.class).id(LoginView.PF_PASSWORD_ID)).setValue(password);
+    test($view(Button.class).id(LoginView.BTN_LOGIN_ID)).click();
+  }
+
+  private long lockoutBanners() {
+    return $(Notification.class).all().stream()
+        .map(n -> test(n).getText())
+        .filter(text -> text.contains("Account locked"))
+        .count();
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: with the demo's real policy the fifth wrong password locks - not the third - and the correct one is then refused")
+  void realPolicyLocksAtTheConfiguredThresholdAndRefusesTheCorrectPassword() {
+    // The policy the demo registers through META-INF/services: InMemoryLoginAttemptPolicy with
+    // its default thresholds. View and service used to call it both; counted twice, the
+    // lockout would set in after three failures.
+    JCustosServiceResolver.setLoginAttemptPolicy(new InMemoryLoginAttemptPolicy());
+    int threshold = LoginAttemptConfiguration.defaults().failureThreshold();
+    navigate(MyLoginView.class);
+
+    for (int i = 1; i < threshold; i++) {
+      submit("admin", "wrong guess " + i);
+      assertEquals(0, lockoutBanners(), "no lockout after " + i + " failed attempt(s)");
+    }
+
+    // The failure that reaches the threshold: the view records it and peeks afterwards.
+    submit("admin", "wrong guess " + threshold);
+    assertEquals(1, lockoutBanners(), "the attempt that completes the threshold shows the banner");
+
+    // Locked: the correct password is not evaluated, the banner comes from reactOnLockedOut.
+    submit("admin", "admin");
+    assertEquals(2, lockoutBanners());
+    assertTrue(SubjectStores.subjectStore().currentSubject(MyUser.class).isEmpty(),
+        "the correct password must not log in while the account is locked");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-124: one failure short of the threshold the correct password still logs in")
+  void belowTheThresholdTheCorrectPasswordLogsIn() {
+    JCustosServiceResolver.setLoginAttemptPolicy(new InMemoryLoginAttemptPolicy());
+    int threshold = LoginAttemptConfiguration.defaults().failureThreshold();
+    navigate(MyLoginView.class);
+    for (int i = 1; i < threshold; i++) {
+      submit("admin", "wrong guess " + i);
+    }
+
+    submit("admin", "admin");
+
+    assertTrue(SubjectStores.subjectStore().currentSubject(MyUser.class).isPresent());
+    assertEquals(0, lockoutBanners());
   }
 
   private static final class AlwaysLockedPolicy implements LoginAttemptPolicy {
