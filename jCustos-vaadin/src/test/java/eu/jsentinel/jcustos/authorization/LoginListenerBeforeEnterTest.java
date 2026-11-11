@@ -27,6 +27,7 @@ import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.Location;
 import com.vaadin.flow.router.NavigationTrigger;
 import com.vaadin.flow.router.Router;
+import com.vaadin.flow.router.RouterLayout;
 import com.vaadin.flow.router.internal.AbstractRouteRegistry;
 import com.vaadin.flow.server.VaadinContext;
 import org.junit.jupiter.api.AfterEach;
@@ -142,10 +143,53 @@ class LoginListenerBeforeEnterTest {
         "unrestricted target must not be forwarded even with a subject");
   }
 
+  // ── Restriction on a router layout (JS-SEC-154) ────────────────
+
+  @Test
+  @DisplayName("a target protected through its layout is restricted: with a subject, notARestrictedTarget is not invoked")
+  void layoutRestrictedWithSubject_isNotReportedAsUnrestricted() {
+    store.setCurrentSubject("alice", String.class);
+    RecordingEvent event = new RecordingEvent(UnrestrictedTarget.class, List.of(RestrictedLayout.class));
+
+    listener.beforeEnter(event);
+
+    assertNull(listener.lastUnrestrictedTarget,
+        "the route is protected by @RequiresRole on its layout; "
+            + "notARestrictedTarget must not claim otherwise");
+    assertNull(event.forwardTarget);
+  }
+
+  @Test
+  @DisplayName("a target protected through its layout, without a subject, is forwarded to the login view")
+  void layoutRestrictedNoSubject_forwardsToLogin() {
+    RecordingEvent event = new RecordingEvent(UnrestrictedTarget.class, List.of(RestrictedLayout.class));
+
+    listener.beforeEnter(event);
+
+    assertSame(StubLoginView.class, event.forwardTarget);
+    assertNull(listener.lastUnrestrictedTarget);
+  }
+
+  @Test
+  @DisplayName("an unrestricted layout does not make its target restricted")
+  void plainLayout_keepsTargetUnrestricted() {
+    RecordingEvent event = new RecordingEvent(UnrestrictedTarget.class, List.of(PlainLayout.class));
+
+    listener.beforeEnter(event);
+
+    assertSame(UnrestrictedTarget.class, listener.lastUnrestrictedTarget);
+    assertNull(event.forwardTarget);
+  }
+
   // ── Fixtures ──────────────────────────────────────────────────
 
   @RequiresRole("ROLE_ADMIN")
   static class RestrictedTarget extends Component { }
+
+  @RequiresRole("ROLE_ADMIN")
+  static class RestrictedLayout extends Component implements RouterLayout { }
+
+  static class PlainLayout extends Component implements RouterLayout { }
 
   static class UnrestrictedTarget extends Component { }
 
@@ -173,13 +217,18 @@ class LoginListenerBeforeEnterTest {
     Class<?> rerouteTarget;
 
     RecordingEvent(Class<? extends Component> navigationTarget) {
+      this(navigationTarget, List.of());
+    }
+
+    RecordingEvent(Class<? extends Component> navigationTarget,
+                   List<Class<? extends RouterLayout>> layouts) {
       super(
           new Router(new TestRouteRegistry()),
           NavigationTrigger.PROGRAMMATIC,
           new Location(""),
           navigationTarget,
           new UI(),
-          List.of());
+          layouts);
     }
 
     @Override public void forwardTo(Class<? extends Component> navigationTarget) {

@@ -30,6 +30,8 @@ import eu.jsentinel.jcustos.dx.vaadin.routes.SecureRouteDiscovery;
 import eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementContext;
 import eu.jsentinel.jcustos.dx.vaadin.routes.SessionManagementRoute;
 import eu.jsentinel.jcustos.dx.vaadin.routes.VaadinRouteContext;
+import eu.jsentinel.jcustos.session.SessionStore;
+import eu.jsentinel.jcustos.session.vaadin.VaadinSessionRevocation;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -236,6 +238,14 @@ final class VaadinJCustosBootstrapImpl
           SubjectStore.class, existing.getClass(), "bootstrap-explicit", false));
     }
 
+    // JS-SEC-131 (CWE-613): store-backed sessions are revocable, with or without the
+    // session-management view. The per-request check of SessionLifetimeListener reads the
+    // store registered here, so a record that another node, a housekeeping job or an
+    // administration tool marked REVOKED or removed ends the session on its next request.
+    // Until 00.84.00 the store was registered only together with the view; an application
+    // that kept its session inventory but built its own administration ran without the check.
+    publishSessionStoreForRevocation(services);
+
     // V00.73 (Prompt 008): SessionManagementView activation.
     // Validates the prerequisite (SessionStore present) and
     // publishes the store into SessionManagementContext so the
@@ -307,6 +317,23 @@ final class VaadinJCustosBootstrapImpl
     return new JCustosRuntime(services, warnings, mode);
   }
 
+  /**
+   * Registers the {@code SessionStore} of {@code .sessions(s -> s.storeBacked(...))} with
+   * {@link VaadinSessionRevocation} (JS-SEC-131, CWE-613). Without a configured store
+   * nothing is registered and nothing is cleared: an application may have called
+   * {@link VaadinSessionRevocation#useSessionStore} itself.
+   */
+  private void publishSessionStoreForRevocation(List<RegisteredJCustosService> services) {
+    SessionStore sessionStore = state.sessionState().sessionStore();
+    if (sessionStore == null) {
+      return;
+    }
+    VaadinSessionRevocation.useSessionStore(sessionStore);
+    services.add(new RegisteredJCustosService(
+        VaadinSessionRevocation.class, sessionStore.getClass(),
+        "bootstrap-session-revocation", false));
+  }
+
   @SuppressWarnings("unused")
   private static void discard(Object ignored) {
     // intentional no-op
@@ -327,7 +354,10 @@ final class VaadinJCustosBootstrapImpl
    *       {@code "step-up"} without a view; that stays a WARNING in every mode, so STRICT
    *       does not force an unused view into existence.</li>
    *   <li>{@code vaadin/route-check-unavailable} - INFO when the route registry cannot be
-   *       read where {@code install()} runs; the two checks are then skipped.</li>
+   *       read where {@code install()} runs; the two checks are then skipped. That is the
+   *       case outside a service - a {@code ServletContextListener}, a {@code main} method -
+   *       not inside {@code VaadinServiceInitListener.serviceInit}, where the service is the
+   *       current instance and both checks run.</li>
    * </ul>
    */
   private void checkRerouteTargets(List<JCustosBootstrapWarning> warnings) {
@@ -344,7 +374,8 @@ final class VaadinJCustosBootstrapImpl
           "The Vaadin route registry could not be read at bootstrap, so the login route '"
               + login + "' and the step-up route '" + JCustosServiceResolver.stepUpRouteName()
               + "' were not checked against the registered routes.",
-          "Nothing to do if both routes exist. To have them checked, run "
+          "Nothing to do if both routes exist. To have them checked, call install() from a "
+              + "VaadinServiceInitListener - the service is current there - or run "
               + "JCustosDiagnostics.inspect() once a VaadinService is current."));
       return;
     }

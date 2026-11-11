@@ -41,8 +41,13 @@ public final class RouteNameCheck {
     UNREGISTERED,
     /**
      * The registry could not be read - no {@code VaadinService} is current, as in a
-     * {@code ServletContextListener} or during {@code VaadinServiceInitListener.serviceInit}.
+     * {@code ServletContextListener}, a static initialiser or a {@code main} method.
      * Nothing can be said about the name.
+     * <p>
+     * Inside {@code VaadinServiceInitListener.serviceInit} the service <em>is</em> current
+     * ({@code VaadinService.init()} runs its init listeners with the service as current
+     * instance), so a bootstrap called from there is checked against the routes the servlet
+     * container registered at context start-up.
      */
     UNAVAILABLE
   }

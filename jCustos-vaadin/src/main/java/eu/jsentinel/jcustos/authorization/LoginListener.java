@@ -19,7 +19,7 @@ package eu.jsentinel.jcustos.authorization;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
-import eu.jsentinel.jcustos.authorization.impl.JCustosAnnotationScanner;
+import eu.jsentinel.jcustos.authorization.impl.RouteRestrictionResolver;
 import eu.jsentinel.jcustos.authorization.impl.VaadinNavigationAccessDecisionMapper;
 import eu.jsentinel.jcustos.authorization.navigation.NavigationAccessDecision;
 import eu.jsentinel.jcustos.authorization.navigation.NavigationAccessDecisionService;
@@ -27,6 +27,9 @@ import eu.jsentinel.jcustos.authorization.navigation.NavigationJCustosContext;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
+import com.vaadin.flow.router.RouterLayout;
+
+import java.util.List;
 
 
 /**
@@ -46,8 +49,13 @@ public abstract class LoginListener<U>
   /** Decision service for authentication-phase navigation checks. */
   private final NavigationAccessDecisionService decisionService = new NavigationAccessDecisionService();
 
-  /** Scanner for framework security annotations. */
-  private final JCustosAnnotationScanner scanner = new JCustosAnnotationScanner();
+  /**
+   * Resolves the restrictions of a navigation - the same class the
+   * {@code AuthorizationListener} enforces with (JS-SEC-154), so both listeners agree on
+   * what "restricted" means: a restriction on the target, inherited, composed, or declared
+   * on a layout of the chain.
+   */
+  private final RouteRestrictionResolver restrictions = new RouteRestrictionResolver();
 
   /** Maps authentication-phase decisions to Vaadin navigation operations. */
   private final VaadinNavigationAccessDecisionMapper decisionMapper =
@@ -60,7 +68,8 @@ public abstract class LoginListener<U>
   @Override
   public void beforeEnter(BeforeEnterEvent beforeEnterEvent) {
     final Class<?> navigationTarget = beforeEnterEvent.getNavigationTarget();
-    final boolean isRestricted = isRestrictedTarget(navigationTarget);
+    final boolean isRestricted =
+        isRestrictedTarget(navigationTarget, beforeEnterEvent.getLayouts());
     final boolean isLoginView = navigationTarget.equals(loginNavigationTarget());
     final boolean subjectAvailable = SubjectStores.subjectStore()
         .currentSubject(subjectType())
@@ -91,13 +100,16 @@ public abstract class LoginListener<U>
     }
   }
 
-  private boolean isRestrictedTarget(Class<?> navigationTarget) {
-    return scanner.scan(navigationTarget)
-        .isPresent();
+  private boolean isRestrictedTarget(Class<?> navigationTarget,
+                                     List<Class<? extends RouterLayout>> layouts) {
+    return !restrictions.resolve(navigationTarget, layouts).isEmpty();
   }
 
   /**
-   * Called when the navigation target does not carry a restriction annotation.
+   * Called when no restriction applies to the navigation: neither the navigation target
+   * nor a router layout it is rendered in carries a restriction annotation. Until 00.84.00
+   * only the target was looked at, so the method was also called for a route protected
+   * through its layout (JS-SEC-154).
    *
    * @param navigationTarget the unrestricted target class
    */

@@ -1381,6 +1381,35 @@ login of the subject. The event goes to the audit service handed to the new cons
 to the one registered with `JCustosServiceResolver`; a failing sink is logged and does not undo the
 revocation. **Consumers:** nothing to change; alerting on this reason is recommended.
 
+## Store-backed sessions are revocable without the session-management view (addition to SA31, JS-SEC-131, CWE-613)
+
+The Vaadin bootstrap registered the `SessionStore` for the per-request revocation check only
+together with `.sessionManagementView(...)`. An application that kept a session inventory but built
+its own administration ran without the check, so a record revoked by another node or a tool was not
+honoured. `install()` now registers the store whenever `.sessions(s -> s.storeBacked(...))` is
+configured and lists it as `bootstrap-session-revocation`. **Consumers:** a record with the status
+`REVOKED`, or one that was seen and then removed, now ends the session on its next request in every
+such application.
+
+## The route checks run when the bootstrap is called from `serviceInit` (addition to SA52, JS-SEC-152, CWE-636)
+
+The documentation of `RouteNameCheck` and of `vaadin/route-check-unavailable` stated that the route
+registry cannot be read during `VaadinServiceInitListener.serviceInit`. That is not so: Vaadin runs
+its init listeners with the service as current instance, and a test that starts a real
+`VaadinServletService` now shows the login-route check and the deny-by-default discovery working
+from inside `serviceInit`. The registry is unavailable only outside a service — a
+`ServletContextListener`, a `main` method. Documentation and the suggested fix were corrected; no
+behaviour changed. **Consumers:** call `install()` from a `VaadinServiceInitListener` to have both
+checks at start-up.
+
+## `LoginListener` recognises a route protected through its layout (addition to SA54, JS-SEC-154)
+
+`LoginListener` still looked at the navigation target only, so `notARestrictedTarget(...)` was
+called for a route whose restriction sits on a router layout. It now uses the same
+`RouteRestrictionResolver` as the authorisation listener; an anonymous visitor to such a route is
+forwarded to the login view by this listener already. No security effect — the authorisation
+listener denied the navigation before as well.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
