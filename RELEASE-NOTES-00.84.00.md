@@ -1372,6 +1372,15 @@ reset link is retired and no listener is called. **Consumers:** an exhaustive `s
 `PasswordChangeResult` needs a branch for the new variant; answer it with 503 or 429, count no
 failure and audit no rejected password.
 
+## A replayed remember-me token is audited (addition to SA28, JS-SEC-128, CWE-778, CWE-294)
+
+When an already exchanged remember-me token was presented again, `StoreBackedRememberMeService`
+revoked the subject's tokens and wrote a log line only. It now also publishes `SessionInvalidated`
+with the reason `RememberMeTokenReplay` and no session id — the event stands for every remembered
+login of the subject. The event goes to the audit service handed to the new constructor, otherwise
+to the one registered with `JCustosServiceResolver`; a failing sink is logged and does not undo the
+revocation. **Consumers:** nothing to change; alerting on this reason is recommended.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

@@ -17,7 +17,10 @@
 package eu.jsentinel.jcustos.authentication;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.credential.token.TokenHasher;
 import eu.jsentinel.jcustos.credential.token.TokenHashers;
@@ -59,6 +62,13 @@ import static java.util.Objects.requireNonNull;
  * tokens ({@link RememberMeTokenStore#findRotated}); with a store that does
  * not, rotation still works and a replayed token is simply unknown.</p>
  *
+ * <p>The replay is audited: a {@link SessionInvalidated} event with the reason
+ * {@value #REASON_TOKEN_REPLAY} and the subject whose remembered logins were
+ * revoked, without a session id - the event stands for every remembered login
+ * of the subject, not for one servlet session. It goes to the audit service
+ * handed to the constructor, or to
+ * {@link JCustosServiceResolver#securityAuditService()} when none was.</p>
+ *
  * <p>{@link #validate(String)} stays for callers that only need to look at a
  * token; it does not rotate.</p>
  *
@@ -86,11 +96,21 @@ public final class StoreBackedRememberMeService implements HasLogger {
    */
   public static final Duration ROTATION_RACE_TOLERANCE = Duration.ofSeconds(5);
 
+  /**
+   * Reason key of the {@link SessionInvalidated} event that records a replayed
+   * remember-me token and the revocation that followed (JS-SEC-128, CWE-294).
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_TOKEN_REPLAY = "RememberMeTokenReplay";
+
   private final RememberMeTokenStore store;
   private final TokenHasher hasher;
   private final TenantId tenant;
   private final Clock clock;
   private final Supplier<String> tokenSource;
+  /** Audit sink for replays; {@code null} resolves the registered service per event. */
+  private final JCustosAuditService auditService;
 
   /**
    * Convenience constructor: binds to {@link TenantId#DEFAULT},
@@ -121,11 +141,37 @@ public final class StoreBackedRememberMeService implements HasLogger {
                                       TenantId tenant,
                                       Clock clock,
                                       Supplier<String> tokenSource) {
+    this(store, hasher, tenant, clock, tokenSource, null);
+  }
+
+  /**
+   * Full constructor with an explicit audit sink.
+   *
+   * @param store        backing token store; non-null
+   * @param hasher       deterministic {@link TokenHasher} used to hash tokens
+   *                     before persisting them; non-null
+   * @param tenant       tenant scope; {@code null} becomes {@link TenantId#DEFAULT}
+   * @param clock        time source; non-null
+   * @param tokenSource  supplier producing the plain token strings issued to
+   *                     clients; non-null and must return non-blank values
+   * @param auditService sink for the replay event (see the class comment), or
+   *                     {@code null} to resolve
+   *                     {@link JCustosServiceResolver#securityAuditService()}
+   *                     per event
+   * @since 00.84.00
+   */
+  public StoreBackedRememberMeService(RememberMeTokenStore store,
+                                      TokenHasher hasher,
+                                      TenantId tenant,
+                                      Clock clock,
+                                      Supplier<String> tokenSource,
+                                      JCustosAuditService auditService) {
     this.store = requireNonNull(store, "store must not be null");
     this.hasher = requireNonNull(hasher, "hasher must not be null");
     this.tenant = tenant == null ? TenantId.DEFAULT : tenant;
     this.clock = requireNonNull(clock, "clock must not be null");
     this.tokenSource = requireNonNull(tokenSource, "tokenSource must not be null");
+    this.auditService = auditService;
   }
 
   /**
@@ -276,7 +322,7 @@ public final class StoreBackedRememberMeService implements HasLogger {
    * JS-SEC-128 (CWE-613, CWE-294): a hash that is not live but was consumed by
    * a rotation means the token exists in two places. Outside the tolerance for
    * parallel requests every remember-me token of the subject is revoked — the
-   * successor the other holder obtained included.
+   * successor the other holder obtained included — and the incident is audited.
    */
   private void onRotatedTokenPresented(String hash, Instant now) {
     Optional<RememberMeTokenStore.RotatedToken> trail = store.findRotated(hash);
@@ -294,6 +340,26 @@ public final class StoreBackedRememberMeService implements HasLogger {
     logger().warn("authentication/remember-me-replay: a remember-me token that was "
         + "already rotated was presented again; revoked {} token(s) of subject '{}'",
         revoked, consumed.subjectId().value());
+    publishReplay(now, consumed.subjectId());
+  }
+
+  /**
+   * JS-SEC-128 (CWE-778): a replay is a security incident and belongs in the
+   * audit trail, not only in the application log - the log line above is not
+   * what a SIEM or the audit view reads. Published after the revocation, so
+   * the event states what has already happened.
+   */
+  private void publishReplay(Instant at, SubjectId subjectId) {
+    try {
+      JCustosAuditService sink = auditService != null
+          ? auditService
+          : JCustosServiceResolver.securityAuditService();
+      sink.publish(new SessionInvalidated(at, subjectId.value(), null, REASON_TOKEN_REPLAY));
+    } catch (RuntimeException sinkFailure) {
+      // The tokens are revoked; a failing sink must not turn the refusal into an error.
+      logger().warn("authentication/remember-me-replay-not-audited: the audit sink "
+          + "failed for the replay event: {}", sinkFailure.toString());
+    }
   }
 
   /**
