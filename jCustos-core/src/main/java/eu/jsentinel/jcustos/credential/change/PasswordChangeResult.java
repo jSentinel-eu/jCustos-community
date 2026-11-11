@@ -34,10 +34,14 @@ import java.util.Objects;
  * variant collapses to a generic public response at the adapter
  * boundary; the differentiated structural reason stays in audit
  * (CWE-203 / CWE-209).</p>
+ *
+ * <p>Since 00.84.00 the type has the variant {@link VerificationUnavailable};
+ * an exhaustive {@code switch} over the result needs a branch for it.</p>
  */
 public sealed interface PasswordChangeResult
     permits PasswordChangeResult.Succeeded,
             PasswordChangeResult.CurrentPasswordRejected,
+            PasswordChangeResult.VerificationUnavailable,
             PasswordChangeResult.NewPasswordRejected,
             PasswordChangeResult.Blocked,
             PasswordChangeResult.Conflict,
@@ -61,6 +65,19 @@ public sealed interface PasswordChangeResult
    */
   record CurrentPasswordRejected() implements PasswordChangeResult {
     public static final CurrentPasswordRejected INSTANCE = new CurrentPasswordRejected();
+  }
+
+  /**
+   * The current password could not be checked right now - the verification
+   * was shed under load (JS-SEC-126, CWE-703). This says nothing about the
+   * password: the store is untouched, and the adapter answers "try again
+   * later" (HTTP 503 or 429). It must not count a failed attempt and must not
+   * audit a rejected password for it.
+   *
+   * @since 00.84.00
+   */
+  record VerificationUnavailable() implements PasswordChangeResult {
+    public static final VerificationUnavailable INSTANCE = new VerificationUnavailable();
   }
 
   /**

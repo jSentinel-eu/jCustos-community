@@ -52,8 +52,10 @@ import java.util.Optional;
  *   <li>Consult the lifecycle service; status that forbids change
  *       (LOCKED / COMPROMISED / DISABLED) → {@code Blocked}.</li>
  *   <li>Re-authenticate by verifying the supplied current password
- *       (CWE-620). Anything but {@code Verified} →
- *       {@code CurrentPasswordRejected}.</li>
+ *       (CWE-620). A verification that could not be carried out - shed by
+ *       the KDF limiter - → {@code VerificationUnavailable}: "could not
+ *       verify" is not "wrong" (JS-SEC-126, CWE-703). Anything else but
+ *       {@code Verified} → {@code CurrentPasswordRejected}.</li>
  *   <li>Validate the proposed new password through the input policy.
  *       A rejection here surfaces the structural reason.</li>
  *   <li>Hash the new password through {@link PasswordHashingService}.</li>
@@ -69,6 +71,14 @@ import java.util.Optional;
  *       (JS-SEC-128, CWE-613, CWE-640).</li>
  *   <li>Return {@code Succeeded(INVALIDATE_OTHER_SESSIONS)}.</li>
  * </ol>
+ *
+ * <h2>One key per account</h2>
+ * <p>The {@link CredentialStore} decides which spellings of a user name are
+ * the same account (JS-SEC-123, CWE-178). The reset links and the
+ * {@link CredentialChangeListener} are therefore addressed with
+ * {@link CredentialRecord#username()} of the record the store returned, not
+ * with the spelling of the command: a change requested as {@code ALICE}
+ * retires the links and revokes the tokens of the account {@code alice}.</p>
  *
  * <h2>Optional collaborators</h2>
  * <p>{@link #withResetTokenStore(ResetTokenStore)} and
@@ -173,6 +183,13 @@ public final class PasswordChangeService implements HasLogger {
 
     CredentialVerificationResult verifyResult = hashingService.verify(
         command.currentPassword(), record.encodedHash());
+    // JS-SEC-126 (CWE-703, CWE-645): a verification the KDF limiter shed says
+    // nothing about the password. Reported as "wrong", the adapter would count
+    // a failed attempt and audit a rejected password for a user who typed the
+    // right one - under load, that locks correct users out of the change.
+    if (verifyResult.temporarilyUnavailable()) {
+      return PasswordChangeResult.VerificationUnavailable.INSTANCE;
+    }
     if (!(verifyResult instanceof CredentialVerificationResult.Verified)) {
       return PasswordChangeResult.CurrentPasswordRejected.INSTANCE;
     }
@@ -206,21 +223,25 @@ public final class PasswordChangeService implements HasLogger {
     // obtained with the old password is handed to the listener for revocation.
     // Both steps run after the hash is stored, so a failure in them cannot
     // undo the change; it is logged instead of being lost.
+    // JS-SEC-123 (CWE-178): both are addressed with the record's own name. The
+    // reset service keys its links on it, and with the spelling of the command
+    // a change requested as "ALICE" would leave the links of "alice" open.
+    final String account = record.username();
     if (resetTokenStore != null) {
       try {
-        resetTokenStore.retireOpenTokens(command.username());
+        resetTokenStore.retireOpenTokens(account);
       } catch (RuntimeException failure) {
         logger().warn("credential/change-reset-links-not-retired: open reset links of "
             + "user '{}' could not be retired after the password change: {}",
-            command.username(), failure.toString());
+            account, failure.toString());
       }
     }
     try {
-      changeListener.credentialChanged(command.username(),
+      changeListener.credentialChanged(account,
           CredentialChangeListener.Cause.PASSWORD_CHANGED, now);
     } catch (RuntimeException failure) {
       logger().warn("credential/change-listener-failed: listener failed after the "
-          + "password change of user '{}': {}", command.username(), failure.toString());
+          + "password change of user '{}': {}", account, failure.toString());
     }
 
     return new PasswordChangeResult.Succeeded(

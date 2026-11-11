@@ -84,6 +84,19 @@ import java.util.Optional;
  * open link of such a credential lapses unused, the credential returns to
  * {@code COMPROMISED} — see {@link #releaseLapsedReset(String)}.</p>
  *
+ * <h2>One key per account</h2>
+ * <p>The {@link CredentialStore} decides which spellings of a user name are
+ * the same account; {@code InMemoryCredentialStore} folds {@code alice} and
+ * {@code ALICE} onto one record (JS-SEC-123, CWE-178). Since 00.84.00 the
+ * service therefore keys everything it stores for an account - the reset
+ * tokens, the status remembered for {@code RESET_PENDING} - and the audit
+ * events on {@link CredentialRecord#username()} of the record the store
+ * returned, not on the spelling of the request. Before, a link requested as
+ * {@code ALICE} did not retire the link requested as {@code alice}, so
+ * "only the newest link works" (JS-SEC-074) held per spelling, not per
+ * account. The throttle receives the name as it was typed, as its contract
+ * asks; {@code InMemoryAbuseDetectionService} canonicalises it itself.</p>
+ *
  * <h2>Throttle</h2>
  * <p>{@link #withAbuseDetection(AbuseDetectionService)} gives the service a
  * throttle seam. With it, every request is evaluated as
@@ -301,6 +314,11 @@ public final class PasswordResetService implements HasLogger {
       recordOutcome(attempt, AttemptOutcome.FAILURE);
       return ResetTokenCreationResult.UnknownUser.INSTANCE;
     }
+    // JS-SEC-123 (CWE-178): from here on the account is named the way its
+    // record names it. The store decided that the requested spelling is this
+    // account; keying the tokens on the request's spelling instead would give
+    // every spelling a link of its own that the next request does not retire.
+    final String account = credential.get().username();
     CredentialStatus status = credential.get().status();
     // JS-SEC-076 (CWE-284): a reset IS the way out of COMPROMISED — it rotates
     // the secret. Only DISABLED stays blocked; re-enabling is an administrative
@@ -315,15 +333,15 @@ public final class PasswordResetService implements HasLogger {
     SelectorVerifierToken token = tokens.generate();
     TokenDigestRecord digest = tokens.digest(token);
     ResetTokenRecord record = new ResetTokenRecord(
-        digest, username, now, expiresAt,
+        digest, account, now, expiresAt,
         ResetTokenStatus.ISSUED, 1L);
     // JS-SEC-074 (CWE-640): only the newest link may work. Retire every open
     // sibling before the new token exists, so an older intercepted link dies
     // the moment the user asks again. JS-SEC-121: this point is only reached
     // by a request that passed the throttle above.
-    retireOpenSiblings(username, null);
+    retireOpenSiblings(account, null);
     resetStore.save(record);
-    publish(new PasswordResetRequested(now, username, token.selector()));
+    publish(new PasswordResetRequested(now, account, token.selector()));
 
     // JS-SEC-121 (CWE-645, CWE-640): an unauthenticated request does not change
     // the status of a usable credential — ACTIVE, MUST_CHANGE, REHASH_REQUIRED,
@@ -335,10 +353,10 @@ public final class PasswordResetService implements HasLogger {
     // read again after the token is stored, so that a concurrent
     // releaseLapsedReset which just returned the credential to COMPROMISED
     // cannot strand the new link.
-    CredentialStatus current = credentialStore.findByUsername(username)
+    CredentialStatus current = credentialStore.findByUsername(account)
         .map(CredentialRecord::status).orElse(status);
     if (current == CredentialStatus.COMPROMISED) {
-      enterResetPending(username);
+      enterResetPending(account);
     }
     recordOutcome(attempt, AttemptOutcome.SUCCESS);
     return new ResetTokenCreationResult.Created(token);
@@ -369,8 +387,14 @@ public final class PasswordResetService implements HasLogger {
   @ExperimentalJCustosApi
   public Optional<CredentialStatus> releaseLapsedReset(String username) {
     Objects.requireNonNull(username, "username");
-    releaseIfLapsed(username, Instant.now(clock));
-    return credentialStore.findByUsername(username).map(CredentialRecord::status);
+    Optional<CredentialRecord> credential = credentialStore.findByUsername(username);
+    if (credential.isEmpty()) {
+      return Optional.empty();
+    }
+    // JS-SEC-123 (CWE-178): the tokens are keyed on the record's own name.
+    String account = credential.get().username();
+    releaseIfLapsed(account, Instant.now(clock));
+    return credentialStore.findByUsername(account).map(CredentialRecord::status);
   }
 
   /**

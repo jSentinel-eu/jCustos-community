@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.credential.abuse;
 import eu.jsentinel.jcustos.audit.RateLimitExceeded;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -60,6 +61,18 @@ import java.util.concurrent.ConcurrentHashMap;
  *       attempt type ({@code LOGIN}, {@code PASSWORD_CHANGE},
  *       {@code RESET_CONSUME}).</li>
  * </ul>
+ *
+ * <p>One key per account (JS-SEC-123, CWE-178): the key of the
+ * {@link AbuseDimension#USERNAME} dimension is the username after the
+ * {@link SubjectKeyCanonicalizer} - by default NFKC, lower-case, trimmed -
+ * so {@code alice} and {@code ALICE} draw on one budget, as they share one
+ * counter in the login throttle and are one record in
+ * {@code InMemoryCredentialStore}. Until 00.84.00 the raw spelling was the
+ * key: every spelling of a name had a reset-request budget of its own, and
+ * the per-username limit was whatever the number of spellings made of it. A
+ * deployment whose user names are case-sensitive passes
+ * {@link SubjectKeyCanonicalizer#exact()} here, to its credential store and
+ * to its login policy alike.</p>
  *
  * <p>Auditing is best-effort: every block / step-up / delay decision
  * publishes a {@link RateLimitExceeded} event with the dimension
@@ -98,6 +111,7 @@ public final class InMemoryAbuseDetectionService implements AbuseDetectionServic
   private final AbuseLimitsPolicy policy;
   private final JCustosAuditService auditService;
   private final int maxEntries;
+  private final SubjectKeyCanonicalizer canonicalizer;
   private final ConcurrentHashMap<String, Deque<Instant>> counters =
       new ConcurrentHashMap<>();
 
@@ -108,12 +122,31 @@ public final class InMemoryAbuseDetectionService implements AbuseDetectionServic
 
   public InMemoryAbuseDetectionService(
       AbuseLimitsPolicy policy, JCustosAuditService auditService, int maxEntries) {
+    this(policy, auditService, maxEntries, SubjectKeyCanonicalizer.defaults());
+  }
+
+  /**
+   * Full constructor.
+   *
+   * @param policy        limits per attempt type and dimension; non-null
+   * @param auditService  audit sink; non-null
+   * @param maxEntries    upper bound on tracked counter keys; at least 1
+   * @param canonicalizer maps a user name onto the key of the
+   *                      {@link AbuseDimension#USERNAME} dimension (JS-SEC-123);
+   *                      use the instance the credential store and the login
+   *                      policy use; non-null
+   * @since 00.84.00
+   */
+  public InMemoryAbuseDetectionService(
+      AbuseLimitsPolicy policy, JCustosAuditService auditService, int maxEntries,
+      SubjectKeyCanonicalizer canonicalizer) {
     this.policy = Objects.requireNonNull(policy, "policy");
     this.auditService = Objects.requireNonNull(auditService, "auditService");
     if (maxEntries < 1) {
       throw new IllegalArgumentException("maxEntries must be >= 1");
     }
     this.maxEntries = maxEntries;
+    this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
   }
 
   /** Package-visible for tests: number of tracked counter keys (JS-SEC-030 bound). */
@@ -186,10 +219,11 @@ public final class InMemoryAbuseDetectionService implements AbuseDetectionServic
     }
   }
 
-  private static Optional<String> keyFor(
+  private Optional<String> keyFor(
       AbuseAttemptContext context, AbuseDimension dimension) {
     return switch (dimension) {
-      case USERNAME -> context.username();
+      // JS-SEC-123 (CWE-178): one key per account, whatever the spelling.
+      case USERNAME -> context.username().map(canonicalizer::canonicalize);
       case CLIENT_ADDRESS -> context.clientAddress();
       case TENANT -> Optional.of(tenantKey(context.tenant()));
       case GLOBAL -> Optional.of("*");

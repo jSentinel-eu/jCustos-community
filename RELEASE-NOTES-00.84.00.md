@@ -1349,6 +1349,29 @@ and `reactOnVerificationUnavailable()`, both defaulting to `reactOnFailedLogin()
 behind this view — remove those calls, as the in-repo demos did, or override
 `throttleLoginAttempts()` to return `false` when the service must keep them.
 
+## Abuse detection, password reset and password change act on the account, not on the spelling (addition to SA23, JS-SEC-123, CWE-178)
+
+`InMemoryAbuseDetectionService` keyed its per-username budgets on the raw spelling, so `alice`,
+`ALICE` and ` Alice ` each had a reset-request budget of their own. It now applies a
+`SubjectKeyCanonicalizer` (new constructor; `defaults()` otherwise), like the login policies. The
+reset and change services key what they keep for an account on the name of the record the
+`CredentialStore` returned: a link requested as `ALICE` retires the link requested as `alice`, and a
+password change requested as `ALICE` retires the reset links and revokes the tokens of the account
+`alice` — before, both protections of JS-SEC-074 and JS-SEC-128 could be sidestepped by changing the
+case of the name. **Consumers:** reset tokens and the reset audit events carry the account's
+registered name; a deployment with case-sensitive names passes `SubjectKeyCanonicalizer.exact()` to
+the abuse detection as it does to its store and login policy.
+
+## A shed verification of the current password is "try again later" (addition to SA26, JS-SEC-126, CWE-703, CWE-645)
+
+`PasswordChangeService` reported every result that was not `Verified` as `CurrentPasswordRejected`,
+including a verification the KDF limiter had shed. Under load a user who typed the correct current
+password was told it was wrong, and an adapter counting failed attempts locked the account. The
+service now returns the new `PasswordChangeResult.VerificationUnavailable`; nothing is written, no
+reset link is retired and no listener is called. **Consumers:** an exhaustive `switch` over
+`PasswordChangeResult` needs a branch for the new variant; answer it with 503 or 429, count no
+failure and audit no rejected password.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
