@@ -16,29 +16,47 @@
  */
 package eu.jsentinel.jcustos.demo.app.security.model;
 
-import eu.jsentinel.jcustos.authentication.Pbkdf2PasswordHasher;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.credential.password.limiter.KdfExecutionLimiter;
+import eu.jsentinel.jcustos.credential.password.limiter.KdfResourceBudget;
+import eu.jsentinel.jcustos.credential.password.limiter.SemaphoreKdfExecutionLimiter;
+import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2Defaults;
+import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2ParameterNames;
+import eu.jsentinel.jcustos.credential.password.policy.DefaultPasswordHashPolicy;
+import eu.jsentinel.jcustos.credential.password.policy.PasswordHashPolicy;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@DisplayName("InMemoryDemoUserDirectory — rehash on successful login")
+/**
+ * JS-SEC-134: the directory hashes and verifies through the credential pipeline it is given
+ * (by default the one the bootstrap configured), upgrades an outdated hash on login, and
+ * reports a shed verification as unavailable, not as a wrong password (JS-SEC-126).
+ */
+@DisplayName("InMemoryDemoUserDirectory — credential pipeline and rehash on successful login")
 class InMemoryDemoUserDirectoryRehashTest {
 
   @Test
-  @DisplayName("findByCredentials with same hasher → no drift → stored hash unchanged")
+  @DisplayName("a stored hash is the pipeline's envelope and verifies; no drift → stored hash unchanged")
   void noDrift_noRehash() {
-    Pbkdf2PasswordHasher hasher = new Pbkdf2PasswordHasher(1_000, new SecureRandom());
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(hasher);
+    InMemoryDemoUserDirectory directory =
+        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
 
     String before = directory.storedPasswordHash("user").orElseThrow();
+    assertTrue(before.startsWith("$pwh$"), "the pipeline's envelope, not a legacy hash: " + before);
 
     Optional<MyUser> resolved = directory.findByCredentials(new Credentials("user", "user"));
 
@@ -48,36 +66,34 @@ class InMemoryDemoUserDirectoryRehashTest {
   }
 
   @Test
-  @DisplayName("findByCredentials with drifted hasher → stored hash gets upgraded")
+  @DisplayName("a hash below the policy's parameters is upgraded on login")
   void driftDetected_rehash() {
-    // Pre-stage a hash with the older iteration count
-    Pbkdf2PasswordHasher older = new Pbkdf2PasswordHasher(1_000, new SecureRandom());
-    String oldHash = older.hash("legacy".toCharArray());
+    PasswordHashingService older = PasswordHashingServices.defaults(pbkdf2Policy(1,
+        Pbkdf2Defaults.MIN_ITERATIONS));
+    String oldHash = older.hash("legacy".toCharArray()).encodedHash();
 
-    Pbkdf2PasswordHasher newer = new Pbkdf2PasswordHasher(2_000, new SecureRandom());
+    PasswordHashingService newer = PasswordHashingServices.defaults(pbkdf2Policy(2,
+        Pbkdf2Defaults.DEFAULT_ITERATIONS));
     InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(newer);
     HashSet<AuthorizationRole> roles = new HashSet<>();
     roles.add(AuthorizationRole.USER);
     directory.registerWithHashedPassword(
         "legacy", oldHash, new MyUser(99L, "Legacy User", roles));
 
-    String hashBefore = directory.storedPasswordHash("legacy").orElseThrow();
-
     Optional<MyUser> resolved = directory.findByCredentials(new Credentials("legacy", "legacy"));
 
-    assertTrue(resolved.isPresent(), "verify must still succeed against the legacy hash");
+    assertTrue(resolved.isPresent(), "verify must still succeed against the older hash");
     String hashAfter = directory.storedPasswordHash("legacy").orElseThrow();
-    assertNotEquals(hashBefore, hashAfter,
-        "drift must trigger a re-hash; stored hash must change");
-    assertTrue(hashAfter.contains("$2000$"),
-        "fresh hash must reflect the newer iteration count: " + hashAfter);
+    assertNotEquals(oldHash, hashAfter, "drift must trigger a re-hash; stored hash must change");
+    assertTrue(directory.findByCredentials(new Credentials("legacy", "legacy")).isPresent(),
+        "the upgraded hash verifies");
   }
 
   @Test
   @DisplayName("findByCredentials with wrong password → no rehash")
   void wrongPassword_noRehash() {
-    Pbkdf2PasswordHasher hasher = new Pbkdf2PasswordHasher(1_000, new SecureRandom());
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(hasher);
+    InMemoryDemoUserDirectory directory =
+        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     String before = directory.storedPasswordHash("user").orElseThrow();
 
     Optional<MyUser> resolved = directory.findByCredentials(new Credentials("user", "wrong"));
@@ -89,11 +105,44 @@ class InMemoryDemoUserDirectoryRehashTest {
   @Test
   @DisplayName("findByCredentials with unknown username → empty, no side effects")
   void unknownUser_empty() {
-    Pbkdf2PasswordHasher hasher = new Pbkdf2PasswordHasher(1_000, new SecureRandom());
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(hasher);
+    InMemoryDemoUserDirectory directory =
+        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
 
     Optional<MyUser> resolved = directory.findByCredentials(new Credentials("nobody", "anything"));
 
     assertTrue(resolved.isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-126: a verification shed by the KDF limiter is unavailable, not wrong")
+  void shedVerificationIsUnavailable() {
+    KdfExecutionLimiter limiter = new SemaphoreKdfExecutionLimiter(
+        new KdfResourceBudget(1, Duration.ofMillis(20)));
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(
+        PasswordHashingServices.defaults(Pbkdf2Defaults.referencePolicy(), limiter));
+    Optional<KdfExecutionLimiter.Lease> held = limiter.acquire();
+    try {
+      assertThrows(CredentialVerificationUnavailableException.class,
+          () -> directory.findByCredentials(new Credentials("user", "user")));
+      assertThrows(CredentialVerificationUnavailableException.class,
+          () -> directory.findByCredentials(new Credentials("nobody", "whatever")));
+    } finally {
+      held.orElseThrow().close();
+    }
+    assertTrue(directory.findByCredentials(new Credentials("user", "user")).isPresent());
+  }
+
+  /** A PBKDF2 policy with the given version and iteration count. */
+  private static PasswordHashPolicy pbkdf2Policy(int version, int iterations) {
+    Map<String, String> defaults = new LinkedHashMap<>(Pbkdf2Defaults.defaultParameters());
+    defaults.put(Pbkdf2ParameterNames.ITERATIONS, Integer.toString(iterations));
+    return DefaultPasswordHashPolicy.builder()
+        .policyVersion(version)
+        .preferredAlgorithm(Pbkdf2ParameterNames.ALGORITHM)
+        .preferredProviderId(Pbkdf2ParameterNames.PROVIDER_ID)
+        .defaultParameters(Pbkdf2ParameterNames.ALGORITHM, defaults)
+        .minimumParameters(Pbkdf2ParameterNames.ALGORITHM, Pbkdf2Defaults.minimumParameters())
+        .maximumParameters(Pbkdf2ParameterNames.ALGORITHM, Pbkdf2Defaults.maximumParameters())
+        .build();
   }
 }

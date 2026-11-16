@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.authorization;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
@@ -65,15 +66,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       and every other attribute - stays in place, only the id changes. Non-servlet
  *       transports fall back to {@link VaadinService#reinitializeSession(VaadinRequest)}.</li>
  *   <li>{@link SessionPolicy#onLogin(SessionContext)} observes the login with the id that
- *       lives on (JS-SEC-060).</li>
- *   <li>A {@code SessionInvalidated} audit event is emitted for the <em>old</em> id, with
- *       the reason of an {@link SessionDecision.Invalidate Invalidate} decision or
- *       {@value #DEFAULT_REASON}.</li>
- *   <li>The hook is told the old and the new id, so records keyed by the session id can
- *       follow (a {@code SessionStore} record, a {@code SubjectSessionRegistry} entry).</li>
+ *       lives on (JS-SEC-060) - as its {@link SessionRef reference}, so the
+ *       {@code SessionCreated} event a policy emits never carries the session cookie
+ *       (JS-SEC-117).</li>
+ *   <li>A {@code SessionInvalidated} audit event is emitted for the reference of the
+ *       <em>old</em> id, with the reason of an {@link SessionDecision.Invalidate Invalidate}
+ *       decision or {@value #DEFAULT_REASON}.</li>
+ *   <li>The hook is told the old and the new id - the live ids, so it can match live
+ *       sessions - and records keyed by the session id can follow (a {@code SessionStore}
+ *       record, a {@code SubjectSessionRegistry} entry). Store them under
+ *       {@code SessionRef.of(id)}, never under the id itself.</li>
  *   <li>The {@link JCustosVersion} snapshot is recorded in
- *       {@link VaadinJCustosVersionContext} when a {@link JCustosVersionStore} and a
- *       {@link SubjectIdResolver} are registered.</li>
+ *       {@link VaadinJCustosVersionContext}, with the reference of the session id, when a
+ *       {@link JCustosVersionStore} and a {@link SubjectIdResolver} are registered.</li>
  * </ol>
  *
  * <p>The method never throws. Its {@link Outcome} says whether the id really changed, so the
@@ -174,7 +179,9 @@ public final class LoginSessionRotation {
           ? buildSessionContext().orElse(beforeRotation.get())
           : beforeRotation.get();
       currentSessionId = context.sessionId();
-      SessionDecision decision = policy.onLogin(context);
+      // JS-SEC-117 (CWE-532, CWE-522): the policy sees the reference. It emits SessionCreated
+      // from it, and a policy is no place for the session cookie.
+      SessionDecision decision = policy.onLogin(withReference(context));
       String reason = decision instanceof SessionDecision.Invalidate invalidate
           ? invalidate.reason()
           : DEFAULT_REASON;
@@ -248,13 +255,24 @@ public final class LoginSessionRotation {
     }
   }
 
+  /**
+   * JS-SEC-117 (CWE-532, CWE-522): the context a {@link SessionPolicy} observes carries the
+   * reference of the session id; the live id stays inside this class and the hook.
+   */
+  static SessionContext<Object> withReference(SessionContext<Object> context) {
+    return new SessionContext<>(context.subject(), SessionRef.ofNullable(context.sessionId()),
+        context.createdAt(), context.lastActivity(), context.clientAddress(),
+        context.attributes());
+  }
+
   private static void auditRotation(SessionContext<Object> context, String oldSessionId, String reason) {
     try {
       JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
+      // JS-SEC-117: the retired id is still a credential until the container forgets it.
       sink.publish(new SessionInvalidated(
           Instant.now(),
           subjectIdOf(context),
-          oldSessionId,
+          SessionRef.ofNullable(oldSessionId),
           reason == null ? DEFAULT_REASON : reason));
     } catch (RuntimeException auditFailure) {
       // never block login because the audit sink failed
@@ -391,7 +409,9 @@ public final class LoginSessionRotation {
           .current(new JCustosVersionKey(tenant, subjectId));
       WrappedSession wrapped = session.getSession();
       String sessionId = wrapped == null ? null : wrapped.getId();
-      VaadinJCustosVersionContext.record(session, subjectId, tenant, snapshot, sessionId);
+      // JS-SEC-117: the snapshot's id only labels the SessionStale event of a drift.
+      VaadinJCustosVersionContext.record(session, subjectId, tenant, snapshot,
+          SessionRef.ofNullable(sessionId));
     } catch (RuntimeException captureFailure) {
       HasLogger.staticLogger().warn("JCustosVersion snapshot capture failed: {}",
           captureFailure.toString());

@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authorization;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionCreated;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
@@ -114,10 +115,12 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
         "SessionPolicy.onLogin must be called after credentials succeed");
     // JS-SEC-060: the policy observes the login AFTER the rotation, so the
     // context it receives names the surviving id, not the one that was retired.
-    assertFalse(oldSessionId.equals(capturedContext.get().sessionId()),
+    // JS-SEC-117: as the reference of that id, never the session cookie.
+    assertFalse(SessionRef.of(oldSessionId).equals(capturedContext.get().sessionId()),
         "the SessionContext given to onLogin must carry the post-rotation id; old=" + oldSessionId);
-    assertEquals(VaadinSession.getCurrent().getSession().getId(), capturedContext.get().sessionId(),
-        "the SessionContext given to onLogin must match the live wrapped-session id");
+    assertEquals(SessionRef.of(VaadinSession.getCurrent().getSession().getId()),
+        capturedContext.get().sessionId(),
+        "the SessionContext given to onLogin must carry the reference of the live wrapped-session id");
 
     // ── 2. SessionInvalidated audit emitted with the OLD session id. ──
     SessionInvalidated event = audit.events().stream()
@@ -126,8 +129,9 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
         .findFirst()
         .orElseThrow(() -> new AssertionError(
             "expected one SessionInvalidated audit event; got: " + audit.events()));
-    assertEquals(oldSessionId, event.sessionId(),
-        "SessionInvalidated must carry the OLD wrapped-session id (correlation hook for monitoring)");
+    assertEquals(SessionRef.of(oldSessionId), event.sessionId(),
+        "SessionInvalidated must carry the reference of the OLD wrapped-session id (correlation "
+            + "hook for monitoring), never the id itself (JS-SEC-117)");
     assertEquals("B3-Test-Rotation", event.reason(),
         "SessionInvalidated.reason must come from SessionDecision.Invalidate.reason");
 
@@ -184,8 +188,8 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
         .findFirst()
         .orElseThrow(() -> new AssertionError(
             "expected one SessionInvalidated audit event; got: " + audit.events()));
-    assertEquals(oldSessionId, event.sessionId(),
-        "SessionInvalidated must carry the OLD wrapped-session id");
+    assertEquals(SessionRef.of(oldSessionId), event.sessionId(),
+        "SessionInvalidated must carry the reference of the OLD wrapped-session id");
     assertEquals("RotationAfterLogin", event.reason(),
         "default rotation reason when the policy does not supply an Invalidate reason");
   }
@@ -213,8 +217,8 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
         .map(SessionCreated.class::cast)
         .findFirst()
         .orElseThrow(() -> new AssertionError("expected one SessionCreated event; got: " + audit.events()));
-    assertEquals(newSessionId, created.sessionId(),
-        "SessionCreated must carry the post-rotation id, not the retired one");
+    assertEquals(SessionRef.of(newSessionId), created.sessionId(),
+        "SessionCreated must carry the reference of the post-rotation id, not the retired one");
 
     // ── the retired id is the one recorded as invalidated ──
     SessionInvalidated invalidated = audit.events().stream()
@@ -222,7 +226,11 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
         .map(SessionInvalidated.class::cast)
         .findFirst()
         .orElseThrow(() -> new AssertionError("expected one SessionInvalidated event; got: " + audit.events()));
-    assertEquals(oldSessionId, invalidated.sessionId(), "SessionInvalidated must carry the retired id");
+    assertEquals(SessionRef.of(oldSessionId), invalidated.sessionId(),
+        "SessionInvalidated must carry the reference of the retired id");
+    assertTrue(audit.events().stream().map(String::valueOf)
+            .noneMatch(e -> e.contains(oldSessionId) || e.contains(newSessionId)),
+        "no audit event may carry a session id (JS-SEC-117): " + audit.events());
     assertEquals("Session rotated after login", invalidated.reason(),
         "the reason comes from TimeoutSessionPolicy's Invalidate decision");
 

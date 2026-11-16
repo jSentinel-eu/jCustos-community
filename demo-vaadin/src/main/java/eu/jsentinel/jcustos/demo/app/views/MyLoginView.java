@@ -201,9 +201,9 @@ public class MyLoginView
    * row. The record is keyed by the reference of the session id, never by
    * the id itself: the id is the session cookie, and whoever reads the
    * inventory must not be able to take the session over (JS-SEC-117,
-   * CWE-522). The store keys every lookup the same way, so the
-   * per-request revocation check, which knows only the live id, finds the
-   * record. Best-effort: any failure is swallowed — recording sessions for
+   * CWE-522). The per-request revocation check and
+   * {@code VaadinSessionRevocation.revoke} look the live session up by
+   * the same reference. Best-effort: any failure is swallowed — recording sessions for
    * the admin UI must never block the login flow.
    */
   private static void recordSession(MyUser user, String sessionId) {

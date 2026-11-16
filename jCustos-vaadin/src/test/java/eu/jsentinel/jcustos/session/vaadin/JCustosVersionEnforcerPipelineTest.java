@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.session.vaadin;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionStale;
 import eu.jsentinel.jcustos.authorization.LoginListeners;
 import eu.jsentinel.jcustos.authorization.LoginView;
@@ -138,7 +139,7 @@ class JCustosVersionEnforcerPipelineTest {
     assertTrue(VaadinJCustosVersionContext.current(session).isEmpty(), "the stale snapshot is cleared");
     SessionStale stale = audit.single(SessionStale.class);
     assertEquals("alice", stale.subjectId());
-    assertEquals("sid-155", stale.sessionId());
+    assertEquals(SessionRef.of("sid-155"), stale.sessionId(), "never the session id (JS-SEC-117)");
     assertNotEquals(VaadinSessionState.OPEN, session.getState(), "the session is closed");
     assertNull(session.getSession(), "the HTTP session is invalidated");
   }

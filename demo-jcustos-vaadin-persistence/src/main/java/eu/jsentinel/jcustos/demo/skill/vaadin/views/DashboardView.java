@@ -22,8 +22,10 @@ import static eu.jsentinel.jcustos.demo.skill.vaadin.security.roles.Authorizatio
  * Post-login landing page. Rendered inside {@link MainLayout}.
  *
  * <p>{@code @VisibleFor(USER)} — any authenticated user can land
- * here. Subjects without {@code USER} (or unauthenticated visitors)
- * are rerouted by {@code RoleAccessEvaluator}.
+ * here. {@code RoleAccessEvaluator} sends unauthenticated visitors to
+ * the login view and subjects without {@code USER} to the public home,
+ * never back to this view: a denial that points to the denied view ends
+ * in the error view (JS-SEC-158).
  *
  * <p>The drawer in {@link MainLayout} filters its own entries via
  * {@code SecuredUi.link().hideWhenDenied()} — audit / sessions /

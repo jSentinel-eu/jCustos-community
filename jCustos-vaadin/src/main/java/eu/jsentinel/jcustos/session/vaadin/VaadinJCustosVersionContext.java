@@ -63,9 +63,11 @@ public final class VaadinJCustosVersionContext {
    *                  {@link TenantId#DEFAULT}
    * @param snapshot  security version captured at login time;
    *                  non-null
-   * @param sessionId opaque session identifier (typically the
-   *                  servlet-session id); may be {@code null} when
-   *                  the adapter does not track session ids
+   * @param sessionId non-secret session label for the {@code SessionStale}
+   *                  event of a drift, typically {@code SessionRef.of(id)};
+   *                  may be {@code null}. The enforcer listener reduces a
+   *                  raw session id to its reference before it reaches an
+   *                  event (JS-SEC-117)
    */
   public static void record(VaadinSession session,
                             SubjectId subjectId,

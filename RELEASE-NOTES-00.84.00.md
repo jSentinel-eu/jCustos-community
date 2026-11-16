@@ -451,9 +451,9 @@ followed the hash convention.
 
 `LoggingAuditSink` now writes `sessionRef=`, the marker `sref-` followed by the first 16 hex
 characters of the SHA-256 of the session id (`SessionRef`, JS-SEC-117): stable for correlating
-events of one session, useless for hijacking. The change is
-confined to the sink; the audit events still carry the id for stores and consumers that need
-it, and `LoggingAuditSink.sessionRef(String)` is public so dashboards and tests can compute the
+events of one session, useless for hijacking. The adapters now reduce at the producer as well
+(JS-SEC-117: the REST and Vaadin adapters), so their events carry the reference too;
+`LoggingAuditSink.sessionRef(String)` is public so dashboards and tests can compute the
 same reference. Verified with a real recording SLF4J logger: a `SessionCreated` with session id
 `ABCDEF0123456789` produces a line without that substring but with a deterministic `sessionRef=`,
 and two events with the same id share the reference.
@@ -1644,8 +1644,8 @@ skills need `@PublicRoute` on every view meant to be public. Some browsers do no
 ## Vaadin demos and skill templates follow the fixes of this release
 
 The demos record sessions after the id rotation under `SessionRef.of(id)` and key their stores the
-same way (SA17); they register the store for the per-request revocation check, so Revoke ends the
-session on its next request (SA31). The library `LoginView` alone throttles logins; the skill
+same way (SA17); they register the store for the per-request revocation check and revoke with
+`VaadinSessionRevocation::revoke`, so Revoke ends the session at the click (SA31). The library `LoginView` alone throttles logins; the skill
 template no longer calls the policy (SA24). Step-up routes without a view are gone, and no public,
 login, setup or step-up view sits in a restricted layout (SA52, SA54). The drift listener is wired
 with `register(event)` and covers push messages (SA55). STRICT and PRODUCTION find a logout service
@@ -1656,6 +1656,70 @@ and so passes `iss` and rotates the session id (SA46, SA50), the client configur
 expected issuer (SA50), sign-out goes through `AbstractOidcLogoutView.logoutLocation(...)` (SA47),
 the logout-token validator receives issuer and client id (ER20), DPoP validation names the expected
 key thumbprint (SA48), and the OIDC templates compile again against this release.
+
+## A denial that points to the denied view itself ends in the error view (SA58, JS-SEC-158, CWE-636, CWE-285)
+
+Vaadin carries out a reroute or forward only when its target differs from the navigation in
+progress; a target with the class and the route parameters of the navigation target is skipped, and
+the navigation target is rendered. An evaluator that denied a view by sending the visitor to that
+very view — a forward to the home route from the home view, a `RerouteWithParameter` with the
+parameter of the current navigation, a login view that is itself the target — therefore rendered the
+view it had just denied while the audit trail recorded `AccessDenied`; the post-condition of SA52
+let it pass because the event carried a target. Both decision mappers now answer such a target with
+the error view for `SecurityException`, `VaadinAccessDecisionMapper.hasTarget` no longer counts it,
+so the post-condition of `AuthorizationListener` catches it as well, and the fail-closed fallback
+clears a forward target before it reroutes. A reroute to another route, or to the same view with
+other route parameters, is carried out and evaluated again on its own navigation; a layout
+restriction that points to a route inside the same restricted layout therefore ends in the error
+view one navigation later, without instantiating the layout.
+
+`demo-vaadin` relied on the defect: `MyRoleAccessEvaluator` forwarded every signed-in subject
+without `USER` to `MainView`, which carried `@VisibleFor(USER)` itself; `MainView`, the home of
+every signed-in subject, now carries `@SecureRoute()`. The skill demos and the `jcustos-vaadin`
+template forwarded a subject without the role to `DashboardView`, the very view that denied it; they
+now forward to `PublicHomeView`. **Consumers:** an evaluator must name a route the denied visitor
+may see — never the denied view and never a view in the same restricted layout; projects generated
+from the `jcustos-vaadin` skill re-render `RoleAccessEvaluator`.
+
+## "Revoke" ends a session recorded under its reference at the click (addition to SA31 and SA17, JS-SEC-131, JS-SEC-117, CWE-613, CWE-522)
+
+Since the demos keep sessions under `SessionRef.of(id)`, `VaadinSessionRevocation.terminate` and the
+per-request check compared live HTTP session ids only: a revoke of such a record ended the session
+on its next request at best, the demos needed a decorating `SessionReferenceStore`, and
+`SessionManagementView` showed whatever the store held — the session cookie for a store with raw
+ids. `terminate` now compares references, so the live id and its reference both find the session;
+the per-request check looks the record up under the reference first and under the live id second;
+the "Session id" column renders `SessionRef.of(...)`. Stores keyed by raw ids keep working. The
+demos and skill templates drop `SessionReferenceStore` and revoke with
+`VaadinSessionRevocation::revoke`: Revoke ends the session at the click on the same node, and a
+record removed or marked `REVOKED` elsewhere ends it on its next request. **Consumers:** delete a
+generated `SessionReferenceStore` and pass `VaadinSessionRevocation::revoke` to
+`SessionManagementView`; record sessions under `SessionRef.of(id)`.
+
+## Vaadin audit events carry the session reference, never the session id (addition to SA17, JS-SEC-117, CWE-532, CWE-522)
+
+JS-SEC-079 reduced the session id in `LoggingAuditSink` only; the events still carried the session
+cookie into ring buffers, store-backed audit, the integrity chain and custom sinks. The Vaadin
+adapter now reduces at the producer: `SessionInvalidated` of a revocation, of an aborted OAuth2
+login and of the login rotation; the `SessionContext` a `SessionPolicy` receives on login and
+logout, so `SessionCreated` and the logout `SessionInvalidated` of `TimeoutSessionPolicy` carry the
+reference; the snapshot id behind `SessionStale`; and `LogoutPerformed` of the OIDC logout view.
+`VaadinSessionRegistryCleanup` unregisters the reference and the raw id, and the back-channel
+registry template keys by reference. The live ids remain only where a live session has to be found:
+`LoginSessionRotation.Outcome`, `onSessionRotated` and the matching inside
+`VaadinSessionRevocation`. **Consumers:** `sessionId` of these Vaadin events is `sref-` followed by
+16 hex characters — compare with `SessionRef.of(id)`; a custom `SessionPolicy` receives the
+reference in `SessionContext.sessionId`.
+
+## The first administrator of `demo-vaadin` can log in (addition to SA34, JS-SEC-134, CWE-684, CWE-916)
+
+`demo-vaadin` hashed the administrator created through `SetupView` with
+`PasswordHashingServices.defaults()`, while `InMemoryDemoUserDirectory` verified with the legacy
+PBKDF2 `PasswordHasher`: two formats, and the administrator could never log in. The directory and
+`BootstrapWiring` now share `ConfiguredHashingService`, which resolves `credentialHashingService()`
+on every call; an unknown name costs one KDF run, a verification shed by the KDF limiter is "try
+again later", and outdated hashes are upgraded on login. `DemoUserDirectory.passwordHasher()` is now
+`hashingService()`.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

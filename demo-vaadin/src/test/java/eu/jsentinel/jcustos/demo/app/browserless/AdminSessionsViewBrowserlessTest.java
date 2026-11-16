@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.demo.app.browserless;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -24,7 +25,6 @@ import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.demo.app.security.services.DemoSessionStoreProvider;
-import eu.jsentinel.jcustos.demo.app.security.services.SessionReferenceStore;
 import eu.jsentinel.jcustos.demo.app.views.AdminSessionsView;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.session.SessionId;
@@ -40,6 +40,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -52,14 +53,19 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  *   <li>The route renders the framework composite (H1 + Grid).</li>
  *   <li>The shared {@link DemoSessionStoreProvider} feeds the grid:
  *       a record saved to the store surfaces in the rendered view.</li>
- *   <li>The revoke callback flips a session's status to
- *       {@link SessionStatus#REVOKED} via {@code SessionStore.save(...)}.</li>
+ *   <li>The grid shows the reference of a record's session id, also for
+ *       a record stored under the raw id (JS-SEC-117).</li>
  * </ul>
+ * Revoke itself is covered by {@code SessionRevocationBrowserlessTest}.
  */
 @DisplayName("AdminSessionsView — Phase-8a SessionManagementView wiring")
 class AdminSessionsViewBrowserlessTest extends BrowserlessTest {
 
-  private static final SessionId SID = SessionId.of("demo-session-1");
+  /** As the login view records it: under the reference of the session id. */
+  private static final SessionId SID = SessionId.of(SessionRef.of("demo-session-1"));
+
+  /** A record a store without references would hold. */
+  private static final SessionId RAW_SID = SessionId.of("demo-session-2");
 
   @org.junit.jupiter.api.BeforeEach
   @Override
@@ -81,6 +87,7 @@ class AdminSessionsViewBrowserlessTest extends BrowserlessTest {
     // Clean state in the shared session store between tests.
     SessionStore store = DemoSessionStoreProvider.sessionStore();
     store.delete(SID);
+    store.delete(RAW_SID);
 
     super.initVaadinEnvironment();
 
@@ -92,6 +99,7 @@ class AdminSessionsViewBrowserlessTest extends BrowserlessTest {
   @AfterEach
   void tearDown() {
     DemoSessionStoreProvider.sessionStore().delete(SID);
+    DemoSessionStoreProvider.sessionStore().delete(RAW_SID);
     JCustosServiceResolver.resetAll();
     DemoUserDirectoryProvider.reset();
   }
@@ -121,13 +129,39 @@ class AdminSessionsViewBrowserlessTest extends BrowserlessTest {
 
     navigate(AdminSessionsView.class);
 
-    Grid<?> grid = $view(Grid.class).first();
-    // JS-SEC-117: the store keeps the record under the reference of the id
-    long visible = DemoSessionStoreProvider.sessionStore().findAll().stream()
-        .filter(r -> r.sessionId().equals(SessionReferenceStore.reference(SID)))
-        .count();
-    assertEquals(1L, visible,
+    @SuppressWarnings("unchecked")
+    Grid<SessionRecord> grid = $view(Grid.class).first();
+    assertEquals(List.of(record), grid.getGenericDataView().getItems().toList(),
         "the demo store must surface the saved record to the view");
-    assertNotNull(grid);
+    assertEquals(List.of(SID.value()), sessionIdColumn(grid),
+        "the column shows the reference the record is stored under");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-117: a record stored under a raw session id is shown by its reference")
+  void rawIdIsRenderedAsReference() {
+    Instant now = Instant.now();
+    DemoSessionStoreProvider.sessionStore().save(new SessionRecord(
+        RAW_SID, SubjectId.of("1"), TenantId.DEFAULT,
+        now, now, JCustosVersion.INITIAL, SessionStatus.ACTIVE));
+
+    navigate(AdminSessionsView.class);
+
+    @SuppressWarnings("unchecked")
+    Grid<SessionRecord> grid = $view(Grid.class).first();
+    assertEquals(List.of(SessionRef.of(RAW_SID.value())), sessionIdColumn(grid),
+        "the grid must never show a session cookie");
+  }
+
+  /** The rendered texts of the "Session id" column. */
+  private List<String> sessionIdColumn(Grid<SessionRecord> grid) {
+    List<Grid.Column<SessionRecord>> columns = grid.getColumns();
+    int index = columns.indexOf(columns.stream()
+        .filter(c -> "Session id".equals(c.getHeaderText()))
+        .findFirst().orElseThrow(() -> new AssertionError("no 'Session id' column")));
+    var tester = test(grid);
+    return java.util.stream.IntStream.range(0, tester.size())
+        .mapToObj(row -> tester.getCellText(row, index))
+        .toList();
   }
 }

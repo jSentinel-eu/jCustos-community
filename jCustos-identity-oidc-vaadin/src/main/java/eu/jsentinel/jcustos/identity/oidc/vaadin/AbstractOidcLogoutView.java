@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.identity.oidc.vaadin;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.LogoutPerformed;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
@@ -278,7 +279,9 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
       // without a subject there is still a session to end
     }
     String subjectId = subjectIdOf(subject);
-    String sessionId = sessionIdOf(session);
+    // JS-SEC-117 (CWE-532, CWE-522): the policy and the LogoutPerformed event see the
+    // reference of the session id, never the session cookie.
+    String sessionId = SessionRef.ofNullable(sessionIdOf(session));
     Instant now = Instant.now();
 
     try {

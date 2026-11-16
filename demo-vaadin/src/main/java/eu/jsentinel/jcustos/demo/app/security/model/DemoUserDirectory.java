@@ -16,7 +16,7 @@
  */
 package eu.jsentinel.jcustos.demo.app.security.model;
 
-import eu.jsentinel.jcustos.authentication.PasswordHasher;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 
 import java.util.Optional;
@@ -76,10 +76,11 @@ public interface DemoUserDirectory {
   void enableBootstrapMode();
 
   /**
-   * The hasher this directory uses for passwords. Exposed so the bootstrap
-   * service can produce hashes in the same format the directory expects.
+   * The credential pipeline this directory hashes and verifies passwords
+   * with. The first-administrator setup must hash with the same pipeline,
+   * otherwise the administrator it creates cannot log in (JS-SEC-134).
    */
-  PasswordHasher passwordHasher();
+  PasswordHashingService hashingService();
 
   /**
    * Adds {@code role} to the user identified by {@code id}. No-op if the

@@ -10,6 +10,7 @@ import eu.jsentinel.jcustos.audit.RoleAssigned;
 import eu.jsentinel.jcustos.audit.RoleRevoked;
 import eu.jsentinel.jcustos.audit.SessionCreated;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.UserCreated;
 import eu.jsentinel.jcustos.audit.UserDeleted;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
@@ -234,8 +235,8 @@ public class AuditView extends Composite<VerticalLayout> {
       case LoginFailed e -> "client=" + nullToDash(e.clientAddress())
           + " reason=" + nullToDash(e.reason());
       case LogoutPerformed e -> "scope=" + e.scope().name();
-      case SessionCreated e -> "session=" + nullToDash(e.sessionId());
-      case SessionInvalidated e -> "session=" + nullToDash(e.sessionId())
+      case SessionCreated e -> "session=" + sessionRef(e.sessionId());
+      case SessionInvalidated e -> "session=" + sessionRef(e.sessionId())
           + " reason=" + e.reason();
       case RoleAssigned e -> "role=" + e.role();
       case RoleRevoked e -> "role=" + e.role();
@@ -247,5 +248,10 @@ public class AuditView extends Composite<VerticalLayout> {
 
   private static String nullToDash(String value) {
     return value == null ? "—" : value;
+  }
+
+  /** JS-SEC-117 (CWE-522): a session is shown by its reference, never by the session id. */
+  private static String sessionRef(String sessionId) {
+    return nullToDash(SessionRef.ofNullable(sessionId));
   }
 }

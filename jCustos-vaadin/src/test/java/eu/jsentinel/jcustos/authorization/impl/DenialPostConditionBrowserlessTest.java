@@ -23,9 +23,12 @@ import com.vaadin.browserless.BrowserlessTest;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.router.BeforeEnterEvent;
+import com.vaadin.flow.router.BeforeEvent;
+import com.vaadin.flow.router.HasUrlParameter;
 import com.vaadin.flow.router.Location;
 import com.vaadin.flow.router.NavigationTrigger;
 import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouteParameters;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -59,6 +62,21 @@ class DenialPostConditionBrowserlessTest extends BrowserlessTest {
         NavigationTrigger.PROGRAMMATIC,
         new Location("fc-post/protected"),
         target,
+        ui,
+        List.of());
+  }
+
+  /** An event for the route {@code path} as the router resolves it, route parameters included. */
+  private static BeforeEnterEvent eventForPath(String path) {
+    UI ui = UI.getCurrent();
+    var state = ui.getInternals().getRouter().resolveNavigationTarget(new Location(path))
+        .orElseThrow(() -> new AssertionError("no route for " + path));
+    return new BeforeEnterEvent(
+        ui.getInternals().getRouter(),
+        NavigationTrigger.PROGRAMMATIC,
+        new Location(path),
+        state.getNavigationTarget(),
+        state.getRouteParameters(),
         ui,
         List.of());
   }
@@ -258,6 +276,120 @@ class DenialPostConditionBrowserlessTest extends BrowserlessTest {
     assertReroutedToSecurityError(event);
   }
 
+  // ── JS-SEC-158: a target that is the navigation target itself ──
+
+  @Test
+  @DisplayName("Vaadin: rerouteTo(String) with the route of the navigation target sets a target - one Vaadin skips")
+  void vaadinSetsATargetForTheNavigationTargetItself() {
+    BeforeEnterEvent event = eventFor(ProtectedTarget.class);
+
+    event.rerouteTo("fc-post/protected");
+
+    assertTrue(event.hasRerouteTarget(),
+        "the event carries a target, so the JS-SEC-152 check alone let it pass");
+    assertSame(ProtectedTarget.class, event.getRerouteTargetType());
+    assertFalse(VaadinAccessDecisionMapper.hasTarget(event),
+        "a target Vaadin skips is no target");
+  }
+
+  @Test
+  @DisplayName("post-condition: a reroute to the navigation target itself is rerouted to the error view")
+  void postCondition_rerouteToItself_isReroutedToError() {
+    BeforeEnterEvent event = eventFor(ProtectedTarget.class);
+    event.rerouteTo("fc-post/protected");
+
+    AuthorizationListener.failClosedIfUnhandled(
+        new AccessDecision.Reroute("fc-post/protected", false), event);
+
+    assertReroutedToSecurityError(event);
+  }
+
+  @Test
+  @DisplayName("post-condition: a forward to the navigation target itself is replaced by the error view")
+  void postCondition_forwardToItself_isReroutedToError() {
+    BeforeEnterEvent event = eventFor(ProtectedTarget.class);
+    event.forwardTo("fc-post/protected");
+
+    AuthorizationListener.failClosedIfUnhandled(
+        new AccessDecision.Reroute("fc-post/protected", true), event);
+
+    assertFalse(event.hasForwardTarget(),
+        "Vaadin refuses an event with a forward and a reroute target");
+    assertReroutedToSecurityError(event);
+  }
+
+  @Test
+  @DisplayName("mapper: Reroute to the route of the navigation target ends in the error view")
+  void mapper_rerouteToItself() {
+    BeforeEnterEvent event = eventFor(ProtectedTarget.class);
+
+    mapper.apply(new AccessDecision.Reroute("fc-post/protected", false), event);
+
+    assertReroutedToSecurityError(event);
+  }
+
+  @Test
+  @DisplayName("mapper: Reroute(asForward) to the route of the navigation target ends in the error view")
+  void mapper_forwardToItself() {
+    BeforeEnterEvent event = eventFor(ProtectedTarget.class);
+
+    mapper.apply(new AccessDecision.Reroute("fc-post/protected", true), event);
+
+    assertFalse(event.hasForwardTarget());
+    assertReroutedToSecurityError(event);
+  }
+
+  @Test
+  @DisplayName("mapper: RerouteWithParameter with the parameter of the navigation in progress ends in the error view")
+  void mapper_rerouteWithTheSameParameter() {
+    BeforeEnterEvent event = eventForPath("fc-post/item/5");
+
+    mapper.apply(new AccessDecision.RerouteWithParameter<>("fc-post/item", "5"), event);
+
+    assertReroutedToSecurityError(event);
+  }
+
+  @Test
+  @DisplayName("control: RerouteWithParameter with another parameter is a navigation of its own and is kept")
+  void mapper_rerouteWithAnotherParameter() {
+    BeforeEnterEvent event = eventForPath("fc-post/item/5");
+
+    mapper.apply(new AccessDecision.RerouteWithParameter<>("fc-post/item", "0"), event);
+
+    assertSame(ItemTarget.class, event.getRerouteTargetType());
+    assertFalse(event.hasErrorParameter(),
+        "Vaadin carries out a reroute to other route parameters; the listener evaluates it again");
+    assertTrue(VaadinAccessDecisionMapper.hasTarget(event));
+  }
+
+  @Test
+  @DisplayName("navigation mapper: AccessDenied to the route of the navigation target ends in the error view")
+  void navigationMapper_accessDeniedToItself() {
+    BeforeEnterEvent event = eventFor(ProtectedTarget.class);
+
+    navigationMapper.apply(NavigationAccessDecision.accessDenied("fc-post/protected", true), event,
+        () -> UnroutedLoginView.class, () -> SigninTarget.class);
+
+    assertFalse(event.hasForwardTarget());
+    assertReroutedToSecurityError(event);
+  }
+
+  @Test
+  @DisplayName("navigation mapper: LoginRequired while the login view is the navigation target ends in the error view")
+  void navigationMapper_loginRequiredOnTheLoginView() {
+    UI ui = UI.getCurrent();
+    BeforeEnterEvent event = new BeforeEnterEvent(
+        ui.getInternals().getRouter(), NavigationTrigger.PROGRAMMATIC,
+        new Location("fc-post/login"), RoutedLoginView.class, RouteParameters.empty(), ui,
+        List.of());
+
+    navigationMapper.apply(NavigationAccessDecision.loginRequired(), event,
+        () -> RoutedLoginView.class, () -> SigninTarget.class);
+
+    assertFalse(event.hasForwardTarget());
+    assertReroutedToSecurityError(event);
+  }
+
   // ── Fixtures ───────────────────────────────────────────────────
 
   @Route("fc-post/protected")
@@ -266,6 +398,22 @@ class DenialPostConditionBrowserlessTest extends BrowserlessTest {
 
   @Route("fc-post/signin")
   public static class SigninTarget extends Div {
+  }
+
+  @Route("fc-post/item")
+  public static class ItemTarget extends Div implements HasUrlParameter<String> {
+    @Override
+    public void setParameter(BeforeEvent event, String parameter) {
+      // not used
+    }
+  }
+
+  /** A login view registered as a route. */
+  @Route("fc-post/login")
+  public static class RoutedLoginView extends LoginView {
+    @Override public boolean checkCredentials() { return false; }
+    @Override public void navigateToApp() { /* not used */ }
+    @Override public void reactOnFailedLogin() { /* not used */ }
   }
 
   /** A login view that is deliberately not registered as a route. */

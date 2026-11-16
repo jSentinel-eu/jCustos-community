@@ -35,6 +35,15 @@ import static java.util.Arrays.stream;
 
 /**
  * Role-based access evaluator for the demo application.
+ * <ul>
+ *   <li>No subject in the SubjectStore: reroute to the login view.</li>
+ *   <li>Subject without any of the required roles: forward to {@link MainView}, the home of
+ *       every signed-in subject. {@code MainView} must admit every signed-in subject
+ *       ({@code @SecureRoute()}): a denial that forwards to the denied view itself ends in
+ *       the error view (JS-SEC-158), so a home view that denies would turn every such
+ *       forward into an error page.</li>
+ *   <li>Subject with at least one required role: granted.</li>
+ * </ul>
  */
 public class MyRoleAccessEvaluator
     implements AccessEvaluator<VisibleFor>, HasLogger {

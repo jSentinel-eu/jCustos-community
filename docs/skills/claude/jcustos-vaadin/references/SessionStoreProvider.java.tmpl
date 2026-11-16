@@ -9,9 +9,11 @@ import eu.jsentinel.jcustos.session.SessionStore;
  * render them via the framework's {@code SessionManagementView}.
  *
  * <p>The records are kept under the reference of the session id, never
- * under the session cookie itself ({@link SessionReferenceStore},
- * JS-SEC-117). The bootstrap registers this store for the per-request
- * revocation check ({@code DefaultBootstrapExtension}).
+ * under the session cookie itself: the login view records each session
+ * under {@code SessionRef.of(id)} (JS-SEC-117). The library matches live
+ * sessions by that reference, so no decorating store is needed. The
+ * bootstrap registers this store for the per-request revocation check
+ * ({@code DefaultBootstrapExtension}).
  *
  * <p>Demo-only: in-memory, dropped on JVM exit. Swap in
  * {@code EclipseStoreSessionStore} (from
@@ -20,8 +22,7 @@ import eu.jsentinel.jcustos.session.SessionStore;
  */
 public final class SessionStoreProvider {
 
-  private static final SessionStore INSTANCE =
-      new SessionReferenceStore(new InMemorySessionStore());
+  private static final SessionStore INSTANCE = new InMemorySessionStore();
 
   private SessionStoreProvider() {
   }

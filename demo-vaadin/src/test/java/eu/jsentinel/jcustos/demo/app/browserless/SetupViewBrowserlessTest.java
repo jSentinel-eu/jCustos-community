@@ -16,7 +16,9 @@
  */
 package eu.jsentinel.jcustos.demo.app.browserless;
 
+import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.demo.app.security.bootstrap.BootstrapWiring;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
@@ -254,6 +256,27 @@ class SetupViewBrowserlessTest extends BrowserlessTest {
 
     assertTrue(BootstrapWiring.instance().stateService().hasAdministrator(),
         "after Created the AdministratorAccountStore must report an admin");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-134: the administrator the setup creates logs in through the login view")
+  void setupAdministratorLogsIn() {
+    navigate(SetupView.class);
+    setValue(PasswordField.class, "Bootstrap token", KNOWN_TOKEN);
+    setValue(PasswordField.class, "New password", "Adm1n-setup-pass");
+    setValue(PasswordField.class, "Repeat password", "Adm1n-setup-pass");
+    submit();
+    assertNotification("Administrator 'admin' created. You can now log in.");
+
+    navigate(MyLoginView.class);
+    test($view(TextField.class).id(LoginView.TF_USERNAME_ID)).setValue("admin");
+    test($view(PasswordField.class).id(LoginView.PF_PASSWORD_ID)).setValue("Adm1n-setup-pass");
+    test($view(Button.class).id(LoginView.BTN_LOGIN_ID)).click();
+
+    MyUser admin = SubjectStores.subjectStore().currentSubject(MyUser.class)
+        .orElseThrow(() -> new AssertionError(
+            "the administrator created by the setup must be able to log in"));
+    assertTrue(admin.roles().contains(AuthorizationRole.ADMIN), "roles: " + admin.roles());
   }
 
   @SuppressWarnings("unchecked")

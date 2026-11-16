@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.identity.oidc.vaadin;
 
 import eu.jsentinel.jcustos.audit.LogoutPerformed;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -157,11 +158,12 @@ class OidcLogoutViewTest {
     assertLoggedOutLocally();
     LogoutPerformed logout = audit.single(LogoutPerformed.class);
     assertEquals("alice", logout.subjectId());
-    assertEquals(sessionId, logout.sessionId());
+    assertEquals(SessionRef.of(sessionId), logout.sessionId(),
+        "LogoutPerformed carries the reference, never the session id (JS-SEC-117)");
     assertEquals(LogoutScope.CurrentSession, logout.scope());
     SessionInvalidated policyEvent = audit.single(SessionInvalidated.class);
     assertEquals("Logout", policyEvent.reason(), "SessionPolicy.onLogout was notified");
-    assertEquals(sessionId, policyEvent.sessionId());
+    assertEquals(SessionRef.of(sessionId), policyEvent.sessionId());
   }
 
   @Test

@@ -39,10 +39,11 @@ Flow application. The end state is a working app with:
   that queries `JCustosServiceResolver.securityAuditService()` and
   renders the ring buffer as a grid
 - an `/admin/sessions` view extending the framework's
-  `SessionManagementView` over an `InMemorySessionStore` wrapped in
-  `SessionReferenceStore`: rows carry the session reference
-  (`SessionRef`, `sref-…`), never the session cookie (JS-SEC-117), and
-  Revoke ends the session on its next request (JS-SEC-131)
+  `SessionManagementView` over an `InMemorySessionStore`: the login view
+  records each session under its reference (`SessionRef`, `sref-…`),
+  never under the session cookie (JS-SEC-117), and Revoke
+  (`VaadinSessionRevocation::revoke`) ends the session at the click
+  (JS-SEC-131)
 - an `/admin/roles` view for assigning / revoking roles (admin-only)
 
 Validated against the `demo-vaadin` reference module in this repo. The
@@ -96,7 +97,6 @@ src/main/java/<base>/
 │   ├── services/
 │   │   ├── My<...>AuthenticationService.java ← @JCustosAutoService
 │   │   ├── My<...>AuthorizationService.java  ← @JCustosAutoService
-│   │   ├── SessionReferenceStore.java    ← keys every record by SessionRef, never by the session id
 │   │   └── SessionStoreProvider.java
 │   └── bootstrap/
 │       └── JCustosBootstrapInitListener.java ← VaadinServiceInitListener
@@ -261,7 +261,6 @@ Template-to-target file mapping (apply after substitution):
 | `AuthenticationService.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/{{SUBJECT_PREFIX}}AuthenticationService.java` |
 | `AuthorizationService.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/{{SUBJECT_PREFIX}}AuthorizationService.java` |
 | `SessionStoreProvider.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/SessionStoreProvider.java` |
-| `SessionReferenceStore.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/SessionReferenceStore.java` |
 | `BootstrapExtension.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/BootstrapExtension.java` |
 | `BootstrapBuilder.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/BootstrapBuilder.java` |
 | `DefaultBootstrapExtension.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/DefaultBootstrapExtension.java` |
@@ -495,19 +494,31 @@ The library `LoginView` runs the `LoginAttemptPolicy` protocol around
 authentication service must not call the policy itself — every attempt
 would be counted twice.
 
+### A denial points to another route
+
+`RoleAccessEvaluator` sends a subject without the required role to
+`PublicHomeView`, never to the view it denies. Vaadin skips a reroute or
+forward to the navigation in progress; until 00.84.00 a denial that
+named the denied view therefore rendered it, and since JS-SEC-158 it
+ends in the error view. The same holds for a target that sits in the
+restricted layout of the denied view: its own navigation is denied
+again. Point denials at a view every denied visitor may see.
+
 ### Session inventory: references, and Revoke that ends the session
 
 The login view records the session in `onSessionRotated(...)` (after
-the id rotation) under `SessionRef.of(sessionId)`, and
-`SessionStoreProvider` wraps the store in `SessionReferenceStore`, so
-neither the store nor the `/admin/sessions` grid ever holds the session
-cookie (JS-SEC-117). `DefaultBootstrapExtension` registers the store
-with `.sessions(s -> s.storeBacked(...))`; the bootstrap hands it to
-`VaadinSessionRevocation`, and Revoke — which marks the record
-`REVOKED` — ends the session on its next request (JS-SEC-131).
-`VaadinSessionRevocation.terminate(...)` matches live session ids only,
-so a reference-keyed inventory ends sessions on their next request, not
-at the click.
+the id rotation) under `SessionRef.of(sessionId)`, so neither the store
+nor the `/admin/sessions` grid ever holds the session cookie
+(JS-SEC-117); the grid renders `SessionRef.of(...)` of whatever the
+store holds. `DefaultBootstrapExtension` registers the store with
+`.sessions(s -> s.storeBacked(...))`; the bootstrap hands it to
+`VaadinSessionRevocation`. Revoke is `VaadinSessionRevocation::revoke`:
+it removes the record and ends the live session whose id has that
+reference at the click; every other node that shares the store refuses
+the session on its next request, as it does for a record marked
+`REVOKED` (JS-SEC-131). The library matches live sessions by reference,
+so no decorating store is needed (before 00.84.00 the skill shipped a
+`SessionReferenceStore`; delete it from generated projects).
 
 ### `<jcustos.version>` property
 

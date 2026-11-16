@@ -404,6 +404,9 @@ public abstract class LoginView
    * correlation — so revocation by id reaches the live session. Records
    * written inside {@link #checkCredentials()} carry the pre-rotation id and
    * must be moved here, for example with {@code SessionStore.rekey(old, new)}.
+   * The two ids are the live session ids, i.e. session cookies: store the
+   * reference {@code SessionRef.of(id)}, never the id itself (JS-SEC-117).
+   * {@code VaadinSessionRevocation} finds the live session by that reference.
    * <p>
    * Runs after the {@link SessionPolicy} observed the login and after the
    * rotation was audited; it is not called when no rotation took place.

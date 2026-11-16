@@ -51,6 +51,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import static eu.jsentinel.jcustos.demo.skill.vaadin.SkillDemoTestSupport.inSession;
@@ -64,7 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * JS-SEC-131 (CWE-613) and JS-SEC-117 (CWE-522) in the demo's own wiring: the session
  * inventory holds references, never session ids, and Revoke in {@link SessionsView} ends
- * the revoked session on its next request.
+ * the revoked session at the click; a record revoked elsewhere ends it on its next request.
  *
  * <p>Two real sessions of one Vaadin service: the user's is the browserless session and
  * logs in through the real {@link MyLoginView}; the administrator's is a second
@@ -136,12 +137,12 @@ class SessionRevocationBrowserlessTest extends BrowserlessTest {
     List<SessionRecord> rows = view.grid().getGenericDataView().getItems().toList();
     assertEquals(1, rows.size());
     assertTrue(rows.stream().noneMatch(r -> r.sessionId().value().equals(bobSessionId)),
-        "the session-id column renders sessionId().value() - it must not show the cookie");
+        "no row carries the cookie; the session-id column renders SessionRef.of(...)");
   }
 
   @Test
-  @DisplayName("Revoke by the administrator ends the user's session on its next request; the administrator stays logged in")
-  void revokeEndsTheUsersSession() {
+  @DisplayName("Revoke by the administrator ends the user's session at the click; the administrator stays logged in")
+  void revokeEndsTheUsersSessionAtTheClick() {
     String bobSessionId = logInAsBob();
     audit.clear();
 
@@ -154,23 +155,43 @@ class SessionRevocationBrowserlessTest extends BrowserlessTest {
       return view;
     });
 
-    assertEquals(List.of(SessionStatus.REVOKED),
-        SessionStoreProvider.sessionStore().findAll().stream().map(SessionRecord::status).toList());
+    // no request of bob's in between: the session ended at the click
+    assertNotEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState),
+        "Revoke must end the live session at once, not on its next request");
+    assertNull(inSession(bobSession, () -> bobSession.getAttribute(User.class)),
+        "bob's subject is dropped");
+    assertTrue(SessionStoreProvider.sessionStore().findAll().isEmpty(),
+        "the record is removed, so every other node refuses the session on its next request");
+    SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
+    assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
+    assertEquals("7", invalidated.subjectId(), "the audit names the revoked subject");
+    assertEquals(SessionRef.of(bobSessionId), invalidated.sessionId(),
+        "the audit carries the reference, never the session cookie (JS-SEC-117)");
+
+    assertEquals(VaadinSessionState.OPEN, inSession(adminSession, adminSession::getState),
+        "revoking somebody else must not end the administrator's session");
+    assertEquals(ADMIN, inSession(adminSession, () -> adminSession.getAttribute(User.class)));
+  }
+
+  @Test
+  @DisplayName("a record revoked elsewhere ends the user's session on its next request")
+  void revokedRecordEndsTheSessionOnItsNextRequest() {
+    String bobSessionId = logInAsBob();
+    audit.clear();
+    // another node or an operator tool marks the record revoked; the store holds the reference
+    SessionRecord bobRecord = SessionStoreProvider.sessionStore().findAll().getFirst();
+    SessionStoreProvider.sessionStore().save(bobRecord.withStatus(SessionStatus.REVOKED));
 
     // bob's next request
     navigateIntoTheEndedSession();
 
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
-    assertEquals(bobSessionId, invalidated.sessionId());
+    assertEquals(SessionRef.of(bobSessionId), invalidated.sessionId());
     assertNotEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState),
         "bob's session is closed");
     assertNull(inSession(bobSession, () -> bobSession.getAttribute(User.class)),
         "bob's subject is dropped");
-
-    assertEquals(VaadinSessionState.OPEN, inSession(adminSession, adminSession::getState),
-        "revoking somebody else must not end the administrator's session");
-    assertEquals(ADMIN, inSession(adminSession, () -> adminSession.getAttribute(User.class)));
   }
 
   @Test
@@ -202,12 +223,20 @@ class SessionRevocationBrowserlessTest extends BrowserlessTest {
   /**
    * Runs {@code action} on the administrator's session: a second session of the same
    * service, bound to the test thread under its own lock as its request thread would have
-   * it. Bob's thread state is restored afterwards.
+   * it. Bob's request is over meanwhile - the container leaves an idle session unlocked -
+   * so his session lock is released for the duration; a command for his session then runs
+   * at once, as it would on a live node. Bob's lock and thread state are restored
+   * afterwards.
    */
   private <T> T actAsAdmin(Supplier<T> action) {
     Map<Class<?>, CurrentInstance> bobsInstances = CurrentInstance.getInstances();
     if (adminSession == null) {
       adminSession = openSecondSession();
+    }
+    ReentrantLock bobsLock = (ReentrantLock) VaadinSession.getCurrent().getLockInstance();
+    int bobsHolds = bobsLock.getHoldCount();
+    for (int i = 0; i < bobsHolds; i++) {
+      bobsLock.unlock();
     }
     CurrentInstance.clearAll();
     VaadinSession.setCurrent(adminSession);
@@ -217,6 +246,9 @@ class SessionRevocationBrowserlessTest extends BrowserlessTest {
       return action.get();
     } finally {
       adminSession.getLockInstance().unlock();
+      for (int i = 0; i < bobsHolds; i++) {
+        bobsLock.lock();
+      }
       CurrentInstance.clearAll();
       CurrentInstance.restoreInstances(bobsInstances);
     }

@@ -3,7 +3,7 @@ package eu.jsentinel.jcustos.demo.skill.vaadin.views.admin;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
 import eu.jsentinel.jcustos.components.SessionManagementView;
 import eu.jsentinel.jcustos.session.SessionRecord;
-import eu.jsentinel.jcustos.session.SessionStatus;
+import eu.jsentinel.jcustos.session.vaadin.VaadinSessionRevocation;
 import com.vaadin.flow.router.Route;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.services.SessionStoreProvider;
 import eu.jsentinel.jcustos.demo.skill.vaadin.views.HomeButton;
@@ -12,22 +12,23 @@ import eu.jsentinel.jcustos.demo.skill.vaadin.views.MainLayout;
 /**
  * Admin-only session inventory + revoke. Re-uses the framework's
  * {@link SessionManagementView} composite — the only project-specific
- * glue is wiring it to {@link SessionStoreProvider} and to a revoke
- * callback.
+ * glue is wiring it to {@link SessionStoreProvider} and to the library's
+ * revoke.
  *
  * <p>The grid shows the reference of each session ({@code sref-…}), never
  * the session id: the records are stored under the reference
  * (JS-SEC-117, CWE-522), so an administrator cannot copy a session cookie
  * out of this view.
  *
- * <p>Revoke ends the session (JS-SEC-131, CWE-613): the callback marks the
- * record {@link SessionStatus#REVOKED}. The bootstrap registered the same
- * store for the per-request check of {@code SessionLifetimeListener}, which
- * ends a session whose record is revoked on its next request - on this
- * node and on every other node that shares the store - and audits
- * {@code SessionInvalidated} with the reason {@code Revoked}. The row stays
- * in the grid with a disabled button, so the administrator sees what
- * happened.
+ * <p>Revoke ends the session at the click (JS-SEC-131, CWE-613):
+ * {@link VaadinSessionRevocation#revoke(SessionRecord)} removes the record
+ * and ends the live session of this node whose id has the record's
+ * reference - subject dropped, {@code SessionInvalidated} audited with the
+ * reason {@code Revoked}, Vaadin session closed, HTTP session invalidated.
+ * The bootstrap registered the same store for the per-request check of
+ * {@code SessionLifetimeListener}, so every other node that shares the
+ * store refuses the session on its next request. A record another node or
+ * a tool marks {@code REVOKED} ends the session the same way.
  *
  * <p>The constructor adds a Home button at the top of the content
  * layout via {@link HomeButton#forStandalone(Class)}: the button only
@@ -42,18 +43,8 @@ public class SessionsView extends SessionManagementView {
   public static final String NAV = "admin/sessions";
 
   public SessionsView() {
-    super(SessionStoreProvider.sessionStore(), SessionsView::revoke);
+    super(SessionStoreProvider.sessionStore(), VaadinSessionRevocation::revoke);
     HomeButton.forStandalone(getClass())
         .ifPresent(home -> getContent().addComponentAsFirst(home));
-  }
-
-  /**
-   * Revokes by reference: the record carries the reference, and the store
-   * keys every lookup by the reference, so the session's next request
-   * finds the record revoked and is refused.
-   */
-  private static void revoke(SessionRecord record) {
-    SessionStoreProvider.sessionStore()
-        .save(record.withStatus(SessionStatus.REVOKED));
   }
 }

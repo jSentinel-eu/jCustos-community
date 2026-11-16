@@ -1,5 +1,6 @@
 package {{BASE_PACKAGE}}.security.oidc;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.identity.oidc.InMemorySessionRegistry;
 import eu.jsentinel.jcustos.oidc.api.SessionRegistry;
 import com.vaadin.flow.server.WrappedSession;
@@ -16,9 +17,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * the unauthenticated back-channel thread). {@link WrappedSession#invalidate()} is
  * thread-safe; the user's next Vaadin request fails and forces re-authentication.
  *
+ * <p>Both indexes are keyed by the reference of the session id ({@link SessionRef},
+ * JS-SEC-117), never by the id itself: the session id is the session cookie, the registry
+ * lives as long as the application, and {@link #terminate} returns its keys. Every method
+ * accepts a live id or a reference ({@link SessionRef#of(String)} is idempotent).
+ *
  * <p>Register at login with {@link #register(String, String, Optional, WrappedSession)};
  * call {@link #forget(String)} from a session-destroy listener to avoid leaking
- * references.
+ * references, or register the library's {@code VaadinSessionRegistryCleanup}.
  */
 public final class VaadinBackChannelSessionRegistry implements SessionRegistry {
 
@@ -35,8 +41,9 @@ public final class VaadinBackChannelSessionRegistry implements SessionRegistry {
 
   /** Login hook: binds the live Vaadin session so a later back-channel logout can kill it. */
   public static void register(String issuer, String subject, Optional<String> sid, WrappedSession session) {
-    SESSIONS.put(session.getId(), session);
-    KEYS.register(issuer, subject, sid, session.getId());
+    String key = SessionRef.of(session.getId());
+    SESSIONS.put(key, session);
+    KEYS.register(issuer, subject, sid, key);
   }
 
   /** Session-destroy hook: drop the reference to a session that ended on its own. */
@@ -46,7 +53,7 @@ public final class VaadinBackChannelSessionRegistry implements SessionRegistry {
 
   @Override
   public void register(String issuer, String subject, Optional<String> sid, String sessionId) {
-    KEYS.register(issuer, subject, sid, sessionId);
+    KEYS.register(issuer, subject, sid, SessionRef.of(sessionId));
   }
 
   @Override
@@ -68,7 +75,8 @@ public final class VaadinBackChannelSessionRegistry implements SessionRegistry {
   /** Removes a session that ended on its own from both indexes (bounded registry, JS-SEC-078). */
   @Override
   public void unregister(String sessionId) {
-    SESSIONS.remove(sessionId);
-    KEYS.unregister(sessionId);
+    String key = SessionRef.of(sessionId);
+    SESSIONS.remove(key);
+    KEYS.unregister(key);
   }
 }

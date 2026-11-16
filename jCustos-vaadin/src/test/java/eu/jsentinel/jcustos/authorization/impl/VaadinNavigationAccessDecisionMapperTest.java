@@ -319,14 +319,19 @@ class VaadinNavigationAccessDecisionMapperTest {
   private static final class TestDefaultView extends Component {
   }
 
+  /** The view an access-denied test sends the visitor to; not the navigation target. */
+  private static final class TestDeniedView extends Component {
+  }
+
   /**
    * A real registry holding the route the access-denied tests point to. Since JS-SEC-152
-   * the mapper resolves the route before it reroutes.
+   * the mapper resolves the route before it reroutes; since JS-SEC-158 a route of the
+   * navigation target itself ({@link TestDefaultView}) ends in the error view.
    */
   private static final class TestRouteRegistry extends AbstractRouteRegistry {
 
     TestRouteRegistry() {
-      setRoute("login", TestDefaultView.class, List.of());
+      setRoute("login", TestDeniedView.class, List.of());
       setRoute("signin", TestLoginView.class, List.of());
     }
 

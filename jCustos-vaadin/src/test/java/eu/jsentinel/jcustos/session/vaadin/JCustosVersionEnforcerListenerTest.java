@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.session.vaadin;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
@@ -131,7 +132,8 @@ class JCustosVersionEnforcerListenerTest {
     assertEquals(1, audit.published.size());
     SessionStale published = (SessionStale) audit.published.get(0);
     assertEquals("alice", published.subjectId());
-    assertEquals("sid-7", published.sessionId());
+    assertEquals(SessionRef.of("sid-7"), published.sessionId(),
+        "SessionStale carries the reference, also for a snapshot recorded with the raw id (JS-SEC-117)");
     assertEquals(DummyTarget.class.getName(), published.route());
     assertEquals(0L, published.snapshotVersion());
     assertEquals(2L, published.currentVersion());

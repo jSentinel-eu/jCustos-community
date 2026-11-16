@@ -11,6 +11,7 @@
 package eu.jsentinel.jcustos.dx.vaadin.bootstrap;
 
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -124,7 +125,7 @@ class SessionStoreRevocationBootstrapBrowserlessTest extends BrowserlessTest {
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
     assertEquals("bob", invalidated.subjectId());
-    assertEquals(record.sessionId().value(), invalidated.sessionId());
+    assertEquals(SessionRef.of(record.sessionId().value()), invalidated.sessionId());
     assertTrue(SubjectStores.subjectStore().currentSubject(String.class).isEmpty(),
         "the revoked session must not keep its subject");
   }

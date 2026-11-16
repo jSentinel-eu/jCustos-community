@@ -105,11 +105,16 @@ Fail-closed wiring, as the demos and skills ship it since 00.84.00:
 - **Throttling.** The library `LoginView` runs the `LoginAttemptPolicy` protocol itself; do
   not call the policy from your `AuthenticationService` (every attempt would count twice).
 - **Session inventory.** Record sessions in `LoginView.onSessionRotated(...)` under
-  `SessionRef.of(sessionId)` and key the store the same way, so neither the store nor the
-  session-management grid holds the session cookie (JS-SEC-117). Revoke with
-  `VaadinSessionRevocation::revoke` (live id) or by marking the record `REVOKED` (reference):
-  the store registered through `.sessions(s -> s.storeBacked(...))` is checked on every
-  request (JS-SEC-131).
+  `SessionRef.of(sessionId)`, so neither the store nor the session-management grid holds the
+  session cookie (JS-SEC-117); no decorating store is needed. Revoke with
+  `VaadinSessionRevocation::revoke`: it matches the live session by its reference and ends it
+  at the click on this node. The store registered through `.sessions(s -> s.storeBacked(...))`
+  is checked on every request, so a removed record, or one another node marks `REVOKED`, ends
+  the session on its next request there (JS-SEC-131).
+- **Denials point elsewhere.** An `AccessEvaluator` that denies must name a route the denied
+  visitor may see, never the denied view and never a view in the same restricted layout:
+  Vaadin skips a reroute or forward to the navigation in progress, and since 00.84.00 such a
+  denial ends in the error view (JS-SEC-158).
 - **Version drift.** Register `JCustosVersionEnforcerListener` with
   `listener.register(serviceInitEvent)` — it also covers WebSocket-only push messages
   (JS-SEC-155).

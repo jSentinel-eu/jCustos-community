@@ -12,8 +12,10 @@ import eu.jsentinel.jcustos.demo.skill.vaadin.security.bootstrap.JCustosStorageP
  * <p>Session records survive JVM restarts as long as the
  * {@code ./data/jcustos-vaadin-persistence} directory survives. They are
  * kept under the reference of the session id, never under the session
- * cookie itself ({@link SessionReferenceStore}, JS-SEC-117): the store
- * files and their backups hold nothing that opens a session.
+ * cookie itself - the login view records each session under
+ * {@code SessionRef.of(id)} (JS-SEC-117) - so the store files and their
+ * backups hold nothing that opens a session. The library matches live
+ * sessions by that reference; no decorating store is needed.
  */
 public final class SessionStoreProvider {
 
@@ -21,6 +23,6 @@ public final class SessionStoreProvider {
   }
 
   public static SessionStore sessionStore() {
-    return new SessionReferenceStore(JCustosStorageProvider.storage().sessionStore());
+    return JCustosStorageProvider.storage().sessionStore();
   }
 }

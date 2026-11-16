@@ -21,12 +21,17 @@ import eu.jsentinel.jcustos.audit.RoleRevoked;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.UserCreated;
 import eu.jsentinel.jcustos.audit.UserDeleted;
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authentication.PasswordHasher;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.password.RehashDecision;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -43,19 +48,30 @@ import java.util.stream.Stream;
  * Pre-populates {@code user/user} (USER) and {@code demo/demo} (NERD).
  * The administrator entry is intentionally absent — the bootstrap flow
  * creates the first administrator.
+ * <p>
+ * Passwords are hashed and verified through the credential pipeline the
+ * bootstrap configured ({@link ConfiguredHashingService}, JS-SEC-134) - the
+ * pipeline {@code BootstrapWiring} hashes the first administrator with, so
+ * the administrator {@code SetupView} creates can log in. An unknown user
+ * name costs the same key derivation as a known one, and a verification the
+ * KDF limiter shed is reported as "try again later", never as a wrong
+ * password (JS-SEC-126).
  */
 public final class InMemoryDemoUserDirectory implements DemoUserDirectory {
 
-  private final PasswordHasher hasher;
+  private final PasswordHashingService hashing;
   private final Map<String, StoredUser> byUsername = new ConcurrentHashMap<>();
   private final Map<Long, MyUser> byId = new ConcurrentHashMap<>();
 
   public InMemoryDemoUserDirectory() {
-    this(JCustosServiceResolver.passwordHashingService());
+    this(ConfiguredHashingService.INSTANCE);
   }
 
-  public InMemoryDemoUserDirectory(PasswordHasher hasher) {
-    this.hasher = Objects.requireNonNull(hasher, "hasher");
+  /**
+   * @param hashing the credential pipeline to hash and verify with
+   */
+  public InMemoryDemoUserDirectory(PasswordHashingService hashing) {
+    this.hashing = Objects.requireNonNull(hashing, "hashing");
     addUser("user", "user", createMyUser(2L, "Herr User", AuthorizationRole.USER));
     addUser("demo", "demo", createMyUser(3L, "Herr Demo", AuthorizationRole.NERD));
   }
@@ -88,7 +104,13 @@ public final class InMemoryDemoUserDirectory implements DemoUserDirectory {
     Objects.requireNonNull(username);
     Objects.requireNonNull(plaintextPassword);
     Objects.requireNonNull(user);
-    String hash = hasher.hash(plaintextPassword.toCharArray());
+    char[] raw = plaintextPassword.toCharArray();
+    String hash;
+    try {
+      hash = hashing.hash(raw).encodedHash();
+    } finally {
+      Arrays.fill(raw, '\0');
+    }
     byUsername.put(username, new StoredUser(user, hash));
     byId.put(user.id(), user);
     audit(new UserCreated(
@@ -127,8 +149,8 @@ public final class InMemoryDemoUserDirectory implements DemoUserDirectory {
   }
 
   @Override
-  public PasswordHasher passwordHasher() {
-    return hasher;
+  public PasswordHashingService hashingService() {
+    return hashing;
   }
 
   @Override
@@ -219,24 +241,44 @@ public final class InMemoryDemoUserDirectory implements DemoUserDirectory {
         || credentials.password() == null) {
       return Optional.empty();
     }
-    StoredUser stored = byUsername.get(credentials.username());
-    if (stored == null) {
-      return Optional.empty();
-    }
     char[] raw = credentials.password().toCharArray();
-    if (!hasher.verify(raw, stored.passwordHash)) {
-      return Optional.empty();
-    }
-    if (hasher.needsRehash(stored.passwordHash)) {
-      try {
-        String freshHash = hasher.hash(raw);
-        byUsername.put(credentials.username(), new StoredUser(stored.user, freshHash));
-      } catch (RuntimeException rehashFailure) {
-        // Login already succeeded against the existing hash; failing to
-        // upgrade is not a security failure.
+    try {
+      StoredUser stored = byUsername.get(credentials.username());
+      if (stored == null) {
+        // Same derivation cost as a known name - no user enumeration by timing.
+        CredentialVerificationUnavailableException.throwIfUnavailable(
+            hashing.verifyAgainstNothing(raw));
+        return Optional.empty();
       }
+      CredentialVerificationResult result = hashing.verify(raw, stored.passwordHash);
+      CredentialVerificationUnavailableException.throwIfUnavailable(result);
+      if (!(result instanceof CredentialVerificationResult.Verified)) {
+        return Optional.empty();
+      }
+      rehashIfOutdated(credentials.username(), stored, raw);
+      return Optional.of(stored.user);
+    } finally {
+      Arrays.fill(raw, '\0');
     }
-    return Optional.of(stored.user);
+  }
+
+  /**
+   * Upgrades a hash the configured policy calls outdated. The login has
+   * already succeeded against the stored hash, so a failure keeps the old
+   * hash and the user has to choose a new password (JS-SEC-133).
+   */
+  private void rehashIfOutdated(String username, StoredUser stored, char[] raw) {
+    if (!(hashing.needsRehash(stored.passwordHash) instanceof RehashDecision.Required)) {
+      return;
+    }
+    try {
+      String freshHash = hashing.hash(raw).encodedHash();
+      byUsername.put(username, new StoredUser(stored.user, freshHash));
+    } catch (RuntimeException rehashFailure) {
+      HasLogger.staticLogger().warn("The password hash of user id {} could not be upgraded "
+          + "({}); the user has to choose a new password.",
+          stored.user.id(), rehashFailure.getClass().getSimpleName());
+    }
   }
 
   /** Test seam: returns the stored hash for the given username, or empty. */

@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.session.vaadin;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
@@ -117,7 +118,9 @@ public final class JCustosVersionEnforcerListener
         snapshot.subjectId(),
         snapshot.tenant(),
         snapshot.snapshot(),
-        snapshot.sessionId(),
+        // JS-SEC-117: SessionStale carries the reference, also for a snapshot an
+        // application recorded with the raw id
+        SessionRef.ofNullable(snapshot.sessionId()),
         route);
     if (outcome instanceof EnforcementOutcome.SessionStale) {
       // JS-SEC-002 (CWE-613): drop the cached subject so the very next
@@ -237,7 +240,9 @@ public final class JCustosVersionEnforcerListener
         snapshot.subjectId(),
         snapshot.tenant(),
         snapshot.snapshot(),
-        snapshot.sessionId(),
+        // JS-SEC-117: SessionStale carries the reference, also for a snapshot an
+        // application recorded with the raw id
+        SessionRef.ofNullable(snapshot.sessionId()),
         null);
     if (!(outcome instanceof EnforcementOutcome.SessionStale)) {
       return false;

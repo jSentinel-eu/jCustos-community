@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.session.vaadin;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
@@ -53,8 +54,9 @@ import static java.util.Objects.requireNonNull;
  * <ul>
  *   <li><strong>On this node, at once.</strong> {@link SessionLifetimeListener} tracks the
  *       live {@link VaadinSession}s of the service. {@link #terminate(SessionId, String)}
- *       finds the session that currently carries the given HTTP session id and ends it
- *       through {@link VaadinSession#access}: the subject, the security-version snapshot and
+ *       finds the session that currently carries the given HTTP session id - or whose id has
+ *       the given {@link SessionRef reference} - and ends it through
+ *       {@link VaadinSession#access}: the subject, the security-version snapshot and
  *       a bound token credential are cleared, {@code SessionInvalidated} is audited, the
  *       Vaadin session is closed and the HTTP session invalidated. A session that is busy
  *       with a request is ended as soon as that request releases the session lock.</li>
@@ -66,6 +68,13 @@ import static java.util.Objects.requireNonNull;
  *       answered with Vaadin's session-expired message.</li>
  * </ul>
  *
+ * <p><strong>Records under a reference (JS-SEC-117, CWE-522).</strong> The HTTP session id is
+ * the session cookie; a store should not hold it. Record sessions under
+ * {@code SessionId.of(SessionRef.of(id))}. The per-request check looks the current session up
+ * under its reference first and under the live id second, so stores of either kind keep
+ * working, and {@link #revoke(SessionRecord)} of a record keyed by the reference ends the live
+ * session on this node at once. No decorating store is needed for that.
+ *
  * <p>A record with the status {@link SessionStatus#EXPIRED} does <em>not</em> end the session.
  * That status is derived from the lifetime policy; the listener evaluates the same policy
  * against the live session immediately beforehand and is the authority for it. A
@@ -74,14 +83,18 @@ import static java.util.Objects.requireNonNull;
  * end every session one idle timeout after the login.
  *
  * <p>Sessions the application never recorded are not affected: without a record under the
- * current session id there is nothing to revoke. The check only reads the store. It never
- * writes a record - not even the last-activity instant - because {@link SessionStore} offers
- * no atomic update, and a read-modify-write on the request path could bring back a record an
- * administrator removed in the same moment.
+ * current session id or its reference there is nothing to revoke. The check only reads the
+ * store. It never writes a record - not even the last-activity instant - because
+ * {@link SessionStore} offers no atomic update, and a read-modify-write on the request path
+ * could bring back a record an administrator removed in the same moment.
  *
- * <p>The holder is process-wide. {@code VaadinSecurity.bootstrap()} publishes the configured
- * store when the session-management route is activated; applications that wire the pieces
- * by hand call {@link #useSessionStore(SessionStore)} themselves.
+ * <p>The audit events of this class carry the {@link SessionRef reference} of the session id,
+ * never the id itself (JS-SEC-117).
+ *
+ * <p>The holder is process-wide. {@code VaadinSecurity.bootstrap()} publishes the store
+ * whenever store-backed sessions are configured ({@code .sessions(s -> s.storeBacked(...))});
+ * applications that wire the pieces by hand call {@link #useSessionStore(SessionStore)}
+ * themselves.
  *
  * @since 00.84.00
  */
@@ -147,18 +160,24 @@ public final class VaadinSessionRevocation {
   /**
    * Ends the live session on this node that currently carries {@code sessionId}. The session
    * id is compared with the id the HTTP session has now, so a session whose id was rotated
-   * after login is found under the rotated id.
+   * after login is found under the rotated id. The comparison is made on the
+   * {@link SessionRef reference}: {@code sessionId} may be the live id or its reference, as a
+   * session inventory keyed by references holds it.
    *
-   * @param sessionId         the HTTP session id; non-null
+   * @param sessionId         the HTTP session id or its reference; non-null
    * @param fallbackSubjectId subject id to audit when the session no longer exposes one;
    *                          may be {@code null}
    * @return {@code true} when a live session was found and its termination scheduled
    */
   public static boolean terminate(SessionId sessionId, String fallbackSubjectId) {
     requireNonNull(sessionId, "sessionId must not be null");
+    String wanted = SessionRef.of(sessionId.value());
     boolean found = false;
     for (VaadinSession session : liveSessions()) {
-      if (sessionId.value().equals(SessionTermination.sessionIdOf(session))) {
+      String liveId = SessionTermination.sessionIdOf(session);
+      // JS-SEC-117 / JS-SEC-131: SessionRef.of is idempotent, so a live id and a reference
+      // name the same session.
+      if (liveId != null && !liveId.isBlank() && wanted.equals(SessionRef.of(liveId))) {
         found = true;
         // JS-SEC-131 (CWE-613): access() runs the command under the lock of the TARGET
         // session - at once when the session is idle, otherwise when its request ends.
@@ -247,7 +266,12 @@ public final class VaadinSessionRevocation {
     }
     Optional<SessionRecord> record;
     try {
-      record = store.findById(SessionId.of(sessionId));
+      // JS-SEC-117 / JS-SEC-131: a store keyed by the reference first, one keyed by the live
+      // id second - both kinds are in use.
+      record = store.findById(SessionId.of(SessionRef.of(sessionId)));
+      if (record.isEmpty()) {
+        record = store.findById(SessionId.of(sessionId));
+      }
     } catch (RuntimeException storeFailure) {
       // An unreachable store must not log every user out; lifetime and drift checks still run.
       HasLogger.staticLogger().warn("Session revocation check skipped, the SessionStore failed: {}",
@@ -268,8 +292,9 @@ public final class VaadinSessionRevocation {
   private static void audit(String subjectId, String sessionId, String reason) {
     try {
       JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
-      sink.publish(new SessionInvalidated(
-          Instant.now(), subjectId == null ? "" : subjectId, sessionId, reason));
+      // JS-SEC-117 (CWE-532, CWE-522): the event carries the reference, never the cookie.
+      sink.publish(new SessionInvalidated(Instant.now(), subjectId == null ? "" : subjectId,
+          SessionRef.ofNullable(sessionId), reason));
     } catch (RuntimeException auditFailure) {
       // never keep a session alive because the audit sink failed
     }

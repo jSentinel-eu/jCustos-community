@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.session.vaadin;
 
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.LoginListeners;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
@@ -140,7 +141,8 @@ class VaadinSessionRevocationPipelineTest {
     assertNull(bobSession.getSession(), "its HTTP session is invalidated");
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals("bob", invalidated.subjectId(), "the audit names the revoked subject");
-    assertEquals(bobRecord.sessionId().value(), invalidated.sessionId());
+    assertEquals(SessionRef.of(bobRecord.sessionId().value()), invalidated.sessionId(),
+        "the audit carries the reference, never the session id (JS-SEC-117)");
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
 
     // bob's next RPC and everything after it is refused
@@ -164,7 +166,8 @@ class VaadinSessionRevocationPipelineTest {
     assertEquals(1, UserView.ACTIONS.get(), "the RPC of the revoked session must not run");
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals("bob", invalidated.subjectId());
-    assertEquals(bobRecord.sessionId().value(), invalidated.sessionId());
+    assertEquals(SessionRef.of(bobRecord.sessionId().value()), invalidated.sessionId(),
+        "the audit carries the reference, never the session id (JS-SEC-117)");
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
     assertNotEquals(VaadinSessionState.OPEN, bobSession.getState());
     assertNull(bobSession.getAttribute(String.class));
@@ -227,6 +230,82 @@ class VaadinSessionRevocationPipelineTest {
     pipeline.reacquireLock();
     assertEquals(VaadinSessionState.OPEN, bobSession.getState());
     assertTrue(audit.events().isEmpty());
+  }
+
+  // ── records under the session reference (JS-SEC-117) ───────────
+
+  @Test
+  @DisplayName("revoke of a record keyed by the reference ends the user's session at once")
+  void revokeByReference_endsTheUsersSessionAtOnce() {
+    String liveId = pipeline.httpSessionId();
+    store.delete(bobRecord.sessionId());
+    SessionRecord byReference = record(SessionRef.of(liveId), "bob");
+    store.save(byReference);
+    assertFalse(pipeline.fire(view, "work").sessionExpired());
+
+    admin = pipeline.newSession();
+    pipeline.releaseLock();
+    actAs(admin);
+    subjects.setCurrentSubject("alice", String.class);
+
+    boolean live = VaadinSessionRevocation.revoke(byReference);
+
+    assertTrue(live, "the session is found by the reference of its live id");
+    assertTrue(store.findById(byReference.sessionId()).isEmpty(), "the record is removed");
+    assertEquals(Optional.of("alice"), subjects.currentSubject(String.class));
+    CurrentInstance.clearAll();
+    pipeline.reacquireLock();
+    assertNotEquals(VaadinSessionState.OPEN, bobSession.getState(),
+        "the revoked session is closed at the click, not on its next request");
+    SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
+    assertEquals(SessionRef.of(liveId), invalidated.sessionId());
+    assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
+    assertTrue(pipeline.fire(view, "work").sessionExpired());
+    assertEquals(1, UserView.ACTIONS.get(), "the revoked user's RPC must not run");
+  }
+
+  @Test
+  @DisplayName("a record keyed by the reference and marked REVOKED ends the session on its next request")
+  void referenceKeyedRecordMarkedRevoked_nextRequestIsRefused() {
+    String liveId = pipeline.httpSessionId();
+    store.delete(bobRecord.sessionId());
+    store.save(record(SessionRef.of(liveId), "bob").withStatus(SessionStatus.REVOKED));
+
+    Exchange refused = pipeline.fire(view, "work");
+
+    assertTrue(refused.sessionExpired(), refused.body());
+    assertEquals(0, UserView.ACTIONS.get());
+    assertEquals(SessionRef.of(liveId), audit.single(SessionInvalidated.class).sessionId());
+  }
+
+  @Test
+  @DisplayName("a record keyed by the reference and removed on another node ends the session on its next request")
+  void referenceKeyedRecordRemovedElsewhere_nextRequestIsRefused() {
+    String liveId = pipeline.httpSessionId();
+    store.delete(bobRecord.sessionId());
+    SessionRecord byReference = record(SessionRef.of(liveId), "bob");
+    store.save(byReference);
+    assertFalse(pipeline.fire(view, "work").sessionExpired(), "the first request finds the record");
+
+    store.delete(byReference.sessionId());
+    Exchange refused = pipeline.fire(view, "work");
+
+    assertTrue(refused.sessionExpired(), refused.body());
+    assertEquals(1, UserView.ACTIONS.get());
+    assertEquals(VaadinSessionRevocation.REASON_REVOKED, audit.single(SessionInvalidated.class).reason());
+  }
+
+  @Test
+  @DisplayName("terminate accepts the live id and its reference alike")
+  void terminate_matchesIdAndReference() {
+    String liveId = pipeline.httpSessionId();
+    pipeline.releaseLock();
+
+    assertTrue(VaadinSessionRevocation.terminate(SessionId.of(SessionRef.of(liveId)), "bob"));
+
+    pipeline.reacquireLock();
+    assertNotEquals(VaadinSessionState.OPEN, bobSession.getState());
+    assertEquals(SessionRef.of(liveId), audit.single(SessionInvalidated.class).sessionId());
   }
 
   // ── helpers ────────────────────────────────────────────────────

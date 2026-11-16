@@ -24,12 +24,14 @@ import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.InMemoryUserDirectory;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.UserDirectoryProvider;
+import eu.jsentinel.jcustos.demo.skill.vaadin.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.demo.skill.vaadin.views.DashboardView;
 import eu.jsentinel.jcustos.demo.skill.vaadin.views.MyLoginView;
 import eu.jsentinel.jcustos.demo.skill.vaadin.views.PublicHomeView;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.logout.vaadin.VaadinLogoutService;
 import com.vaadin.browserless.BrowserlessTest;
+import com.vaadin.flow.component.UI;
 import com.vaadin.flow.router.RouteConfiguration;
 import com.vaadin.flow.router.RouteData;
 import org.junit.jupiter.api.AfterEach;
@@ -38,6 +40,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -104,6 +107,19 @@ class DemoDefaultsBrowserlessTest extends BrowserlessTest {
   void publicPagesStayReachable() {
     assertTrue(navigate(PublicHomeView.class) instanceof PublicHomeView);
     assertTrue(navigate(MyLoginView.class) instanceof MyLoginView);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-158: a signed-in subject without USER is sent from the dashboard to the public home, not to the error view")
+  void dashboardWithoutUserRoleLandsOnThePublicHome() {
+    navigate(PublicHomeView.class);
+    SubjectStores.subjectStore().setCurrentSubject(
+        new User(5L, "Admin only", EnumSet.of(AuthorizationRole.ADMIN)), User.class);
+
+    UI.getCurrent().navigate(DashboardView.class);
+
+    assertInstanceOf(PublicHomeView.class, getCurrentView(),
+        "the denial must name a view the subject may see, never the dashboard itself");
   }
 
   @Test

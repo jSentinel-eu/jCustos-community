@@ -30,7 +30,7 @@ import eu.jsentinel.jcustos.bootstrap.FileBootstrapTokenStore;
 import eu.jsentinel.jcustos.bootstrap.InMemoryBootstrapTokenStore;
 import eu.jsentinel.jcustos.bootstrap.InitialAdminBootstrapService;
 import eu.jsentinel.jcustos.bootstrap.MinimumLengthPasswordPolicy;
-import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.demo.app.security.model.ConfiguredHashingService;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectory;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 
@@ -45,6 +45,13 @@ import java.nio.file.Path;
  * {@link InitialAdminBootstrapService} <em>in-JVM</em>. In a target deployment
  * where the REST server is authoritative, the Vaadin UI would call the
  * {@code /api/bootstrap/admin} endpoint instead of using this wiring.
+ *
+ * <p>The administrator's password is hashed with
+ * {@link ConfiguredHashingService} - the pipeline the bootstrap configured
+ * and the user directory verifies with (JS-SEC-134). It used to be hashed
+ * with {@code PasswordHashingServices.defaults()} while the directory
+ * verified with the legacy {@code PasswordHasher}: the administrator the
+ * setup created could never log in.
  */
 public final class BootstrapWiring {
 
@@ -102,7 +109,7 @@ public final class BootstrapWiring {
         state, tokenStore, new BootstrapTokenGenerator(), output, config);
     InitialAdminBootstrapService service = new InitialAdminBootstrapService(
         state, tokenStore, adminStore,
-        PasswordHashingServices.defaults(),
+        ConfiguredHashingService.INSTANCE,
         new MinimumLengthPasswordPolicy(8),
         config.tokenValidity(), java.time.Clock.systemUTC());
     return new BootstrapWiring(state, service);

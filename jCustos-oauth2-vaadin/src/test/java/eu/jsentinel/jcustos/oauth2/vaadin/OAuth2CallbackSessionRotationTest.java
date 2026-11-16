@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.oauth2.vaadin;
  * #L%
  */
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionCreated;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
@@ -177,10 +178,12 @@ class OAuth2CallbackSessionRotationTest {
         "the user proceeds to the success target");
 
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
-    assertEquals(fixatedId, invalidated.sessionId(), "the retired id is audited");
+    assertEquals(SessionRef.of(fixatedId), invalidated.sessionId(),
+        "the retired id is audited by its reference (JS-SEC-117)");
     assertEquals("alice", invalidated.subjectId());
     SessionCreated created = audit.single(SessionCreated.class);
-    assertEquals(currentId, created.sessionId(), "SessionPolicy.onLogin observed the surviving id");
+    assertEquals(SessionRef.of(currentId), created.sessionId(),
+        "SessionPolicy.onLogin observed the reference of the surviving id");
 
     assertEquals(fixatedId, CallbackView.rotatedFrom, "the hook sees the retired id");
     assertEquals(currentId, CallbackView.rotatedTo, "the hook sees the surviving id");
@@ -199,7 +202,8 @@ class OAuth2CallbackSessionRotationTest {
     VaadinJCustosVersionContext.Snapshot snapshot =
         VaadinJCustosVersionContext.current(session).orElseThrow(() -> new AssertionError("no snapshot"));
     assertEquals("alice", snapshot.subjectId().value());
-    assertEquals(session.getSession().getId(), snapshot.sessionId(), "the snapshot names the surviving id");
+    assertEquals(SessionRef.of(session.getSession().getId()), snapshot.sessionId(),
+        "the snapshot names the reference of the surviving id");
     assertEquals(1L, snapshot.snapshot().value());
   }
 
@@ -223,7 +227,7 @@ class OAuth2CallbackSessionRotationTest {
     assertNotEquals(VaadinSessionState.OPEN, session.getState(), "the fixated session is closed");
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals(AbstractOAuth2CallbackView.REASON_ROTATION_FAILED, invalidated.reason());
-    assertEquals(sessionId, invalidated.sessionId());
+    assertEquals(SessionRef.of(sessionId), invalidated.sessionId());
     assertEquals("alice", invalidated.subjectId());
     assertInstanceOf(ErrorLandingView.class, UI.getCurrent().getInternals().getActiveRouterTargetsChain().get(0),
         "the user lands on the error target, not in the application");

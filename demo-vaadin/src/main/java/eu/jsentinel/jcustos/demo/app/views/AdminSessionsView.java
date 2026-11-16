@@ -20,26 +20,30 @@ import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
 import eu.jsentinel.jcustos.components.SessionManagementView;
 import eu.jsentinel.jcustos.demo.app.security.services.DemoSessionStoreProvider;
 import eu.jsentinel.jcustos.session.SessionRecord;
-import eu.jsentinel.jcustos.session.SessionStatus;
+import eu.jsentinel.jcustos.session.vaadin.VaadinSessionRevocation;
 import com.vaadin.flow.router.Route;
 
 /**
  * Admin-only Phase-8a session inventory. Re-uses the framework's
  * {@link SessionManagementView} composite — the only demo-specific
- * code is wiring it to {@link DemoSessionStoreProvider} and to a
- * revoke callback that updates the same store. Demonstrates how a
- * downstream app integrates Phase-8a with two lines of glue.
+ * code is wiring it to {@link DemoSessionStoreProvider} and to the
+ * library's revoke. Demonstrates how a downstream app integrates
+ * Phase-8a with two lines of glue.
  * <p>
  * The grid shows the reference of each session ({@code sref-…}), never
  * the session id: the records are stored under the reference
  * (JS-SEC-117, CWE-522), so an administrator cannot copy a session
  * cookie out of this view.
  * <p>
- * Revoke ends the session (JS-SEC-131, CWE-613): the callback marks the
- * record {@link SessionStatus#REVOKED}, and the bootstrap registered the
- * same store for the per-request check of {@code SessionLifetimeListener},
- * which ends a session whose record is revoked on its next request and
- * audits {@code SessionInvalidated} with the reason {@code Revoked}.
+ * Revoke ends the session at the click (JS-SEC-131, CWE-613):
+ * {@link VaadinSessionRevocation#revoke(SessionRecord)} removes the
+ * record and ends the live session of this node that carries the
+ * referenced id - subject dropped, {@code SessionInvalidated} audited
+ * with the reason {@code Revoked}, Vaadin session closed, HTTP session
+ * invalidated. On another node the missing record ends the session on
+ * its next request. Do not wire
+ * {@code LogoutService.logout(subjectId, CurrentSession)} here: the
+ * current session is the administrator's own.
  */
 @Route(AdminSessionsView.NAV)
 @RequiresPermission("admin:sessions")
@@ -48,19 +52,6 @@ public class AdminSessionsView extends SessionManagementView {
   public static final String NAV = "admin/sessions";
 
   public AdminSessionsView() {
-    super(DemoSessionStoreProvider.sessionStore(), AdminSessionsView::revoke);
-  }
-
-  /**
-   * Revoke callback: marks the supplied record as
-   * {@link SessionStatus#REVOKED}. The record carries the reference, and
-   * the store keys every lookup by the reference, so the session's next
-   * request finds the record revoked and is refused. Do not wire
-   * {@code LogoutService.logout(subjectId, CurrentSession)} here: the
-   * current session is the administrator's own.
-   */
-  private static void revoke(SessionRecord record) {
-    DemoSessionStoreProvider.sessionStore()
-        .save(record.withStatus(SessionStatus.REVOKED));
+    super(DemoSessionStoreProvider.sessionStore(), VaadinSessionRevocation::revoke);
   }
 }

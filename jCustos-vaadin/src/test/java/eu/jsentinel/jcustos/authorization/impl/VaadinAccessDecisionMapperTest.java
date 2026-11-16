@@ -261,17 +261,26 @@ class VaadinAccessDecisionMapperTest {
   /**
    * A real registry holding the two routes the reroute tests point to. Since JS-SEC-152
    * the mapper resolves the route before it reroutes, so an empty registry would turn
-   * every named reroute into the fail-closed fallback.
+   * every named reroute into the fail-closed fallback. Since JS-SEC-158 a route of the
+   * navigation target itself ({@link DummyTarget}) is answered with the error view, so the
+   * routes belong to classes of their own.
    */
   private static final class TestRouteRegistry extends AbstractRouteRegistry {
     TestRouteRegistry() {
-      setRoute("admin", DummyTarget.class, List.of());
-      setRoute("login", DummyTarget.class, List.of());
+      setRoute("admin", AdminTarget.class, List.of());
+      setRoute("login", LoginTarget.class, List.of());
     }
 
     @Override public VaadinContext getContext() { return null; }
   }
 
+  /** The navigation target of every recorded event. */
   static class DummyTarget extends Component {
+  }
+
+  static class AdminTarget extends Component {
+  }
+
+  static class LoginTarget extends Component {
   }
 }

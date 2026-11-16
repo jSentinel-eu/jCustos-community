@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.logout.vaadin;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.logout.InMemorySubjectSessionRegistry;
 import eu.jsentinel.jcustos.logout.LogoutListener;
 import eu.jsentinel.jcustos.logout.LogoutScope;
@@ -243,9 +244,11 @@ public final class VaadinLogoutService<U> implements LogoutService {
       Optional<U> currentSubject = subjectStore.currentSubject(subjectType);
       SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
       Instant now = Instant.now();
-      // JS-SEC-084: carry the HTTP session id so SessionInvalidated correlates with the login.
-      SessionContext<Object> sessionContext = new SessionContext<>(
-          currentSubject.orElse(null), gateway.currentSessionId(), now, now, null, Map.of());
+      // JS-SEC-084: carry the session so SessionInvalidated correlates with the login.
+      // JS-SEC-117 (CWE-532, CWE-522): as its reference - the same value SessionCreated and
+      // the login's rotation audit carry - never as the session cookie.
+      SessionContext<Object> sessionContext = new SessionContext<>(currentSubject.orElse(null),
+          SessionRef.ofNullable(gateway.currentSessionId()), now, now, null, Map.of());
       policy.onLogout(sessionContext);
     } catch (RuntimeException notifyFailure) {
       // never block the logout flow

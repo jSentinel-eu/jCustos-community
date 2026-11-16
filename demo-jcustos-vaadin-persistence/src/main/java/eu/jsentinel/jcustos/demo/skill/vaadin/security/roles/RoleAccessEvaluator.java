@@ -9,7 +9,7 @@ import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
-import eu.jsentinel.jcustos.demo.skill.vaadin.views.DashboardView;
+import eu.jsentinel.jcustos.demo.skill.vaadin.views.PublicHomeView;
 import eu.jsentinel.jcustos.demo.skill.vaadin.views.MyLoginView;
 
 import java.util.Set;
@@ -22,9 +22,10 @@ import static java.util.Arrays.stream;
  *
  * <ul>
  *   <li>No subject in the SubjectStore → reroute to login.</li>
- *   <li>Subject lacks every required role → reroute to DashboardView
- *       (Vaadin's denied-decision mapper sends the user back to a
- *       safe landing page).</li>
+ *   <li>Subject lacks every required role → forward to PublicHomeView,
+ *       the landing page every visitor may see. Never to DashboardView:
+ *       it carries {@code @VisibleFor} itself, and a denial that points to
+ *       the denied view ends in the error view (JS-SEC-158).</li>
  *   <li>Subject has at least one required role → granted.</li>
  * </ul>
  */
@@ -57,6 +58,6 @@ public class RoleAccessEvaluator
     if (hasRole) {
       return AccessDecision.granted();
     }
-    return AccessDecision.denied(DashboardView.NAV, true);
+    return AccessDecision.denied(PublicHomeView.NAV, true);
   }
 }

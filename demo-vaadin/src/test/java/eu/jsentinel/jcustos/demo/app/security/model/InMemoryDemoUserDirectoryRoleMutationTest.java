@@ -19,7 +19,7 @@ package eu.jsentinel.jcustos.demo.app.security.model;
 import eu.jsentinel.jcustos.audit.RoleAssigned;
 import eu.jsentinel.jcustos.audit.RoleRevoked;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authentication.Pbkdf2PasswordHasher;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.test.RecordingAuditSink;
 import org.junit.jupiter.api.AfterEach;
@@ -52,7 +52,7 @@ class InMemoryDemoUserDirectoryRoleMutationTest {
   @Test
   @DisplayName("assignRole adds the role to the stored MyUser and emits RoleAssigned")
   void assignRoleAddsAndAudits() {
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(new Pbkdf2PasswordHasher());
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     audit.clear(); // discard the seeded UserCreated events
 
     MyUser before = directory.findById(2L).orElseThrow();
@@ -71,7 +71,7 @@ class InMemoryDemoUserDirectoryRoleMutationTest {
   @Test
   @DisplayName("assignRole for a role the user already has is a no-op (no audit)")
   void assignRoleIdempotent() {
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(new Pbkdf2PasswordHasher());
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     audit.clear(); // discard the seeded UserCreated events
 
     directory.assignRole(2L, AuthorizationRole.USER); // user already has USER
@@ -83,7 +83,7 @@ class InMemoryDemoUserDirectoryRoleMutationTest {
   @Test
   @DisplayName("revokeRole removes the role and emits RoleRevoked")
   void revokeRoleRemovesAndAudits() {
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(new Pbkdf2PasswordHasher());
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     audit.clear(); // discard the seeded UserCreated events
 
     directory.assignRole(2L, AuthorizationRole.NERD);
@@ -102,7 +102,7 @@ class InMemoryDemoUserDirectoryRoleMutationTest {
   @Test
   @DisplayName("revokeRole for a role the user doesn't have is a no-op (no audit)")
   void revokeRoleIdempotent() {
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(new Pbkdf2PasswordHasher());
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     audit.clear(); // discard the seeded UserCreated events
 
     directory.revokeRole(2L, AuthorizationRole.ADMIN); // user only has USER
@@ -113,7 +113,7 @@ class InMemoryDemoUserDirectoryRoleMutationTest {
   @Test
   @DisplayName("unknown user id is a silent no-op")
   void unknownIdNoOp() {
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(new Pbkdf2PasswordHasher());
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     audit.clear(); // discard the seeded UserCreated events
 
     directory.assignRole(999L, AuthorizationRole.ADMIN);
@@ -125,7 +125,7 @@ class InMemoryDemoUserDirectoryRoleMutationTest {
   @Test
   @DisplayName("After assign + revoke the user reaches its original role set; logins still work")
   void roundTripPreservesLogin() {
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(new Pbkdf2PasswordHasher());
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
     audit.clear(); // discard the seeded UserCreated events
 
     directory.assignRole(2L, AuthorizationRole.ADMIN);

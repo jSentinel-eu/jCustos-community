@@ -109,8 +109,9 @@ public abstract class AbstractOAuth2CallbackView extends Div
    * or re-key anything that is keyed by the session id - a {@code SessionStore} record, a
    * {@code SubjectSessionRegistry} entry - so revocation by id reaches the live session.
    * Records written inside {@link #onTokens(CallbackResult)} carry the pre-rotation id and
-   * must be moved here. Exceptions are logged and never block the login. The default does
-   * nothing.
+   * must be moved here. The ids are session cookies: store {@code SessionRef.of(id)}, never
+   * the id itself (JS-SEC-117). Exceptions are logged and never block the login. The default
+   * does nothing.
    *
    * @param previousSessionId the id before the rotation
    * @param currentSessionId  the surviving id

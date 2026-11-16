@@ -22,8 +22,10 @@ import eu.jsentinel.jcustos.demo.app.security.bootstrap.BootstrapWiring;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
+import eu.jsentinel.jcustos.demo.app.views.AdminView;
 import eu.jsentinel.jcustos.demo.app.views.MainView;
 import eu.jsentinel.jcustos.demo.app.views.MyLoginView;
+import eu.jsentinel.jcustos.demo.app.views.NerdView;
 import eu.jsentinel.jcustos.demo.app.views.workspaces.AdminWorkspace;
 import eu.jsentinel.jcustos.demo.app.views.workspaces.DemoUselessWorkspace;
 import eu.jsentinel.jcustos.demo.app.views.workspaces.NerdWorkspace;
@@ -31,6 +33,8 @@ import eu.jsentinel.jcustos.demo.app.views.workspaces.PublicAllWorkspace;
 import eu.jsentinel.jcustos.demo.app.views.workspaces.UserWorkspace;
 import com.vaadin.browserless.BrowserlessTest;
 import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.HasElement;
+import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.html.H2;
 import com.vaadin.flow.component.html.Span;
@@ -47,6 +51,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,6 +61,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * roles as themed badges. Both parts are pure render-time decisions, so
  * we render the view with three different subjects and pin the resulting
  * tab list, badge set and content swap.
+ * <p>
+ * The navigations run through the real authorisation listener. Subjects
+ * without {@code USER} (NERD, Q_ADMIN, NOBODY) reach {@link MainView}
+ * because the view admits every signed-in subject ({@code @SecureRoute()});
+ * until JS-SEC-158 they reached it only because a denial that forwarded to
+ * the view itself was skipped by Vaadin. {@code navigate(MainView.class)}
+ * fails when the navigation ends anywhere else, the error view included.
  */
 @DisplayName("MainView — role-driven menu + welcome content")
 class MainViewBrowserlessTest extends BrowserlessTest {
@@ -128,6 +140,39 @@ class MainViewBrowserlessTest extends BrowserlessTest {
         List.of("Home", "User roles", "Audit log", "Public", "Playground"),
         tabLabels(),
         "Q_ADMIN sees the admin-roles + audit tabs but not the ADMIN-only nor USER-only tabs");
+  }
+
+  // ── Access through the authorisation listener (JS-SEC-158) ─────
+
+  @Test
+  @DisplayName("JS-SEC-158: a signed-in subject without the role of a @VisibleFor view is forwarded to MainView, not to the error view")
+  void deniedSubjectIsForwardedHome() {
+    bind(new MyUser(6L, "Nobody", EnumSet.of(AuthorizationRole.NOBODY)));
+
+    UI.getCurrent().navigate(AdminView.class);
+
+    assertInstanceOf(MainView.class, activeView(),
+        "the forward of MyRoleAccessEvaluator must land on a view that admits the subject");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-158: a USER without NERD is forwarded from NerdView to MainView")
+  void userIsForwardedHomeFromNerdView() {
+    bind(new MyUser(2L, "Plain", EnumSet.of(AuthorizationRole.USER)));
+
+    UI.getCurrent().navigate(NerdView.class);
+
+    assertInstanceOf(MainView.class, activeView());
+  }
+
+  @Test
+  @DisplayName("an anonymous visitor to MainView is sent to the login view")
+  void anonymousIsSentToLogin() {
+    navigate(MyLoginView.class);
+
+    UI.getCurrent().navigate(MainView.class);
+
+    assertInstanceOf(MyLoginView.class, activeView());
   }
 
   // ── Welcome content ────────────────────────────────────────────
@@ -340,12 +385,18 @@ class MainViewBrowserlessTest extends BrowserlessTest {
 
   /**
    * Binds the given subject after navigating to a public route, so the
-   * {@code @VisibleFor(USER)} gate on MainView lets us in on the next
+   * {@code @SecureRoute()} gate on MainView lets us in on the next
    * navigate(MainView.class) call.
    */
   private void bind(MyUser user) {
     navigate(MyLoginView.class);
     SubjectStores.subjectStore().setCurrentSubject(user, MyUser.class);
+  }
+
+  private static HasElement activeView() {
+    List<HasElement> chain = UI.getCurrent().getInternals().getActiveRouterTargetsChain();
+    assertFalse(chain.isEmpty(), "a view must be active after the navigation");
+    return chain.get(0);
   }
 
   private List<String> tabLabels() {

@@ -11,6 +11,7 @@
 package eu.jsentinel.jcustos.dx.vaadin.routes;
 
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
@@ -144,7 +145,8 @@ class SessionManagementRevokeBrowserlessTest extends BrowserlessTest {
     assertTrue(store.findById(bobRecord.sessionId()).isEmpty(), "the record is removed");
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals("bob", invalidated.subjectId(), "the audit names the revoked subject");
-    assertEquals(bobRecord.sessionId().value(), invalidated.sessionId());
+    assertEquals(SessionRef.of(bobRecord.sessionId().value()), invalidated.sessionId(),
+        "the audit carries the reference, never the session id (JS-SEC-117)");
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
 
     // the administrator's session is untouched
@@ -154,6 +156,49 @@ class SessionManagementRevokeBrowserlessTest extends BrowserlessTest {
         "revoking somebody else must not log the administrator out");
     assertTrue(store.findById(adminRecord.sessionId()).isPresent());
     assertTrue(getCurrentView() instanceof SessionManagementRoute, "the administrator stays on the view");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-117: the grid shows the reference of every session - also of a record keyed by the raw id")
+  void grid_showsReferencesOnly() {
+    SessionRecord byReference = record(SessionRef.of("carol-session-cookie"), "carol");
+    store.save(byReference);
+    SessionManagementRoute view = navigate(SessionManagementRoute.class);
+    var grid = test(view.grid());
+    int column = view.grid().getColumns().indexOf(view.grid().getColumns().stream()
+        .filter(c -> "Session id".equals(c.getHeaderText())).findFirst().orElseThrow());
+
+    List<String> shown = new ArrayList<>();
+    for (int row = 0; row < grid.size(); row++) {
+      shown.add(grid.getCellText(row, column));
+    }
+
+    assertEquals(3, shown.size(), String.valueOf(shown));
+    assertTrue(shown.contains(SessionRef.of(bobRecord.sessionId().value())), String.valueOf(shown));
+    assertTrue(shown.contains(SessionRef.of(adminRecord.sessionId().value())), String.valueOf(shown));
+    assertTrue(shown.contains(byReference.sessionId().value()), "a reference passes unchanged");
+    assertFalse(shown.contains(bobRecord.sessionId().value()), "the grid must never show a session cookie");
+    assertFalse(shown.contains(adminRecord.sessionId().value()));
+  }
+
+  @Test
+  @DisplayName("Revoke of a record keyed by the reference ends the user's live session at once")
+  void revokeByReference_endsTheUsersSession() {
+    store.delete(bobRecord.sessionId());
+    SessionRecord byReference = record(SessionRef.of(bobRecord.sessionId().value()), "bob");
+    store.save(byReference);
+    SessionManagementRoute view = navigate(SessionManagementRoute.class);
+    var grid = test(view.grid());
+    int bobRow = store.findAll().indexOf(byReference);
+    Button revoke = (Button) grid.renderCellComponent(bobRow, "action");
+
+    test(revoke).click();
+
+    assertNotEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState),
+        "the record names the session by reference; the live session must still be found");
+    assertTrue(store.findById(byReference.sessionId()).isEmpty(), "the record is removed");
+    assertEquals(byReference.sessionId().value(), audit.single(SessionInvalidated.class).sessionId());
+    assertEquals(VaadinSessionState.OPEN, adminSession.getState());
   }
 
   @Test

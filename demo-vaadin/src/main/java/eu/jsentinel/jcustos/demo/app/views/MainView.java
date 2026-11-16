@@ -20,11 +20,11 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
-import eu.jsentinel.jcustos.demo.app.security.roles.VisibleFor;
 import eu.jsentinel.jcustos.demo.app.views.components.PermissionDemoCard;
 import eu.jsentinel.jcustos.demo.app.views.components.ViewNavigationCard;
 import eu.jsentinel.jcustos.demo.app.views.workspaces.*;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.starter.routes.SecureRoute;
 import eu.jsentinel.jcustos.starter.ui.SecuredUi;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.applayout.AppLayout;
@@ -50,8 +50,20 @@ import java.util.Set;
 import static eu.jsentinel.jcustos.demo.app.MySessionAccessor.isCurrentUserAuthorizedFor;
 import static eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole.*;
 
+/**
+ * Home of every signed-in subject: the drawer shows the tabs the subject's roles open, the
+ * welcome card the subject's role badges.
+ * <p>
+ * {@code @SecureRoute()} without constraints admits any authenticated subject and sends an
+ * anonymous visitor to the login route. The view used to carry {@code @VisibleFor(USER)}, and
+ * {@code MyRoleAccessEvaluator} answered every other subject with a forward to this very
+ * view. Vaadin skips a forward to the navigation in progress, so the view rendered anyway -
+ * the demo depended on a fail-open (JS-SEC-158). The forward of the evaluator now lands here
+ * because this view admits those subjects, and a denial that points to the denied view
+ * itself ends in the error view.
+ */
 @Route(MainView.NAV)
-@VisibleFor(USER)
+@SecureRoute()
 public class MainView
     extends AppLayout
     implements HasLogger {

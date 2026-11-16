@@ -39,6 +39,7 @@ import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterListener;
 import com.vaadin.flow.router.HasErrorParameter;
 import com.vaadin.flow.router.ListenerPriority;
+import com.vaadin.flow.router.RouteParameters;
 import com.vaadin.flow.router.RouterLayout;
 import com.vaadin.flow.server.*;
 import com.vaadin.flow.shared.Registration;
@@ -90,7 +91,9 @@ import static java.util.Objects.requireNonNull;
  * event with a reroute or forward target. When the route a decision points to - the login
  * route for {@code Unauthenticated}, the step-up route for {@code StepUpRequired} - is not
  * registered, the visitor is sent to the error view for {@link SecurityException}; Vaadin
- * would otherwise render the protected view. The login view and the step-up view have to
+ * would otherwise render the protected view. A denial that points to the denied view
+ * itself ends in the error view as well (JS-SEC-158): Vaadin skips a reroute or forward to
+ * the navigation in progress. The login view and the step-up view have to
  * be reachable for the visitors who are sent there: no restriction of their own that
  * those visitors fail, and not inside a layout that carries one. One exception keeps
  * existing applications
@@ -234,7 +237,12 @@ public class AuthorizationListener
    * not registered only records an "unknown reroute"; Vaadin then goes on to instantiate
    * and render the protected view while the audit trail already says {@code AccessDenied}.
    * <p>
-   * The post-condition checks that a target is set, not where it points.
+   * The post-condition checks that a target is set, not where it points - with one exception
+   * (JS-SEC-158, CWE-636, CWE-285): a reroute or forward to the navigation target itself, the
+   * same class with the same route parameters, counts as no target. Vaadin skips such a
+   * target and renders the navigation target, so a decision that denies a view by sending the
+   * visitor to that very view rendered it. The event carried a target, and the check let it
+   * pass.
    *
    * @param decision the decision that was applied to the event
    * @param event    the navigation event
@@ -273,7 +281,10 @@ public class AuthorizationListener
         return false;
       }
       Class<? extends LoginView> loginTarget = loginListener.get().loginNavigationTarget();
-      if (!VaadinAccessDecisionMapper.isRegistered(event, loginTarget)) {
+      if (!VaadinAccessDecisionMapper.isRegistered(event, loginTarget)
+          // JS-SEC-158: Vaadin skips a forward to the navigation in progress
+          || VaadinAccessDecisionMapper.isNavigationTarget(
+              event, loginTarget, RouteParameters.empty())) {
         return false;
       }
       event.forwardTo(loginTarget);

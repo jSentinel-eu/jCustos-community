@@ -96,6 +96,8 @@ public class BootstrapServiceInitListener implements VaadinServiceInitListener, 
         // per-request revocation check, so Revoke in AdminSessionsView ends
         // the session on its next request.
         .sessions(s -> s.storeBacked(DemoSessionStoreProvider.sessionStore()))
+        // JS-SEC-134: the user directory and BootstrapWiring hash and verify through
+        // this pipeline (ConfiguredHashingService), so the first administrator logs in.
         .credentials(c -> c.hashing(PasswordHashingServices.defaults()))
         // V00.73 + V00.74: register a Policy so the PermissionDemoCard's
         // Pattern D "SecuredUi.button(...).requiresPolicy(...)" entry has a

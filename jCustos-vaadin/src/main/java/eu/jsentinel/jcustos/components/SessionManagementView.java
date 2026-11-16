@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.components;
 
 import eu.jsentinel.jcustos.audit.AccessDenied;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.components.SecuredVisibility.Requirement;
@@ -46,7 +47,8 @@ import static java.util.Objects.requireNonNull;
  * <p>
  * Renders every persisted {@link SessionRecord} from the supplied
  * {@link SessionStore} as a {@link Grid} row showing tenant,
- * subject, session id, status, created-at, last-activity-at, and
+ * subject, the {@link SessionRef reference} of the session id (never
+ * the id itself, JS-SEC-117), status, created-at, last-activity-at, and
  * the security version snapshot. Each row carries a Revoke button;
  * clicking it invokes the supplied revoke callback.
  *
@@ -162,7 +164,10 @@ public class SessionManagementView extends Composite<VerticalLayout> implements 
     g.setSizeFull();
     g.addColumn(r -> r.tenant().value()).setHeader("Tenant").setWidth("8em").setFlexGrow(0);
     g.addColumn(r -> r.subjectId().value()).setHeader("Subject").setAutoWidth(true);
-    g.addColumn(r -> r.sessionId().value()).setHeader("Session id").setAutoWidth(true);
+    // JS-SEC-117 (CWE-522): the reference, never the session cookie - also for a store that
+    // holds raw ids. SessionRef.of returns a reference unchanged.
+    g.addColumn(r -> SessionRef.of(r.sessionId().value()))
+        .setHeader("Session id").setAutoWidth(true);
     g.addColumn(r -> r.status().name()).setHeader("Status").setWidth("8em").setFlexGrow(0);
     g.addColumn(r -> TIMESTAMP_FORMAT.format(r.createdAt()))
         .setHeader("Created at").setAutoWidth(true);

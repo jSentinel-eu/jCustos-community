@@ -22,11 +22,11 @@ BootstrapExtension`:
 
 - `contributeAudit(a)`: `a.storeBacked(storage.auditEventStore()).logging()`
 - `contributeSessions(s)`: `s.storeBacked(SessionStoreProvider.sessionStore())` —
-  the Eclipse-Store session store wrapped in the layer-1
-  `SessionReferenceStore`, so records are kept under `SessionRef`, never
-  under the session cookie (JS-SEC-117). The bootstrap registers it for
-  the per-request revocation check: Revoke ends the session on its next
-  request (JS-SEC-131).
+  the Eclipse-Store session store. The login view records each session
+  under `SessionRef.of(id)`, so the store holds references, never the
+  session cookie (JS-SEC-117). The bootstrap registers it for the
+  per-request revocation check: Revoke ends the session at the click on
+  this node and on its next request on every other node (JS-SEC-131).
 - `order()`: `10` (after layer 1, before hardening)
 
 Plus a static initialiser that opens the Eclipse-Store backend and

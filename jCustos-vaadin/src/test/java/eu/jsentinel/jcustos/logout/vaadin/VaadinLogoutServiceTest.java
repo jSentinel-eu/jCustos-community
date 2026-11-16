@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.logout.vaadin;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.logout.InMemorySubjectSessionRegistry;
 import eu.jsentinel.jcustos.logout.LogoutListener;
 import eu.jsentinel.jcustos.logout.LogoutScope;
@@ -138,7 +139,7 @@ class VaadinLogoutServiceTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-084: SessionPolicy.onLogout receives the wrapped HTTP session id from the gateway")
+  @DisplayName("JS-SEC-084, JS-SEC-117: SessionPolicy.onLogout receives the reference of the wrapped HTTP session id")
   void currentSession_passesWrappedSessionIdToPolicy() {
     RecordingSessionPolicy<String> policy = new RecordingSessionPolicy<>();
     JCustosServiceResolver.setSessionPolicy(policy);
@@ -148,8 +149,9 @@ class VaadinLogoutServiceTest {
     new VaadinLogoutService<>(new RecordingSubjectStore(), String.class, gateway, "/login", true, true)
         .logout(alice, LogoutScope.CurrentSession);
 
-    assertEquals("wrapped-42", policy.lastContext.sessionId(),
-        "the logout audit must correlate with the login through the session id");
+    assertEquals(SessionRef.of("wrapped-42"), policy.lastContext.sessionId(),
+        "the logout audit must correlate with the login through the session reference, "
+            + "never carry the session id");
   }
 
   @Test

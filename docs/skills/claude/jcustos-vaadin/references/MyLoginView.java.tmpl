@@ -83,10 +83,10 @@ public class {{SUBJECT_PREFIX}}LoginView
    * has something to render. The record is keyed by the reference of the
    * session id, never by the id itself: the id is the session cookie, and
    * whoever reads the inventory must not be able to take the session over
-   * (JS-SEC-117, CWE-522). {@link SessionStoreProvider#sessionStore()} keys
-   * every lookup the same way, so the per-request revocation check, which
-   * knows only the live id, finds the record. Best-effort: any failure is
-   * swallowed — session bookkeeping must not block login.
+   * (JS-SEC-117, CWE-522). The per-request revocation check and
+   * {@code VaadinSessionRevocation.revoke} look the live session up by the
+   * same reference. Best-effort: any failure is swallowed — session
+   * bookkeeping must not block login.
    */
   private static void recordSession({{SUBJECT_TYPE}} user, String sessionId) {
     if (sessionId == null || sessionId.isBlank()) return;

@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.identity.oidc.vaadin;
 import com.vaadin.flow.server.SessionDestroyEvent;
 import com.vaadin.flow.server.SessionDestroyListener;
 import com.vaadin.flow.server.WrappedSession;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.oidc.api.SessionRegistry;
 
@@ -31,6 +32,12 @@ import java.util.Objects;
  * typically from a {@code VaadinServiceInitListener}. Without it, every
  * registered session stays in the registry until a logout for its subject or
  * sid arrives.
+ *
+ * <p>Register sessions under {@code SessionRef.of(sessionId)}, never under the
+ * session id itself (JS-SEC-117, CWE-522): the registry lives as long as the
+ * application and returns the keys of the sessions a logout token ends. The
+ * cleanup unregisters the reference and, for registries that still hold the
+ * raw id, the id.
  *
  * @since 00.84.00
  */
@@ -54,8 +61,10 @@ public final class VaadinSessionRegistryCleanup implements SessionDestroyListene
       return;
     }
     WrappedSession wrapped = event.getSession().getSession();
-    if (wrapped != null && wrapped.getId() != null) {
-      registry.unregister(wrapped.getId());
+    String sessionId = wrapped == null ? null : wrapped.getId();
+    if (sessionId != null && !sessionId.isBlank()) {
+      registry.unregister(SessionRef.of(sessionId));
+      registry.unregister(sessionId);
     }
   }
 }
