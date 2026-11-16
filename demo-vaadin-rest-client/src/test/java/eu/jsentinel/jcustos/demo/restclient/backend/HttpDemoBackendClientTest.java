@@ -48,7 +48,8 @@ class HttpDemoBackendClientTest {
 
   @BeforeAll
   void start() throws IOException {
-    server = DemoRestServer.start(0, BootstrapConfiguration.disabled());
+    // The fixed-password demo accounts exist only behind an explicit switch (JS-SEC-137).
+    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), true);
     BackendConfig config = new BackendConfig(
         "http://localhost:" + server.port(),
         Duration.ofSeconds(2),
