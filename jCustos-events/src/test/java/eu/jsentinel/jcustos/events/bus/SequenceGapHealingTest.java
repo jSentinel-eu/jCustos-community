@@ -26,7 +26,9 @@ package eu.jsentinel.jcustos.events.bus;
  */
 
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.events.api.EventEnvelopeId;
 import eu.jsentinel.jcustos.events.api.EventMetadata;
+import eu.jsentinel.jcustos.events.api.EventProducerId;
 import eu.jsentinel.jcustos.events.api.EventSequence;
 import eu.jsentinel.jcustos.events.api.EventType;
 import eu.jsentinel.jcustos.events.api.JCustosEvent;
@@ -45,15 +47,24 @@ import eu.jsentinel.jcustos.events.signature.EcdsaP256SignatureAlgorithm;
 import eu.jsentinel.jcustos.events.signature.Ed25519SignatureAlgorithm;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithm;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithms;
+import eu.jsentinel.jcustos.events.store.InMemoryEnvelopeStore;
+import eu.jsentinel.jcustos.events.store.JCustosEventCursor;
+import eu.jsentinel.jcustos.events.store.JCustosEventEnvelopeStore;
+import eu.jsentinel.jcustos.events.store.StoredEnvelope;
+import eu.jsentinel.jcustos.events.types.LoginSucceededEvent;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.security.PrivateKey;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -160,6 +171,96 @@ class SequenceGapHealingTest {
 
     assertTrue(fx.publishSequence.lastSequence(TenantId.DEFAULT, BusFixtures.PRODUCER).isEmpty());
     assertEquals(1L, fx.publishPipeline().toEnvelope(BusFixtures.event()).sequence().value());
+  }
+
+  /**
+   * A real in-memory envelope store whose next append fails once, before it
+   * stores anything — the outage of a persistent store, honouring the atomic
+   * {@code append} contract.
+   */
+  private static final class FailingOnceEnvelopeStore implements JCustosEventEnvelopeStore {
+    private final InMemoryEnvelopeStore delegate = new InMemoryEnvelopeStore();
+    private final AtomicBoolean failNext = new AtomicBoolean();
+
+    void failNextAppend() {
+      failNext.set(true);
+    }
+
+    @Override
+    public JCustosEventCursor append(SignedJCustosEventEnvelope envelope) {
+      if (failNext.compareAndSet(true, false)) {
+        throw new IllegalStateException("envelope store unavailable");
+      }
+      return delegate.append(envelope);
+    }
+
+    @Override
+    public List<StoredEnvelope> findAfter(JCustosEventCursor cursor, int limit) {
+      return delegate.findAfter(cursor, limit);
+    }
+
+    @Override
+    public Optional<SignedJCustosEventEnvelope> findByEnvelopeId(
+        EventEnvelopeId envelopeId) {
+      return delegate.findByEnvelopeId(envelopeId);
+    }
+
+    @Override
+    public long count() {
+      return delegate.count();
+    }
+  }
+
+  @Test
+  @DisplayName("an envelope the store refuses hands its sequence back; a strict consumer keeps up")
+  void failedStoreAppendReleasesTheReservation() {
+    FailingOnceEnvelopeStore store = new FailingOnceEnvelopeStore();
+    DefaultJCustosEventBus bus = new DefaultJCustosEventBus(fx.publishPipeline(), store,
+        ListenerErrorStrategy.ISOLATE_AND_CONTINUE, Runnable::run, () -> BusFixtures.T0);
+    ConsumePipeline strictConsumer = fx.consumePipeline();
+    List<JCustosEventVerificationResult> verdicts = new ArrayList<>();
+    List<SignedJCustosEventEnvelope> sent = new ArrayList<>();
+    bus.subscribeEnvelope(envelope -> {
+      sent.add(envelope);
+      verdicts.add(strictConsumer.verify(envelope, BusFixtures.T0));
+    });
+    List<LoginSucceededEvent> dispatched = new ArrayList<>();
+    bus.subscribe(LoginSucceededEvent.class, dispatched::add);
+
+    bus.publish(BusFixtures.event());
+    store.failNextAppend();
+    IllegalStateException outage = assertThrows(IllegalStateException.class,
+        () -> bus.publish(BusFixtures.event()));
+    bus.publish(BusFixtures.event());
+
+    assertEquals("envelope store unavailable", outage.getMessage(),
+        "the append failure reaches the caller unchanged");
+    assertEquals(2, sent.size(), "the refused envelope is neither stored nor sent");
+    assertEquals(2, dispatched.size(), "nor dispatched to local listeners");
+    assertEquals(2L, store.count());
+    assertEquals(1L, sent.get(0).sequence().value());
+    assertEquals(2L, sent.get(1).sequence().value(),
+        "the next envelope reuses the sequence the refused one had reserved");
+    assertTrue(verdicts.stream().allMatch(JCustosEventVerificationResult::isValid),
+        "a strict consumer accepts the producer's next envelope: " + verdicts);
+  }
+
+  @Test
+  @DisplayName("abandon refuses another producer's envelope and leaves a later reservation alone")
+  void abandonIsBoundToItsProducerAndBestEffort() {
+    PublishPipeline publisher = fx.publishPipeline();
+    SignedJCustosEventEnvelope first = publisher.toEnvelope(BusFixtures.event());
+    SignedJCustosEventEnvelope second = publisher.toEnvelope(BusFixtures.event());
+    SignedJCustosEventEnvelope foreign = BusFixtures.rebuild(second)
+        .producerId(EventProducerId.of("another-producer"))
+        .build();
+
+    assertThrows(IllegalArgumentException.class, () -> publisher.abandon(foreign));
+    assertFalse(publisher.abandon(first),
+        "a later reservation exists, so the earlier sequence stays a hole");
+    assertTrue(publisher.abandon(second));
+    assertEquals(EventSequence.of(1L),
+        fx.publishSequence.lastSequence(TenantId.DEFAULT, BusFixtures.PRODUCER).orElseThrow());
   }
 
   @Test

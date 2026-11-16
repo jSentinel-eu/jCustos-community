@@ -81,6 +81,15 @@ final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
     this.maxEventsPerKey = maxEventsPerKey;
   }
 
+  /**
+   * @return the most events kept under one key; {@code InMemoryRateLimitPolicy} refuses a
+   *         larger limit at construction (XR08, 00.84.00)
+   */
+  @Override
+  public int maxEventsPerKey() {
+    return maxEventsPerKey;
+  }
+
   @Override
   public void recordEvent(RateLimitKey key, Instant at) {
     requireNonNull(key, "key must not be null");

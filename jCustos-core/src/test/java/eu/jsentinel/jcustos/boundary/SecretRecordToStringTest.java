@@ -187,14 +187,26 @@ class SecretRecordToStringTest {
   }
 
   @Test
-  @DisplayName("SA27 follow-up: CallbackParams masks the authorisation code")
+  @DisplayName("SA27 follow-up: CallbackParams masks code and state and scrubs what the sender chose")
   void callbackParams() {
     String text = new eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow.CallbackParams(
         Optional.of("SplxlOBeZQQYbYS6WxSbIA"), "state-42", Optional.empty(), Optional.empty(),
         Optional.of("https://idp.example.org")).toString();
     assertFalse(text.contains("SplxlOBeZQQYbYS6WxSbIA"), text);
-    assertTrue(text.contains("state=state-42"), text);
+    assertFalse(text.contains("state-42"), "the state keys the pending login: " + text);
+    assertTrue(text.contains("state=***"), text);
     assertTrue(text.contains("iss=https://idp.example.org"), text);
+
+    String forged = new eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow.CallbackParams(
+        Optional.empty(), "", Optional.of("access_denied\nINFO admin=granted"),
+        Optional.of("The user\r\nWARN forged line\u2028and\u202Ebidi"),
+        Optional.of("https://evil.example\nINFO x")).toString();
+    assertFalse(forged.contains("\n") || forged.contains("\r") || forged.contains("\u2028")
+        || forged.contains("\u202E"), forged);
+    assertTrue(forged.contains("state=<empty>"), forged);
+    assertTrue(forged.contains("error=access_denied?INFO?admin=granted"), forged);
+    assertTrue(forged.contains("errorDescription=The user??WARN forged line?and?bidi"), forged);
+    assertTrue(forged.contains("iss=https://evil.example?INFO?x"), forged);
   }
 
   @Test

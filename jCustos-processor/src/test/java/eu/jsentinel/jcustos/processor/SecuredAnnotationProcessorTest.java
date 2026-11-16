@@ -988,7 +988,7 @@ class SecuredAnnotationProcessorTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-156: @PropagateToken is no restriction - the method is delegated as before, with a warning about deny-by-default")
+  @DisplayName("@PropagateToken is no restriction - the method gets the generic guard, so deny-by-default applies")
   void propagateTokenIsNotARestriction() {
     JavaFileObject source = JavaFileObjects.forSourceLines(
         "demo.GatewayService",
@@ -998,6 +998,7 @@ class SecuredAnnotationProcessorTest {
         "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
         "",
         "@Secured",
+        "@PropagateToken",
         "public class GatewayService {",
         "    @PropagateToken",
         "    public void call() {}",
@@ -1009,25 +1010,21 @@ class SecuredAnnotationProcessorTest {
 
     Compilation result = compile(source);
 
-    assertThat(result).succeeded();
-    assertThat(result).hadWarningCount(1);
-    assertThat(result).hadWarningContaining(
-        "processing/deny-by-default-not-applied: call is delegated without a guard");
+    assertThat(result).succeededWithoutWarnings();
     String generated = generatedFileContent(result, "demo.GatewayServiceSecured");
-    String call = methodBody(generated, "public void call(");
-    if (call.contains("JCustosEnforcer.")) {
-      throw new AssertionError("enforce() cannot evaluate @PropagateToken:\n" + generated);
-    }
-    assertContains(call, "super.call();");
+    // The run-time scanner ignores @PropagateToken as well (00.84.00), so the generic
+    // call decides as for an unannotated method: no-op, or a denial under deny-by-default.
+    assertContains(methodBody(generated, "public void call("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_");
     assertContains(methodBody(generated, "public void adminCall("),
         "JCustosEnforcer.requireRole(\"ADMIN\");");
     assertContains(methodBody(generated, "public void plain("),
-        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, GatewayService.class);");
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_");
   }
 
   @Test
-  @DisplayName("JS-SEC-156: a custom restriction next to @PropagateToken cannot be enforced and fails the build")
-  void customRestrictionNextToPropagateTokenRejected() {
+  @DisplayName("a custom restriction next to @PropagateToken is enforced through the generic call")
+  void customRestrictionNextToPropagateTokenIsGuarded() {
     JavaFileObject source = JavaFileObjects.forSourceLines(
         "demo.MixedGatewayService",
         "package demo;",
@@ -1043,10 +1040,230 @@ class SecuredAnnotationProcessorTest {
 
     Compilation result = compile(source, ADMIN_ONLY, ADMIN_ONLY_EVALUATOR);
 
+    assertThat(result).succeededWithoutWarnings();
+    assertContains(methodBody(generatedFileContent(result, "demo.MixedGatewayServiceSecured"),
+            "public void call("),
+        "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, MixedGatewayService.class);");
+  }
+
+  // ── XR06 (00.84.00, CWE-862): restrictions the scanner applies to unwrapped methods ──
+
+  private static final JavaFileObject RESTRICTED_CONTRACT = JavaFileObjects.forSourceLines(
+      "demo.RestrictedContract",
+      "package demo;",
+      "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+      "",
+      "public interface RestrictedContract {",
+      "    @RequiresRole(\"ADMIN\")",
+      "    void purge();",
+      "}");
+
+  private static final JavaFileObject RESTRICTED_BASE = JavaFileObjects.forSourceLines(
+      "demo.RestrictedBase",
+      "package demo;",
+      "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+      "",
+      "public class RestrictedBase {",
+      "    @RequiresRole(\"ADMIN\")",
+      "    protected void maintain() {}",
+      "}");
+
+  @Test
+  @DisplayName("XR06: an unannotated override of a restricted declaration that the wrapper leaves out is a compile error")
+  void excludedOverrideOfRestrictedDeclarationRejected() {
+    String[][] variants = {
+        {"@com.svenruppert.proxybuilder.annotations.SkipProxy public void purge() {}",
+            "excluded from the wrapper by @SkipProxy"},
+        {"public final void purge() {}", "is final"}};
+    for (String[] variant : variants) {
+      JavaFileObject source = JavaFileObjects.forSourceLines(
+          "demo.PurgingService",
+          "package demo;",
+          "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+          "",
+          "@Secured",
+          "public class PurgingService implements RestrictedContract {",
+          "    " + variant[0],
+          "    public void op() {}",
+          "}");
+
+      Compilation result = compile(source, RESTRICTED_CONTRACT);
+
+      assertThat(result).failed();
+      assertThat(result).hadErrorContaining("processing/unenforceable-security-annotation: "
+          + "PurgingService#purge overrides or implements RestrictedContract#purge, whose "
+          + "@RequiresRole applies to it at run time");
+      assertThat(result).hadErrorContaining(variant[1]);
+    }
+
+    JavaFileObject byName = JavaFileObjects.forSourceLines(
+        "demo.NamedPurgingService",
+        "package demo;",
+        "import com.svenruppert.proxybuilder.annotations.ProxyBuilderOptions;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "@ProxyBuilderOptions(excludeMethodNames = {\"purge\"})",
+        "public class NamedPurgingService implements RestrictedContract {",
+        "    public void purge() {}",
+        "}");
+    Compilation named = compile(byName, RESTRICTED_CONTRACT);
+    assertThat(named).failed();
+    assertThat(named).hadErrorContaining("NamedPurgingService#purge overrides or implements "
+        + "RestrictedContract#purge");
+    assertThat(named).hadErrorContaining("@ProxyBuilderOptions(excludeMethodNames)");
+
+    JavaFileObject protectedOverride = JavaFileObjects.forSourceLines(
+        "demo.MaintainingService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class MaintainingService extends RestrictedBase {",
+        "    @Override",
+        "    protected void maintain() {}",
+        "    public void op() {}",
+        "}");
+    Compilation hidden = compile(protectedOverride, RESTRICTED_BASE);
+    assertThat(hidden).failed();
+    assertThat(hidden).hadErrorContaining("MaintainingService#maintain overrides or implements "
+        + "RestrictedBase#maintain, whose @RequiresRole applies to it at run time");
+    assertThat(hidden).hadErrorContaining("is protected");
+  }
+
+  @Test
+  @DisplayName("XR06: a class-level restriction on a public method the wrapper leaves out is a compile error")
+  void classLevelRestrictionOnExcludedPublicMethodRejected() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.GuardedClassService",
+        "package demo;",
+        "import com.svenruppert.proxybuilder.annotations.SkipProxy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "@RequiresRole(\"ADMIN\")",
+        "public class GuardedClassService {",
+        "    @SkipProxy",
+        "    public void export() {}",
+        "    public final void reset() {}",
+        "    public void op() { helper(); }",
+        "    protected void helper() {}",
+        "}");
+
+    Compilation result = compile(source);
+
     assertThat(result).failed();
-    assertThat(result).hadErrorContaining(
-        "processing/unenforceable-security-annotation: @AdminOnly on call cannot be "
-            + "enforced next to @PropagateToken");
+    // proxybuilder reports the final method itself as well; the protected helper is
+    // not part of the public surface and is left alone
+    if (result.errors().stream().anyMatch(error -> error.getMessage(null).contains("helper"))) {
+      throw new AssertionError("a protected helper must not be reported: " + result.errors());
+    }
+    assertThat(result).hadErrorContaining("processing/unenforceable-security-annotation: the "
+        + "class-level restriction @RequiresRole of GuardedClassService applies to "
+        + "GuardedClassService#export at run time");
+    assertThat(result).hadErrorContaining("excluded from the wrapper by @SkipProxy");
+    assertThat(result).hadErrorContaining("applies to GuardedClassService#reset at run time");
+  }
+
+  @Test
+  @DisplayName("XR06: @PublicRoute opens an excluded method; without any restriction it is a deny-by-default warning")
+  void excludedPublicMethodWithoutRestrictionWarns() {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.LooseService",
+        "package demo;",
+        "import com.svenruppert.proxybuilder.annotations.SkipProxy;",
+        "import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class LooseService implements RestrictedContract {",
+        "    @SkipProxy",
+        "    public void status() {}",
+        "    @SkipProxy",
+        "    @PublicRoute",
+        "    public void health() {}",
+        "    @SkipProxy",
+        "    @PublicRoute",
+        "    public void purge() {}",
+        "    public void op() {}",
+        "}");
+
+    Compilation result = compile(source, RESTRICTED_CONTRACT);
+
+    assertThat(result).succeeded();
+    assertThat(result).hadWarningCount(1);
+    assertThat(result).hadWarningContaining("processing/deny-by-default-not-applied: "
+        + "LooseService#status is not overridden by the generated wrapper of LooseService");
+  }
+
+  // ── XR08 (00.84.00, CWE-862): a restriction composed more than one level deep ──
+
+  private static final JavaFileObject COMPOSED_ADMIN = JavaFileObjects.forSourceLines(
+      "demo.ComposedAdmin",
+      "package demo;",
+      "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+      "import java.lang.annotation.Retention;",
+      "import java.lang.annotation.RetentionPolicy;",
+      "",
+      "@Retention(RetentionPolicy.RUNTIME)",
+      "@RequiresRole(\"ADMIN\")",
+      "public @interface ComposedAdmin { }");
+
+  private static final JavaFileObject SUPER_ADMIN = JavaFileObjects.forSourceLines(
+      "demo.SuperAdmin",
+      "package demo;",
+      "import java.lang.annotation.Retention;",
+      "import java.lang.annotation.RetentionPolicy;",
+      "",
+      "@Retention(RetentionPolicy.RUNTIME)",
+      "@ComposedAdmin",
+      "public @interface SuperAdmin { }");
+
+  @Test
+  @DisplayName("XR08: a restriction composed two levels deep is a compile error on a method and on the class")
+  void nestedCompositionRejected() {
+    JavaFileObject onMethod = JavaFileObjects.forSourceLines(
+        "demo.DeepService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class DeepService {",
+        "    @SuperAdmin",
+        "    public void purge() {}",
+        "}");
+    Compilation methodResult = compile(onMethod, COMPOSED_ADMIN, SUPER_ADMIN);
+    assertThat(methodResult).failed();
+    assertThat(methodResult).hadErrorContaining("processing/nested-composed-security-annotation: "
+        + "@SuperAdmin on purge carries @ComposedAdmin, which composes a restriction itself");
+
+    JavaFileObject onClass = JavaFileObjects.forSourceLines(
+        "demo.DeepClassService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "@SuperAdmin",
+        "public class DeepClassService {",
+        "    public void purge() {}",
+        "}");
+    Compilation classResult = compile(onClass, COMPOSED_ADMIN, SUPER_ADMIN);
+    assertThat(classResult).failed();
+    assertThat(classResult).hadErrorContaining(
+        "@SuperAdmin on DeepClassService carries @ComposedAdmin");
+
+    JavaFileObject oneLevel = JavaFileObjects.forSourceLines(
+        "demo.ShallowService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class ShallowService {",
+        "    @ComposedAdmin",
+        "    public void purge() {}",
+        "}");
+    assertThat(compile(oneLevel, COMPOSED_ADMIN)).succeededWithoutWarnings();
   }
 
   // ── helpers ──────────────────────────────────────────────────────

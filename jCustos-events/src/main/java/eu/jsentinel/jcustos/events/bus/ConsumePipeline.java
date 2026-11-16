@@ -52,6 +52,7 @@ import eu.jsentinel.jcustos.events.signature.SignatureAlgorithms;
 import java.security.PublicKey;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -83,9 +84,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * the producer the envelope claims; until it passes, nothing in the envelope
  * is attributable to anyone. The <em>payload metadata check</em> (JS-SEC-107)
  * decodes the canonical payload with the codec registered for its content
- * type and compares the fields it repeats — event type, event id, tenant,
- * subject, time — with the signed envelope, so the producer policy, which is
- * decided on the envelope, also holds for the payload a consumer acts on.
+ * type, requires it to be canonical — re-encoding the decoded payload must
+ * reproduce the signed bytes, so no reader can decode it differently — and
+ * compares the fields it repeats — event type, event id, tenant, subject,
+ * time — with the signed envelope, so the producer policy, which is decided
+ * on the envelope, also holds for the payload a consumer acts on.
  *
  * @since 00.75.00
  */
@@ -102,7 +105,9 @@ public final class ConsumePipeline implements HasLogger {
 
   /**
    * {@link JCustosEventVerificationResult.PayloadMetadataMismatch#field()}:
-   * the payload could not be decoded.
+   * the payload could not be decoded, or it is not in the canonical form its
+   * codec writes — re-encoding the decoded payload does not reproduce the
+   * signed bytes (duplicate keys, other escapes, whitespace, key order).
    *
    * @since 00.84.00
    */
@@ -389,6 +394,19 @@ public final class ConsumePipeline implements HasLogger {
       return new PayloadCheck(null, FIELD_PAYLOAD);
     }
     if (payload == null) {
+      return new PayloadCheck(null, FIELD_PAYLOAD);
+    }
+    // The payload must be in exactly the form its codec writes: re-encoding
+    // the decoded payload has to reproduce the signed bytes. Otherwise the
+    // signature covers bytes that another reader may decode differently —
+    // duplicate keys (the last one wins here, the first one elsewhere),
+    // escapes, whitespace — and the checks below would vouch for a reading a
+    // downstream consumer of canonicalPayload does not share.
+    try {
+      if (!Arrays.equals(codec.encode(payload), envelope.canonicalPayload())) {
+        return new PayloadCheck(null, FIELD_PAYLOAD);
+      }
+    } catch (RuntimeException unencodable) {
       return new PayloadCheck(null, FIELD_PAYLOAD);
     }
     if (!payload.eventType().equals(envelope.eventType().value())) {

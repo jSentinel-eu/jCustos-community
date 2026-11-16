@@ -55,6 +55,7 @@ import javax.tools.FileObject;
 import javax.tools.StandardLocation;
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.Writer;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
@@ -64,6 +65,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
@@ -149,8 +151,30 @@ import java.util.stream.Stream;
  * {@link ProxyBuilderOptions#excludeMethodNames()}. Before JS-SEC-156
  * such a method was left out of the wrapper without a word. The generic
  * {@code final}/{@code private}/{@code static} diagnostics of the
- * underlying {@code com.svenruppert:proxybuilder:00.11.00} base
- * processor remain in place alongside.
+ * underlying {@code com.svenruppert:proxybuilder} base processor remain
+ * in place alongside.
+ *
+ * <p>Since 00.84.00 the same holds for a restriction the method does not
+ * carry itself but that the run-time scanner applies to it: one written
+ * on a supertype declaration the method overrides or implements, and -
+ * for a public instance method - the class-level restriction of the
+ * {@code @Secured} class. The wrapper runs such a method for every caller
+ * while {@code SecuredProxy} and {@code JCustosEnforcer.enforce} deny it,
+ * so it is a compile error too. A public instance method the wrapper does
+ * not override and to which no restriction applies is reported as a
+ * {@code processing/deny-by-default-not-applied} warning: deny-by-default
+ * cannot cover it. {@link PublicRoute @PublicRoute} on the method is the
+ * opt-out for both.
+ *
+ * <p>Only an annotation that {@link JCustosAnnotation @JCustosAnnotation}
+ * binds to an {@link AccessEvaluator} or {@link AuthorizationEvaluator} is a
+ * restriction, for the processor as for the run-time scanner. Any other
+ * binding - core's {@code @PropagateToken} - is ignored, so it neither
+ * guards a method nor keeps deny-by-default from applying. A restriction
+ * composed more than one level deep ({@code @AdminOnly @interface
+ * SuperAdmin}) is a {@code processing/nested-composed-security-annotation}
+ * compile error: the run-time scanner resolves composition one level deep
+ * and refuses anything deeper.
  *
  * <p>The generated class carries
  * {@code @GeneratedByProxyBuilder(...)} and
@@ -182,6 +206,8 @@ public final class SecuredAnnotationProcessor
       "processing/unenforceable-security-annotation";
   private static final String DIAG_NO_DENY_BY_DEFAULT =
       "processing/deny-by-default-not-applied";
+  private static final String DIAG_NESTED_COMPOSITION =
+      "processing/nested-composed-security-annotation";
   private static final String GUARD_FIELD_PREFIX = "JCUSTOS_GUARD_METHOD_";
   private static final String GUARD_RESOLVER = "jcustosGuardMethod";
 
@@ -196,7 +222,15 @@ public final class SecuredAnnotationProcessor
   private static final String INDEX_FIELD_SEPARATOR = ":";
   private static final String INDEX_METHOD_SEPARATOR = ",";
   private static final String INDEX_PROCESSOR_ID = "proxybuilder";
-  private static final String INDEX_PROXYBUILDER_VERSION = "00.11.00";
+  // The proxybuilder version in the index is the one of the base processor that
+  // generated the wrapper, read from the Maven metadata of its own jar - a literal
+  // went stale with every proxybuilder update (it said 00.11.00 next to 00.11.01).
+  private static final String PROXYBUILDER_POM_PROPERTIES =
+      "META-INF/maven/com.svenruppert/proxybuilder/pom.properties";
+  private static final String PROXYBUILDER_VERSION_KEY = "version";
+  /** Written when the base processor's Maven metadata cannot be read. */
+  static final String UNKNOWN_PROXYBUILDER_VERSION = "unknown";
+  private static final String INDEX_PROXYBUILDER_VERSION = proxyBuilderVersion();
   // V00.74: optional sixth field — wrapper kind.
   private static final String INDEX_KIND_SECURED = "secured";
 
@@ -403,31 +437,18 @@ public final class SecuredAnnotationProcessor
   private boolean emitGuard(CodeBlock.Builder body,
                             ExecutableElement method,
                             TypeElement securedType) {
-    List<Binding> bindingsOnMethod = declaredBindings(method);
-    List<Binding> restrictionsOnMethod = bindingsOnMethod.stream()
-        .filter(Binding::evaluatorBound)
-        .toList();
+    // Only evaluator bindings are restrictions - for the run-time scanner as well
+    // (00.84.00). A @JCustosAnnotation binding to anything else, such as core's
+    // @PropagateToken, is ignored on both paths and needs no special case here.
+    List<Binding> restrictionsOnMethod = restrictionsOn(method);
 
     if (!restrictionsOnMethod.isEmpty()) {
-      Binding restriction = restrictionsOnMethod.getFirst();
-      Optional<Class<? extends Annotation>> nativeType = nativeTypeOf(restriction);
+      Optional<Class<? extends Annotation>> nativeType =
+          nativeTypeOf(restrictionsOnMethod.getFirst());
       if (restrictionsOnMethod.size() == 1 && nativeType.isPresent()) {
         emitNativeCall(body, method, nativeType.get());
         return true;
       }
-      // The run-time scanner accepts one @JCustosAnnotation-bound annotation per
-      // element. A second one that is not an evaluator would make every call fail
-      // inside enforce(); report it here instead.
-      bindingsOnMethod.stream()
-          .filter(binding -> !binding.evaluatorBound())
-          .findFirst()
-          .ifPresent(foreign -> messager.printMessage(Diagnostic.Kind.ERROR,
-              DIAG_UNENFORCEABLE + ": " + restriction.display() + " on "
-                  + method.getSimpleName() + " cannot be enforced next to "
-                  + foreign.display() + " — both are bound through @JCustosAnnotation, "
-                  + "and JCustosEnforcer.enforce accepts one such annotation per "
-                  + "element. Move " + foreign.display() + " to another element.",
-              method));
       emitGenericEnforce(body, method, securedType);
       return true;
     }
@@ -459,44 +480,6 @@ public final class SecuredAnnotationProcessor
         (!publicRoute && typeCarriesRestriction(declaringType))
             || typeCarriesRestriction(securedType)
             || (!publicRoute && overridesRestrictedDeclaration(method, securedType));
-
-    Optional<Binding> foreign = Stream.concat(
-            Stream.of((Element) method),
-            Stream.concat(typeClosure(declaringType).stream(),
-                typeClosure(securedType).stream()))
-        .flatMap(element -> declaredBindings(element).stream())
-        .filter(binding -> !binding.evaluatorBound())
-        .findFirst();
-    if (foreign.isPresent()) {
-      // A @JCustosAnnotation binding to something other than an evaluator - core's
-      // @PropagateToken is one - is picked up by the run-time scanner as if it were
-      // a restriction, and enforce() then fails on every call. The generic guard
-      // cannot be used for this method.
-      if (restricted) {
-        messager.printMessage(Diagnostic.Kind.ERROR,
-            DIAG_UNENFORCEABLE + ": the restriction that applies to "
-                + method.getSimpleName() + " cannot be enforced by the generated "
-                + "wrapper, because " + foreign.get().display() + " is bound through "
-                + "@JCustosAnnotation to a type that is neither an AccessEvaluator nor "
-                + "an AuthorizationEvaluator and JCustosEnforcer.enforce cannot "
-                + "evaluate an element that carries it. Put one of @RequiresRole, "
-                + "@RequiresPermission, @RequiresAnyPermission, "
-                + "@RequiresAllPermissions or @RequiresPolicy on the method or on "
-                + securedType.getSimpleName() + " itself, or remove "
-                + foreign.get().display() + ".",
-            method);
-      } else {
-        messager.printMessage(Diagnostic.Kind.WARNING,
-            DIAG_NO_DENY_BY_DEFAULT + ": " + method.getSimpleName()
-                + " is delegated without a guard, so deny-by-default does not cover "
-                + "it — " + foreign.get().display() + " is bound through "
-                + "@JCustosAnnotation to a type that is neither an AccessEvaluator nor "
-                + "an AuthorizationEvaluator, and JCustosEnforcer.enforce cannot "
-                + "evaluate an element that carries it.",
-            method);
-      }
-      return restricted;
-    }
 
     emitGenericEnforce(body, method, securedType);
     return restricted;
@@ -574,6 +557,15 @@ public final class SecuredAnnotationProcessor
    * skipped: annotations on methods are not inherited, the overriding method is
    * the one that counts.
    *
+   * <p>Since 00.84.00 the check asks which restriction the run-time scanner
+   * applies, not only which one the method carries: an unannotated method that
+   * overrides a restricted declaration, and a public instance method under a
+   * class-level restriction of the {@code @Secured} class, are restricted at run
+   * time as well - and run for every caller when the wrapper leaves them out.
+   * A public instance method left out without any restriction is a warning,
+   * because deny-by-default cannot reach it. Every element of the walk is also
+   * checked for a restriction composed more than one level deep.
+   *
    * @return {@code true} when every restricted method is overridden by the wrapper
    */
   private boolean verifyRestrictedMethodsAreWrapped(TypeElement securedType) {
@@ -581,19 +573,21 @@ public final class SecuredAnnotationProcessor
     List<ExecutableElement> moreDerived = new ArrayList<>();
     boolean enforceable = true;
     for (TypeElement type : typeClosure(securedType)) {
+      enforceable &= verifyNoNestedComposition(type);
       for (ExecutableElement method : ElementFilter.methodsIn(type.getEnclosedElements())) {
+        enforceable &= verifyNoNestedComposition(method);
         boolean overridden = moreDerived.stream()
             .anyMatch(derived -> elementUtils.overrides(derived, method, securedType));
         moreDerived.add(method);
         if (overridden) {
           continue;
         }
-        List<Binding> restrictions = restrictionsOn(method);
-        if (restrictions.isEmpty()) {
+        Optional<String> reason = notWrappedBecause(method, excludedNames);
+        if (reason.isEmpty()) {
           continue;
         }
-        Optional<String> reason = notWrappedBecause(method, excludedNames);
-        if (reason.isPresent()) {
+        List<Binding> restrictions = restrictionsOn(method);
+        if (!restrictions.isEmpty()) {
           enforceable = false;
           messager.printMessage(Diagnostic.Kind.ERROR,
               DIAG_UNENFORCEABLE + ": " + restrictions.getFirst().display() + " on "
@@ -605,10 +599,147 @@ public final class SecuredAnnotationProcessor
                   + "method public and overridable, or remove the annotation and "
                   + "guard the call explicitly through JCustosEnforcer.",
               method);
+          continue;
         }
+        enforceable &= verifyAppliedRestrictionIsWrapped(method, type, securedType,
+            reason.get());
       }
     }
     return enforceable;
+  }
+
+  /**
+   * XR06 (00.84.00, CWE-862): {@code method} carries no restriction of its own and
+   * the wrapper does not override it. Reports the restriction the run-time scanner
+   * would apply to it anyway - in the scanner's order: {@link PublicRoute @PublicRoute}
+   * on the method opts out, then the class-level restriction of the {@code @Secured}
+   * class, then a restricted declaration the method overrides - as an error; a
+   * public instance method without any as a deny-by-default warning.
+   *
+   * <p>Static and private methods are neither reached through the wrapper nor
+   * override anything, and the wrapper never overrides an {@link Object} method;
+   * they are left alone. A protected or package-private method is not part of the
+   * class's public surface, so a class-level restriction is not reported for it -
+   * but overriding a restricted declaration is.
+   *
+   * @return {@code false} when a restriction applies that the wrapper cannot enforce
+   */
+  private boolean verifyAppliedRestrictionIsWrapped(ExecutableElement method,
+                                                    TypeElement type,
+                                                    TypeElement securedType,
+                                                    String reason) {
+    Set<Modifier> modifiers = method.getModifiers();
+    if (modifiers.contains(Modifier.STATIC) || modifiers.contains(Modifier.PRIVATE)
+        || isObjectMethod(method)
+        || hasAnnotation(method, PublicRoute.class.getCanonicalName())) {
+      return true;
+    }
+    boolean publicMethod = modifiers.contains(Modifier.PUBLIC);
+    String where = type.getSimpleName() + "#" + method.getSimpleName();
+    Optional<String> applied = Optional.empty();
+    if (publicMethod) {
+      applied = classLevelRestriction(securedType).map(origin ->
+          "the class-level restriction " + origin + " applies to " + where);
+    }
+    if (applied.isEmpty()) {
+      applied = overriddenRestrictedDeclaration(method, securedType).map(declaration ->
+          where + " overrides or implements "
+              + declaration.getEnclosingElement().getSimpleName() + "#"
+              + declaration.getSimpleName() + ", whose "
+              + restrictionsOn(declaration).getFirst().display() + " applies to it");
+    }
+    if (applied.isPresent()) {
+      messager.printMessage(Diagnostic.Kind.ERROR,
+          DIAG_UNENFORCEABLE + ": " + applied.get() + " at run time - SecuredProxy and "
+              + "JCustosEnforcer.enforce deny unauthorised calls - but the method "
+              + reason + ", so the generated wrapper of " + securedType.getSimpleName()
+              + " does not override it and runs it for every caller. Make the method "
+              + "public and overridable, put @PublicRoute on it if it is meant to be "
+              + "open, or guard the call explicitly through JCustosEnforcer.",
+          method);
+      return false;
+    }
+    if (publicMethod && securedType.getAnnotation(PublicRoute.class) == null) {
+      messager.printMessage(Diagnostic.Kind.WARNING,
+          DIAG_NO_DENY_BY_DEFAULT + ": " + where + " is not overridden by the generated "
+              + "wrapper of " + securedType.getSimpleName() + " - the method " + reason
+              + " - so deny-by-default does not cover it. Give it a restriction or "
+              + "@PublicRoute, or make it public and overridable.",
+          method);
+    }
+    return true;
+  }
+
+  /**
+   * The class-level restriction the run-time scanner finds for the
+   * {@code @Secured} class - the class itself, its superclasses, then its
+   * interfaces - rendered for a diagnostic.
+   */
+  private Optional<String> classLevelRestriction(TypeElement securedType) {
+    for (TypeElement candidate : typeClosure(securedType)) {
+      List<Binding> restrictions = restrictionsOn(candidate);
+      if (!restrictions.isEmpty()) {
+        return Optional.of(restrictions.getFirst().display() + " of "
+            + candidate.getSimpleName());
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * XR08 (00.84.00, CWE-862): the run-time scanner resolves a composed restriction
+   * one level deep and throws for anything deeper, because treating the element as
+   * unrestricted would open it. The processor reports such an element at compile
+   * time: an annotation whose type carries an annotation that composes a
+   * restriction in turn ({@code @AdminOnly @interface SuperAdmin}).
+   *
+   * @return {@code true} when {@code element} carries no such annotation
+   */
+  private boolean verifyNoNestedComposition(Element element) {
+    boolean resolvable = true;
+    for (AnnotationMirror mirror : element.getAnnotationMirrors()) {
+      if (!(mirror.getAnnotationType().asElement() instanceof TypeElement annotationType)) {
+        continue;
+      }
+      for (AnnotationMirror meta : annotationType.getAnnotationMirrors()) {
+        if (meta.getAnnotationType().asElement() instanceof TypeElement metaType
+            && !isRestrictionType(metaType)
+            && composesRestriction(metaType, new LinkedHashSet<>())) {
+          resolvable = false;
+          messager.printMessage(Diagnostic.Kind.ERROR,
+              DIAG_NESTED_COMPOSITION + ": @" + annotationType.getSimpleName() + " on "
+                  + element.getSimpleName() + " carries @" + metaType.getSimpleName()
+                  + ", which composes a restriction itself. A composed restriction is "
+                  + "resolved one level deep only, and JCustosEnforcer.enforce refuses "
+                  + "a deeper one at run time. Put the restriction on @"
+                  + annotationType.getSimpleName() + " directly.",
+              element);
+        }
+      }
+    }
+    return resolvable;
+  }
+
+  /** Whether {@code @JCustosAnnotation} on {@code annotationType} binds an evaluator. */
+  private boolean isRestrictionType(TypeElement annotationType) {
+    return jCustosAnnotationOf(annotationType).map(this::bindsEvaluator).orElse(false);
+  }
+
+  /**
+   * Whether an annotation of {@code annotationType} brings a restriction with it at
+   * any depth. {@code visited} breaks the cycles annotation types may form.
+   */
+  private boolean composesRestriction(TypeElement annotationType, Set<TypeElement> visited) {
+    if (!visited.add(annotationType)) {
+      return false;
+    }
+    for (AnnotationMirror meta : annotationType.getAnnotationMirrors()) {
+      if (meta.getAnnotationType().asElement() instanceof TypeElement metaType
+          && (isRestrictionType(metaType) || composesRestriction(metaType, visited))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -762,6 +893,12 @@ public final class SecuredAnnotationProcessor
    * generic guard the wrapper emits applies it.
    */
   private boolean overridesRestrictedDeclaration(ExecutableElement method, TypeElement securedType) {
+    return overriddenRestrictedDeclaration(method, securedType).isPresent();
+  }
+
+  /** The first restricted supertype declaration {@code method} overrides or implements. */
+  private Optional<ExecutableElement> overriddenRestrictedDeclaration(ExecutableElement method,
+                                                                      TypeElement securedType) {
     Element declaringType = method.getEnclosingElement();
     for (TypeElement type : typeClosure(securedType)) {
       if (type.equals(declaringType)) {
@@ -770,11 +907,11 @@ public final class SecuredAnnotationProcessor
       for (ExecutableElement candidate : ElementFilter.methodsIn(type.getEnclosedElements())) {
         if (!restrictionsOn(candidate).isEmpty()
             && elementUtils.overrides(method, candidate, securedType)) {
-          return true;
+          return Optional.of(candidate);
         }
       }
     }
-    return false;
+    return Optional.empty();
   }
 
   /** {@code type}, then its superclasses, then every interface; without {@link Object}. */
@@ -912,6 +1049,30 @@ public final class SecuredAnnotationProcessor
     } catch (IOException io) {
       messager.printMessage(Diagnostic.Kind.WARNING,
           "processor/index-write-failed: " + io.getMessage());
+    }
+  }
+
+  /**
+   * The version of the proxybuilder base processor on the processor path, from the
+   * Maven metadata of its jar; {@link #UNKNOWN_PROXYBUILDER_VERSION} if that cannot
+   * be read or would not fit into an index field.
+   */
+  static String proxyBuilderVersion() {
+    ClassLoader loader = BasicStaticProxyAnnotationProcessor.class.getClassLoader();
+    try (InputStream in = loader == null
+        ? ClassLoader.getSystemResourceAsStream(PROXYBUILDER_POM_PROPERTIES)
+        : loader.getResourceAsStream(PROXYBUILDER_POM_PROPERTIES)) {
+      if (in == null) {
+        return UNKNOWN_PROXYBUILDER_VERSION;
+      }
+      Properties properties = new Properties();
+      properties.load(in);
+      String version = properties.getProperty(PROXYBUILDER_VERSION_KEY, "").strip();
+      boolean fitsTheIndex = !version.isEmpty()
+          && version.chars().noneMatch(c -> c == ':' || c == ',' || Character.isWhitespace(c));
+      return fitsTheIndex ? version : UNKNOWN_PROXYBUILDER_VERSION;
+    } catch (IOException | RuntimeException unreadable) {
+      return UNKNOWN_PROXYBUILDER_VERSION;
     }
   }
 

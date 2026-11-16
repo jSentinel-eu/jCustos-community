@@ -176,6 +176,54 @@ class PayloadMetadataCheckTest {
     }
   }
 
+  /** The genuine envelope, re-signed by its producer around the given payload text. */
+  private SignedJCustosEventEnvelope resignedWithText(String payload) {
+    return SignedEnvelopes.sign(SignedEnvelopes.withPayloadBytes(BusFixtures.rebuild(genuine),
+        payload.getBytes(StandardCharsets.UTF_8)), fx.keyManagement);
+  }
+
+  @Test
+  @DisplayName("a signed payload that names tenantId twice is rejected, whichever value comes last")
+  void duplicateKeyInSignedPayloadIsRejected() {
+    String canonical = new String(genuine.canonicalPayload(), StandardCharsets.UTF_8);
+    String tenantKey = "\"tenantId\":\"" + genuine.tenantId().value() + "\"";
+    assertTrue(canonical.contains(tenantKey), canonical);
+    // A last-key-wins reader sees the envelope's tenant, a first-key-wins
+    // reader sees globex: the signature covers both readings.
+    String twoTenants = canonical.replace(tenantKey, "\"tenantId\":\"globex\"," + tenantKey);
+
+    JCustosEventVerificationResult.PayloadMetadataMismatch mismatch = assertInstanceOf(
+        JCustosEventVerificationResult.PayloadMetadataMismatch.class,
+        fx.consumePipeline().verify(resignedWithText(twoTenants), BusFixtures.T0));
+    assertEquals(ConsumePipeline.FIELD_PAYLOAD, mismatch.field());
+  }
+
+  @Test
+  @DisplayName("a signed payload in another spelling than the codec writes is rejected")
+  void nonCanonicalSpellingIsRejected() {
+    String canonical = new String(genuine.canonicalPayload(), StandardCharsets.UTF_8);
+    String tenantKey = "\"tenantId\":";
+    assertTrue(canonical.contains(tenantKey), canonical);
+    List<String> respelled = List.of(
+        canonical.replace(tenantKey, "\"tenant\\u0049d\":"),
+        canonical.replace(tenantKey, "\"tenantId\" : "),
+        " " + canonical);
+
+    for (String variant : respelled) {
+      // Each variant decodes to the genuine payload ...
+      assertEquals(genuinePayload,
+          new CanonicalJsonPayloadCodec().decode(variant.getBytes(StandardCharsets.UTF_8)),
+          variant);
+      // ... but is not the spelling the signature should cover.
+      JCustosEventVerificationResult.PayloadMetadataMismatch mismatch = assertInstanceOf(
+          JCustosEventVerificationResult.PayloadMetadataMismatch.class,
+          fx.consumePipeline().verify(resignedWithText(variant), BusFixtures.T0), variant);
+      assertEquals(ConsumePipeline.FIELD_PAYLOAD, mismatch.field());
+    }
+    assertTrue(fx.consumePipeline().verify(resignedWithText(canonical), BusFixtures.T0).isValid(),
+        "the canonical spelling itself stays valid");
+  }
+
   @Test
   @DisplayName("an envelope with a content type no codec is registered for is rejected")
   void unknownContentTypeIsRejected() {

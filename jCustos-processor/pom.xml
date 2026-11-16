@@ -109,6 +109,19 @@
           <proc>none</proc>
         </configuration>
       </plugin>
+      <!--
+        XR08 (00.84.00): the wrapper index names the proxybuilder release that
+        generated a wrapper; WrapperIndexWriterTest pins it against this POM's
+        proxybuilder.version.
+      -->
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <systemPropertyVariables>
+            <jcustos.test.proxybuilder.version>${proxybuilder.version}</jcustos.test.proxybuilder.version>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>license-maven-plugin</artifactId>

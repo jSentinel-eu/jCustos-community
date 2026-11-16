@@ -18,6 +18,8 @@ package eu.jsentinel.jcustos.authorization.impl;
 
 import eu.jsentinel.jcustos.authorization.annotations.JCustosAnnotation;
 import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
+import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;
+import eu.jsentinel.jcustos.authorization.api.AuthorizationEvaluator;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
@@ -38,14 +40,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * Scans annotated elements for {@link JCustosAnnotation}-meta-annotated
  * restriction annotations and resolves the corresponding evaluator class.
  * <p>
+ * A restriction is an annotation whose type carries {@link JCustosAnnotation} naming an
+ * evaluator - an {@link AccessEvaluator} or an {@link AuthorizationEvaluator}. An
+ * annotation bound to anything else through {@code @JCustosAnnotation}, such as
+ * {@code @PropagateToken}, is not a restriction and is ignored: it used to be taken for
+ * one, so a class-level {@code @PropagateToken} made every method of the class scan as
+ * restricted, and the enforcer then failed on an evaluator it could not run - while the
+ * {@code @Secured} wrapper left those methods unguarded even under deny-by-default
+ * (since 00.84.00).
+ * <p>
  * A restriction is found in three places: written on the element itself, inherited
  * from the superclass or an implemented interface (JS-SEC-040, JS-SEC-081), or
  * declared on an annotation type the element carries - a <em>composed</em>
  * annotation such as {@code @RequiresRole("ADMIN") @interface AdminOnly}
- * (JS-SEC-154). Composition is resolved exactly one level deep: an annotation on
- * an annotation on an annotation is not followed. An element may carry one
- * restriction only, however it is written; a second one raises
- * {@link IllegalStateException}.
+ * (JS-SEC-154). Composition is resolved exactly one level deep. A restriction
+ * composed more deeply - {@code @AdminOnly @interface SuperAdmin} - is not resolved,
+ * and it is not ignored either: it raises {@link IllegalStateException}, because
+ * treating the element as unrestricted would open what its author meant to close
+ * (since 00.84.00). An element may carry one restriction only, however it is
+ * written; a second one raises {@link IllegalStateException}.
  * <p>
  * <strong>Methods (JS-SEC-070, JS-SEC-114).</strong> The restriction of a method is
  * looked up in this order, and the first hit wins:
@@ -436,6 +449,14 @@ public final class JCustosAnnotationScanner {
       for (Annotation meta : declared.annotationType().getDeclaredAnnotations()) {
         if (isRestriction(meta)) {
           list.add(meta);
+        } else if (composesRestriction(meta.annotationType(), new HashSet<>())) {
+          // A restriction two or more levels away is not resolved. Answering "no
+          // restriction" would open the element; failing closed is the only safe answer.
+          throw new IllegalStateException("@" + declared.annotationType().getName()
+              + " on " + element + " carries @" + meta.annotationType().getName()
+              + ", which composes a restriction itself; a composed restriction is resolved"
+              + " one level deep only. Put the restriction on @"
+              + declared.annotationType().getSimpleName() + " directly.");
         }
       }
     }
@@ -456,6 +477,37 @@ public final class JCustosAnnotationScanner {
   }
 
   private static boolean isRestriction(Annotation annotation) {
-    return annotation.annotationType().isAnnotationPresent(JCustosAnnotation.class);
+    return isRestrictionType(annotation.annotationType());
+  }
+
+  /**
+   * Whether {@code type} is a restriction annotation type: {@link JCustosAnnotation} on it
+   * names an evaluator the enforcement paths can run. Any other binding - core's
+   * {@code @PropagateToken} names a token-propagation advisor - is not a restriction.
+   */
+  private static boolean isRestrictionType(Class<? extends Annotation> type) {
+    JCustosAnnotation binding = type.getAnnotation(JCustosAnnotation.class);
+    return binding != null
+        && (AccessEvaluator.class.isAssignableFrom(binding.value())
+        || AuthorizationEvaluator.class.isAssignableFrom(binding.value()));
+  }
+
+  /**
+   * Whether an annotation of {@code type} brings a restriction with it at any depth: a
+   * restriction annotation on {@code type}, or an annotation on {@code type} that composes
+   * one in turn. {@code visited} breaks the cycles annotation types may form
+   * ({@code @Documented} is documented).
+   */
+  private static boolean composesRestriction(Class<? extends Annotation> type,
+      Set<Class<?>> visited) {
+    if (!visited.add(type)) {
+      return false;
+    }
+    for (Annotation meta : type.getDeclaredAnnotations()) {
+      if (isRestriction(meta) || composesRestriction(meta.annotationType(), visited)) {
+        return true;
+      }
+    }
+    return false;
   }
 }

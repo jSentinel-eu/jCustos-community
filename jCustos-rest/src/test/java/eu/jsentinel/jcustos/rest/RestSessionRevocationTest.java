@@ -182,6 +182,58 @@ class RestSessionRevocationTest {
   }
 
   @Test
+  @DisplayName("a store outage is announced, at most once per interval rather than once per request")
+  void storeFailure_isAnnouncedRateLimited() {
+    RestSessionRevocation.useSessionStore(new CountingStore(store) {
+      @Override public Optional<SessionRecord> findById(SessionId sessionId) {
+        throw new IllegalStateException("store unreachable");
+      }
+    });
+    long warnedBefore = RestSessionRevocation.STORE_FAILURES.warnedCount();
+    long suppressedBefore = RestSessionRevocation.STORE_FAILURES.suppressedCount();
+
+    for (int i = 0; i < 50; i++) {
+      assertTrue(throughAuthentication(TOKEN).handlerRan);
+    }
+
+    long warned = RestSessionRevocation.STORE_FAILURES.warnedCount() - warnedBefore;
+    long suppressed = RestSessionRevocation.STORE_FAILURES.suppressedCount() - suppressedBefore;
+    assertEquals(50L, warned + suppressed, "every failure is seen by the warning");
+    assertTrue(warned <= 1L, "at most one line within the interval, got " + warned);
+  }
+
+  @Test
+  @DisplayName("a failing audit sink is announced by every REST filter instead of being swallowed")
+  void auditFailure_isAnnounced() throws NoSuchMethodException {
+    RestSessionRevocation.useSessionStore(store);
+    store.save(record(SESSION, SessionStatus.REVOKED));
+    JCustosServiceResolver.setJCustosAuditService(new JCustosAuditService() {
+      @Override public void publish(AuditEvent event) {
+        throw new IllegalStateException("audit down");
+      }
+
+      @Override public List<AuditEvent> query(AuditQuery query) {
+        return List.of();
+      }
+    });
+    long before = RestSessionRevocation.AUDIT_FAILURES.warnedCount()
+        + RestSessionRevocation.AUDIT_FAILURES.suppressedCount();
+
+    throughAuthentication(TOKEN);                 // SessionInvalidated
+    throughAuthorization(TOKEN);                  // SessionInvalidated
+    Outcome anonymous = new Outcome();            // AccessDenied, no subject
+    new RestAuthenticationFilter(resolver).requireAuthenticated(
+        new RestAuthorizationFilterTest.SimpleRestRequest("GET", ROUTE, Map.of(), Map.of()),
+        anonymous.response, (rq, rs) -> anonymous.handlerRan = true);
+
+    assertFalse(anonymous.handlerRan);
+    assertEquals(HttpStatus.UNAUTHORIZED.code(), anonymous.response.status);
+    long after = RestSessionRevocation.AUDIT_FAILURES.warnedCount()
+        + RestSessionRevocation.AUDIT_FAILURES.suppressedCount();
+    assertEquals(3L, after - before, "each lost audit event is counted by the warning");
+  }
+
+  @Test
   @DisplayName("a session the application never recorded is not affected")
   void neverRecorded_isNotAffected() {
     RestSessionRevocation.useSessionStore(store);

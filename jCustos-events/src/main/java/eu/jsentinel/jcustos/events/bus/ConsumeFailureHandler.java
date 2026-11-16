@@ -65,6 +65,22 @@ import java.util.function.Supplier;
  * global — this handler has no trustworthy notion of a source; a transport
  * that knows the authenticated caller should throttle per caller before the
  * envelope gets here. Failures of authenticated envelopes are never throttled.
+ * <p>
+ * A {@link JCustosEventVerificationResult.KeyNotAuthorizedForProducer}
+ * rejection has a budget of its own
+ * ({@link #DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT} per
+ * {@link #DEFAULT_KEY_NOT_AUTHORIZED_EVENT_WINDOW}, counted in
+ * {@link #suppressedKeyNotAuthorizedCount()}): its signature verified under a
+ * trusted key, so only a key holder can cause it, and it reports an attempt
+ * to sign in another producer's name. Sharing the keyless budget let a key
+ * holder spend that budget with unsigned junk first and then impersonate
+ * another producer unreported.
+ * <p>
+ * A rejection that is not reported is still dead-lettered when the policy
+ * says so — the record is the forensic trace — but its
+ * {@code DeadLettered} event is suppressed together with the rejection's own
+ * event, so a policy that dead-letters keyless rejections does not reopen the
+ * flood the throttle closes.
  *
  * @since 00.80.00
  */
@@ -89,20 +105,38 @@ public final class ConsumeFailureHandler implements HasLogger {
    */
   public static final Duration DEFAULT_UNAUTHENTICATED_EVENT_WINDOW = Duration.ofMinutes(1);
 
+  /**
+   * Default number of rejections of envelopes signed under a trusted key that
+   * is not bound to the claimed producer
+   * ({@link JCustosEventVerificationResult.KeyNotAuthorizedForProducer}) that
+   * are reported (event and log line) per
+   * {@link #DEFAULT_KEY_NOT_AUTHORIZED_EVENT_WINDOW}. Separate from the budget
+   * for keyless junk, so unsigned envelopes cannot use it up.
+   *
+   * @since 00.84.00
+   */
+  public static final int DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT = 20;
+
+  /**
+   * Length of the throttling window for
+   * {@link JCustosEventVerificationResult.KeyNotAuthorizedForProducer}
+   * rejections.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration DEFAULT_KEY_NOT_AUTHORIZED_EVENT_WINDOW = Duration.ofMinutes(1);
+
   /** Longest envelope, producer or tenant id written to an operator log line. */
   static final int MAX_LOGGED_ID_LENGTH = 128;
 
   private final ConsumeFailurePolicy policy;
   private final DeadLetterRecorder deadLetterRecorder;
+  // Same store, no events: dead-letters a rejection whose report was throttled.
+  private final DeadLetterRecorder silentDeadLetterRecorder;
   private final EventBusObservabilityPublisher observability;
   private final Supplier<Instant> clock;
-  private final int unauthenticatedEventLimit;
-  private final Duration unauthenticatedEventWindow;
-  private final AtomicLong suppressedUnauthenticated = new AtomicLong();
-  // Guarded by `this`: the current throttling window.
-  private Instant windowStart;
-  private int reportedInWindow;
-  private long suppressedInWindow;
+  private final ReportBudget unauthenticatedBudget;
+  private final ReportBudget keyNotAuthorizedBudget;
 
   /**
    * @param policy          reject-vs-dead-letter per failure kind
@@ -129,7 +163,10 @@ public final class ConsumeFailureHandler implements HasLogger {
    * @param clock           the failure-event clock
    * @param unauthenticatedEventLimit  how many failures of unauthenticated
    *                        envelopes are reported per window; {@code 0}
-   *                        reports none of them
+   *                        reports none of them. Does not apply to
+   *                        {@code KeyNotAuthorizedForProducer} rejections,
+   *                        which have their own budget
+   *                        ({@link #DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT})
    * @param unauthenticatedEventWindow the length of the throttling window;
    *                        positive
    * @since 00.84.00
@@ -150,8 +187,24 @@ public final class ConsumeFailureHandler implements HasLogger {
     if (unauthenticatedEventWindow.isZero() || unauthenticatedEventWindow.isNegative()) {
       throw new IllegalArgumentException("unauthenticatedEventWindow must be positive");
     }
-    this.unauthenticatedEventLimit = unauthenticatedEventLimit;
-    this.unauthenticatedEventWindow = unauthenticatedEventWindow;
+    this.unauthenticatedBudget = new ReportBudget(unauthenticatedEventLimit,
+        unauthenticatedEventWindow,
+        "events/unauthenticated-rejections-throttled: more than {} envelopes without a valid"
+            + " signature under a bound key were rejected within {} — further such rejections"
+            + " are counted but neither logged nor published as events until the window ends."
+            + " Somebody is sending junk to the ingest path; check who holds access to it.",
+        "events/unauthenticated-rejections-throttled: {} further rejections of"
+            + " unauthenticated envelopes were not reported in the window that started at {}.");
+    this.keyNotAuthorizedBudget = new ReportBudget(DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT,
+        DEFAULT_KEY_NOT_AUTHORIZED_EVENT_WINDOW,
+        "events/key-not-authorized-rejections-throttled: more than {} envelopes signed under a"
+            + " trusted key for a producer the key is not bound to were rejected within {} —"
+            + " further such rejections are counted but neither logged nor published as events"
+            + " until the window ends. A key holder is signing in other producers' names;"
+            + " revoke the key or correct its binding.",
+        "events/key-not-authorized-rejections-throttled: {} further rejections of envelopes"
+            + " signed under a key not bound to their producer were not reported in the window"
+            + " that started at {}.");
     this.observability = observability == null
         ? EventBusObservabilityPublisher.discard()
         : observability;
@@ -163,9 +216,12 @@ public final class ConsumeFailureHandler implements HasLogger {
             + " ConsumeFailurePolicy.strict()");
       }
       this.deadLetterRecorder = null;
+      this.silentDeadLetterRecorder = null;
     } else {
       this.deadLetterRecorder = new DeadLetterRecorder(deadLetterStore,
           this.observability, clock);
+      this.silentDeadLetterRecorder = new DeadLetterRecorder(deadLetterStore,
+          EventBusObservabilityPublisher.discard(), clock);
     }
   }
 
@@ -182,7 +238,8 @@ public final class ConsumeFailureHandler implements HasLogger {
     Objects.requireNonNull(envelope, "envelope");
     Objects.requireNonNull(failure, "failure");
     boolean authenticated = failure.envelopeAuthenticated();
-    if (authenticated || admitUnauthenticated()) {
+    boolean reported = authenticated || budgetFor(failure).admit();
+    if (reported) {
       try {
         SelfObservabilityEvents.fromVerification(failure, envelope, clock.get())
             .ifPresent(observability::publishObservability);
@@ -196,7 +253,8 @@ public final class ConsumeFailureHandler implements HasLogger {
     if (action == ConsumeFailureAction.REJECT_AND_DEAD_LETTER
         && deadLetterRecorder != null) {
       try {
-        deadLetterRecorder.record(envelope, rejectionReason(failure), authenticated);
+        (reported ? deadLetterRecorder : silentDeadLetterRecorder)
+            .record(envelope, rejectionReason(failure), authenticated);
       } catch (RuntimeException storeFailure) {
         // The handler must stay total toward the transport; the loss is
         // itself security-relevant, so it is logged loudly.
@@ -214,44 +272,80 @@ public final class ConsumeFailureHandler implements HasLogger {
    * @since 00.84.00
    */
   public long suppressedUnauthenticatedCount() {
-    return suppressedUnauthenticated.get();
+    return unauthenticatedBudget.suppressedTotal();
   }
 
-  // Fixed window on the handler's clock. Returns true while the window has
-  // budget left; the first refusal of a window is announced, the size of the
-  // suppressed remainder is logged when the next window opens.
-  private synchronized boolean admitUnauthenticated() {
-    Instant now;
-    try {
-      now = clock.get();
-    } catch (RuntimeException clockFailure) {
+  /**
+   * @return how many
+   *     {@link JCustosEventVerificationResult.KeyNotAuthorizedForProducer}
+   *     rejections were not reported (no event, no log line) because the
+   *     limit of their window was used up, over this handler's lifetime
+   * @since 00.84.00
+   */
+  public long suppressedKeyNotAuthorizedCount() {
+    return keyNotAuthorizedBudget.suppressedTotal();
+  }
+
+  // Only a key holder can cause KeyNotAuthorizedForProducer — it gets its own
+  // budget, so keyless junk cannot spend it (see the class Javadoc).
+  private ReportBudget budgetFor(JCustosEventVerificationResult failure) {
+    return failure instanceof JCustosEventVerificationResult.KeyNotAuthorizedForProducer
+        ? keyNotAuthorizedBudget
+        : unauthenticatedBudget;
+  }
+
+  // Fixed window on the handler's clock. admit() returns true while the
+  // window has budget left; the first refusal of a window is announced, the
+  // size of the suppressed remainder is logged when the next window opens.
+  private final class ReportBudget {
+    private final int limit;
+    private final Duration window;
+    private final String firstRefusalMessage;
+    private final String summaryMessage;
+    private final AtomicLong suppressedTotal = new AtomicLong();
+    // Guarded by `this`: the current throttling window.
+    private Instant windowStart;
+    private int reportedInWindow;
+    private long suppressedInWindow;
+
+    private ReportBudget(int limit, Duration window, String firstRefusalMessage,
+        String summaryMessage) {
+      this.limit = limit;
+      this.window = window;
+      this.firstRefusalMessage = firstRefusalMessage;
+      this.summaryMessage = summaryMessage;
+    }
+
+    long suppressedTotal() {
+      return suppressedTotal.get();
+    }
+
+    synchronized boolean admit() {
+      Instant now;
+      try {
+        now = clock.get();
+      } catch (RuntimeException clockFailure) {
+        return false;
+      }
+      if (windowStart == null || now.isBefore(windowStart)
+          || !now.isBefore(windowStart.plus(window))) {
+        if (suppressedInWindow > 0) {
+          logger().warn(summaryMessage, suppressedInWindow, windowStart);
+        }
+        windowStart = now;
+        reportedInWindow = 0;
+        suppressedInWindow = 0;
+      }
+      if (reportedInWindow < limit) {
+        reportedInWindow++;
+        return true;
+      }
+      suppressedTotal.incrementAndGet();
+      if (suppressedInWindow++ == 0) {
+        logger().warn(firstRefusalMessage, limit, window);
+      }
       return false;
     }
-    if (windowStart == null || now.isBefore(windowStart)
-        || !now.isBefore(windowStart.plus(unauthenticatedEventWindow))) {
-      if (suppressedInWindow > 0) {
-        logger().warn("events/unauthenticated-rejections-throttled: {} further rejections of"
-                + " unauthenticated envelopes were not reported in the window that started"
-                + " at {}.", suppressedInWindow, windowStart);
-      }
-      windowStart = now;
-      reportedInWindow = 0;
-      suppressedInWindow = 0;
-    }
-    if (reportedInWindow < unauthenticatedEventLimit) {
-      reportedInWindow++;
-      return true;
-    }
-    suppressedUnauthenticated.incrementAndGet();
-    if (suppressedInWindow++ == 0) {
-      logger().warn("events/unauthenticated-rejections-throttled: more than {} envelopes"
-              + " without a valid signature under a bound key were rejected within {} —"
-              + " further such rejections are counted but neither logged nor published"
-              + " as events until the window ends. Somebody is sending junk to the ingest"
-              + " path; check who holds access to it.",
-          unauthenticatedEventLimit, unauthenticatedEventWindow);
-    }
-    return false;
   }
 
   // CWE-117 / CWE-770: every id in an operator log line is scrubbed and

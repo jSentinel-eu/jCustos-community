@@ -81,9 +81,14 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
    *
    * @param store        non-null
    * @param auditService non-null
-   * @param limit        max events per {@code window}; strictly positive
+   * @param limit        max events per {@code window}; strictly positive and at
+   *                     most {@link RateLimitStore#maxEventsPerKey()} of the store
    * @param window       sliding-window duration; non-null, strictly positive
    * @param clock        time source; non-null
+   * @throws IllegalArgumentException if {@code limit} exceeds the per-key bound of
+   *                                  the store (since 00.84.00): the store would
+   *                                  refuse every request beyond its bound, so the
+   *                                  configured limit would never take effect
    */
   public InMemoryRateLimitPolicy(RateLimitStore store,
                                  JCustosAuditService auditService,
@@ -94,6 +99,14 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
     this.auditService = requireNonNull(auditService, "auditService must not be null");
     if (limit <= 0) {
       throw new IllegalArgumentException("limit must be strictly positive");
+    }
+    // XR08 (CWE-1284): InMemoryRateLimitStore keeps at most maxEventsPerKey events per
+    // key and refuses beyond that, so a larger limit was capped without a word.
+    int storeBound = store.maxEventsPerKey();
+    if (limit > storeBound) {
+      throw new IllegalArgumentException("limit " + limit + " exceeds the " + storeBound
+          + " events the rate-limit store keeps per key, so it would never take effect; "
+          + "lower the limit or construct the store with a larger maxEventsPerKey");
     }
     requireNonNull(window, "window must not be null");
     if (window.isZero() || window.isNegative()) {

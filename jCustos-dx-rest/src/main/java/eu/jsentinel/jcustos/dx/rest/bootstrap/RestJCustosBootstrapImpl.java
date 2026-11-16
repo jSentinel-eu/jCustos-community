@@ -18,6 +18,7 @@ import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
+import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestSessionRevocation;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
 import eu.jsentinel.jcustos.session.SessionStore;
@@ -38,6 +39,16 @@ import eu.jsentinel.jcustos.dx.rest.handlers.RestHandlerDiscovery;
 final class RestJCustosBootstrapImpl
     extends AbstractJCustosBootstrap<RestJCustosBootstrap>
     implements RestJCustosBootstrap {
+
+  /**
+   * WARNING: {@code .storeBacked(...)} wires the REST revocation check, but the subject
+   * resolver keeps the default {@code resolveSessionId}, so the check never finds a session.
+   *
+   * @since 00.84.00
+   */
+  static final String CODE_SESSION_REVOCATION_INERT = "rest/session-revocation-inert";
+
+  private static final String RESOLVE_SESSION_ID = "resolveSessionId";
 
   private RestSubjectResolver subjectResolver;
   private RestHandlerDiscovery handlerDiscovery;
@@ -156,8 +167,15 @@ final class RestJCustosBootstrapImpl
    * revocation wiring, as the Vaadin bootstrap does. Without a configured store nothing is
    * touched: an application may have registered its store with
    * {@link RestSessionRevocation} itself.
+   *
+   * <p>The check reads the session of a request through
+   * {@link RestSubjectResolver#resolveSessionId}, whose default answers "no session". A
+   * resolver that keeps the default leaves the check inert - every request passes, a
+   * revoked session keeps working - although the bootstrap lists the wiring. That is
+   * reported as {@value #CODE_SESSION_REVOCATION_INERT} (WARNING) since 00.84.00.
    */
-  private void publishSessionStore(List<RegisteredJCustosService> services) {
+  private void publishSessionStore(List<RegisteredJCustosService> services,
+                                   List<JCustosBootstrapWarning> warnings) {
     SessionStore sessionStore = state.sessionState().sessionStore();
     if (sessionStore == null) {
       return;
@@ -166,6 +184,35 @@ final class RestJCustosBootstrapImpl
     services.add(new RegisteredJCustosService(
         RestSessionRevocation.class, sessionStore.getClass(),
         "bootstrap-session-revocation", false));
+    services.stream()
+        .filter(service -> service.spi() == RestSubjectResolver.class)
+        .map(RegisteredJCustosService::impl)
+        .findFirst()
+        .filter(resolverClass -> !resolvesSessionIds(resolverClass))
+        .ifPresent(resolverClass -> warnings.add(new JCustosBootstrapWarning(
+            Severity.WARNING,
+            CODE_SESSION_REVOCATION_INERT,
+            "A session store is configured, but the RestSubjectResolver "
+                + resolverClass.getName() + " does not override resolveSessionId(...): the "
+                + "REST revocation check finds no session for any request, so a revoked "
+                + "session keeps working over REST.",
+            "Override RestSubjectResolver.resolveSessionId(...) to return the SessionId the "
+                + "session record is saved under, or drop .storeBacked(...) if REST does not "
+                + "record sessions.")));
+  }
+
+  /**
+   * Whether {@code resolverClass} replaces the default
+   * {@link RestSubjectResolver#resolveSessionId}, itself or through a supertype.
+   */
+  private static boolean resolvesSessionIds(Class<?> resolverClass) {
+    try {
+      return resolverClass.getMethod(RESOLVE_SESSION_ID, RestRequest.class)
+          .getDeclaringClass() != RestSubjectResolver.class;
+    } catch (NoSuchMethodException | SecurityException unknown) {
+      // Not inspectable: do not claim the check is inert.
+      return true;
+    }
   }
 
   /**
@@ -269,7 +316,7 @@ final class RestJCustosBootstrapImpl
     // methods.
     applyCommonConfiguration(AdapterKind.REST, services, warnings);
 
-    publishSessionStore(services);
+    publishSessionStore(services, warnings);
 
     // V00.74 (A2.2): publish CORS configuration when configured.
     if (corsConfiguration != null) {

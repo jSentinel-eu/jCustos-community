@@ -54,6 +54,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * component counts as secret-bearing when its name is one of {@link #SECRET_NAMES}, or one
  * of {@link #PACKAGE_NAMES} in the packages listed there. A component whose type is a class
  * of jCustos with a written {@code toString()} masks itself and is not a leak.</p>
+ *
+ * <p>The entry for {@code eu.jsentinel.jcustos.rest} ({@code sessionId}) exists in this copy
+ * only: no other module has classes in that package, and elsewhere a {@code sessionId}
+ * component holds a session reference or a container session id, not a bearer token.</p>
  */
 @DisplayName("JS-SEC-127 — secret-bearing records of jCustos-rest override toString")
 class SecretBearingRecordToStringGuardTest {
@@ -76,7 +80,10 @@ class SecretBearingRecordToStringGuardTest {
       "eu.jsentinel.jcustos.bootstrap", Set.of("value"),
       "eu.jsentinel.jcustos.oauth2", Set.of("code", "codeforchash", "body"),
       "eu.jsentinel.jcustos.oidc", Set.of("code", "codeforchash"),
-      "eu.jsentinel.jcustos.propagation", Set.of("body"));
+      "eu.jsentinel.jcustos.propagation", Set.of("body"),
+      // XR08 (00.84.00): in REST the session id a resolver hands over is all too often
+      // the bearer token itself (RestJCustosVersionContext, JS-SEC-117).
+      "eu.jsentinel.jcustos.rest", Set.of("sessionid"));
 
   private static final String JCUSTOS_PACKAGE = "eu.jsentinel.jcustos";
 
@@ -127,6 +134,9 @@ class SecretBearingRecordToStringGuardTest {
     assertTrue(offenders.isEmpty(),
         "records with a secret-bearing component must override toString() and mask it "
             + "(JS-SEC-127, CWE-532): " + offenders);
+    // Self-check of the naming rule: the known secret-bearing record is recognised.
+    assertTrue(guarded.contains(RestJCustosVersionContext.class.getName()),
+        "the naming rule no longer recognises RestJCustosVersionContext: " + guarded);
   }
 
   private static List<String> secretComponents(Class<?> record) {

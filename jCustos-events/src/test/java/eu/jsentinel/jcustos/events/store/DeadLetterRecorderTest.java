@@ -45,6 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("DeadLetterRecorder")
 class DeadLetterRecorderTest {
@@ -80,7 +81,7 @@ class DeadLetterRecorderTest {
     DeadLetterRecorder recorder = new DeadLetterRecorder(store, emitted::add, () -> NOW);
     SignedJCustosEventEnvelope envelope = StoreFixtures.envelope("env-dlr-1");
 
-    JCustosEventDeadLetter letter = recorder.record(envelope, RejectionReason.EXPIRED);
+    JCustosEventDeadLetter letter = recorder.record(envelope, RejectionReason.EXPIRED, true);
 
     List<JCustosEventDeadLetter> open = store.findOpen(10);
     assertEquals(1, open.size());
@@ -107,7 +108,8 @@ class DeadLetterRecorderTest {
         event -> emissions.incrementAndGet(), () -> NOW);
 
     assertThrows(IllegalStateException.class,
-        () -> recorder.record(StoreFixtures.envelope("env-dlr-2"), RejectionReason.EXPIRED));
+        () -> recorder.record(StoreFixtures.envelope("env-dlr-2"), RejectionReason.EXPIRED,
+            true));
 
     assertEquals(0, emissions.get(), "no DeadLettered event when the store write failed");
   }
@@ -122,7 +124,8 @@ class DeadLetterRecorderTest {
         }, () -> NOW);
 
     JCustosEventDeadLetter letter =
-        recorder.record(StoreFixtures.envelope("env-dlr-3"), RejectionReason.REPLAY_DETECTED);
+        recorder.record(StoreFixtures.envelope("env-dlr-3"), RejectionReason.REPLAY_DETECTED,
+            true);
 
     assertNotNull(letter);
     assertEquals(1, store.findOpen(10).size(), "the letter was stored despite the sink failure");
@@ -174,9 +177,8 @@ class DeadLetterRecorderTest {
     SignedJCustosEventEnvelope junk = claimingTenant("J".repeat(5_000), "victim-tenant");
 
     recorder.record(junk, RejectionReason.INVALID_SIGNATURE, false);
-    // the two-argument form derives "unauthenticated" from a cryptographic reason
     recorder.record(claimingTenant("K".repeat(5_000), "victim-tenant"),
-        RejectionReason.UNKNOWN_KEY);
+        RejectionReason.UNKNOWN_KEY, false);
 
     assertEquals(2, emitted.size());
     for (EventBusSelfObservabilityEvent event : emitted) {
@@ -187,6 +189,34 @@ class DeadLetterRecorderTest {
     }
     // the forensic record itself keeps the envelope exactly as it arrived
     assertEquals(junk, store.findOpen(10).get(0).envelope());
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  @DisplayName("the deprecated two-argument form fails closed: PRODUCER_NOT_ALLOWED keeps no tenant")
+  void deprecatedTwoArgumentFormFailsClosed() {
+    List<EventBusSelfObservabilityEvent> emitted = new ArrayList<>();
+    DeadLetterRecorder recorder = new DeadLetterRecorder(new InMemoryDeadLetterStore(),
+        emitted::add, () -> NOW);
+
+    // KeyNotAuthorizedForProducer is dead-lettered as PRODUCER_NOT_ALLOWED: the
+    // claimed tenant is unverified, and the reason alone cannot tell.
+    recorder.record(claimingTenant("env-impersonated", "victim-tenant"),
+        RejectionReason.PRODUCER_NOT_ALLOWED);
+    recorder.record(claimingTenant("env-unknown-key", "victim-tenant"),
+        RejectionReason.UNKNOWN_KEY);
+    recorder.record(claimingTenant("env-expired", "acme"), RejectionReason.EXPIRED);
+
+    assertEquals(3, emitted.size());
+    for (int i = 0; i < 2; i++) {
+      DeadLetteredEvent event = assertInstanceOf(DeadLetteredEvent.class, emitted.get(i));
+      assertEquals(TenantId.DEFAULT, event.tenantId(),
+          "the event must not be raised under a tenant that may be forged");
+      assertTrue(event.envelopeId().startsWith("unverified:"), event.envelopeId());
+    }
+    DeadLetteredEvent expired = assertInstanceOf(DeadLetteredEvent.class, emitted.get(2));
+    assertEquals(TenantId.of("acme"), expired.tenantId());
+    assertEquals("env-expired", expired.envelopeId());
   }
 
   @Test
@@ -211,9 +241,9 @@ class DeadLetterRecorderTest {
     DeadLetterRecorder recorder = new DeadLetterRecorder(store, emitted::add, () -> NOW);
     SignedJCustosEventEnvelope envelope = StoreFixtures.envelope("env-replayed");
 
-    JCustosEventDeadLetter first = recorder.record(envelope, RejectionReason.EXPIRED);
+    JCustosEventDeadLetter first = recorder.record(envelope, RejectionReason.EXPIRED, true);
     for (int i = 0; i < 9_999; i++) {
-      assertEquals(first.id(), recorder.record(envelope, RejectionReason.EXPIRED).id(),
+      assertEquals(first.id(), recorder.record(envelope, RejectionReason.EXPIRED, true).id(),
           "a repeat returns the open record it duplicates");
     }
 
@@ -247,9 +277,9 @@ class DeadLetterRecorderTest {
     SignedJCustosEventEnvelope envelope = StoreFixtures.envelope("env-legacy");
 
     for (int i = 0; i < 50; i++) {
-      recorder.record(envelope, RejectionReason.EXPIRED);
+      recorder.record(envelope, RejectionReason.EXPIRED, true);
     }
-    recorder.record(envelope, RejectionReason.SEQUENCE_VIOLATION);
+    recorder.record(envelope, RejectionReason.SEQUENCE_VIOLATION, true);
 
     assertEquals(2, backing.size(), "one record per distinct (envelope, reason)");
   }

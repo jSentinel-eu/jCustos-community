@@ -28,22 +28,33 @@ package eu.jsentinel.jcustos.events.bus;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.events.api.EventEnvelopeId;
 import eu.jsentinel.jcustos.events.api.EventMetadata;
+import eu.jsentinel.jcustos.events.api.EventProducerId;
 import eu.jsentinel.jcustos.events.api.JCustosEvent;
 import eu.jsentinel.jcustos.events.api.JCustosEventSeverity;
 import eu.jsentinel.jcustos.events.api.KeyId;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
+import eu.jsentinel.jcustos.events.keys.InMemoryKeyManagement;
+import eu.jsentinel.jcustos.events.keys.JCustosEventVerificationKeyResolver;
+import eu.jsentinel.jcustos.events.keys.KeyStatus;
 import eu.jsentinel.jcustos.events.publisher.JCustosAlert;
 import eu.jsentinel.jcustos.events.publisher.JCustosAlertPublisher;
+import eu.jsentinel.jcustos.events.sequence.SequenceValidator;
+import eu.jsentinel.jcustos.events.sequence.SequenceViolationStrategy;
+import eu.jsentinel.jcustos.events.signature.SignatureAlgorithms;
+import eu.jsentinel.jcustos.events.store.InMemoryDeadLetterStore;
+import eu.jsentinel.jcustos.events.types.DeadLetteredEvent;
 import eu.jsentinel.jcustos.events.types.EnvelopeRejectedEvent;
 import eu.jsentinel.jcustos.events.types.LoginSucceededEvent;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.security.PublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -144,6 +155,92 @@ class UnauthenticatedRejectionFloodTest {
         assertInstanceOf(EnvelopeRejectedEvent.class, chained.get(afterFlood));
     assertEquals(TenantId.of("acme"), event.tenantId());
     assertEquals(acme.envelopeId().value(), event.rejectedEnvelopeId());
+  }
+
+  /** Real resolver over real keys that binds the key to no producer of the fixtures. */
+  private record UnboundResolver(InMemoryKeyManagement delegate)
+      implements JCustosEventVerificationKeyResolver {
+    @Override
+    public Optional<PublicKey> resolveVerificationKey(KeyId keyId) {
+      return delegate.resolveVerificationKey(keyId);
+    }
+
+    @Override
+    public KeyStatus keyStatus(KeyId keyId) {
+      return delegate.keyStatus(keyId);
+    }
+
+    @Override
+    public boolean mayVerify(KeyId keyId, EventProducerId producerId, TenantId tenantId) {
+      return false;
+    }
+  }
+
+  @Test
+  @DisplayName("a key holder's impersonation attempt is reported with its key after any amount of junk")
+  void keyNotAuthorizedHasABudgetOfItsOwn() {
+    ConsumeFailureHandler handler = new ConsumeFailureHandler(
+        ConsumeFailurePolicy.strict(), null, bus, now::get);
+    ConsumePipeline consumer = fx.consumePipeline();
+    for (int i = 0; i < 100; i++) {
+      SignedJCustosEventEnvelope junk = junk(i);
+      handler.handle(junk, consumer.verify(junk, now.get()));
+    }
+    int limit = ConsumeFailureHandler.DEFAULT_UNAUTHENTICATED_EVENT_LIMIT;
+    assertEquals(limit, chained.size(), "the keyless budget is spent");
+    assertTrue(chained.stream()
+        .allMatch(event -> ((EnvelopeRejectedEvent) event).keyId() == null));
+
+    // The holder of key eventbus-1 signs in the name of a producer the key is not bound to.
+    ConsumePipeline bound = new ConsumePipeline(new UnboundResolver(fx.keyManagement),
+        SignatureAlgorithms.defaults(), fx.consumeReplay, fx.consumeSequence,
+        new SequenceValidator(), SequenceViolationStrategy.REJECT, fx.allowAll);
+    JCustosEventVerificationResult impersonation = bound.verify(genuine, now.get());
+    assertInstanceOf(JCustosEventVerificationResult.KeyNotAuthorizedForProducer.class,
+        impersonation);
+    handler.handle(genuine, impersonation);
+
+    assertEquals(limit + 1, chained.size(), "the attempt is reported despite the junk");
+    EnvelopeRejectedEvent reported =
+        assertInstanceOf(EnvelopeRejectedEvent.class, chained.get(limit));
+    assertEquals(SelfObservabilityEvents.REASON_KEY_NOT_AUTHORIZED, reported.reason());
+    assertEquals(BusFixtures.KEY.value(), reported.keyId(), "the verified key is named");
+    assertEquals(SelfObservabilityEvents.UNAUTHENTICATED_TENANT, reported.tenantId(),
+        "the claimed tenant is still not adopted");
+
+    // Its own budget is bounded too, and independent of the keyless one.
+    int keyLimit = ConsumeFailureHandler.DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT;
+    for (int i = 1; i < keyLimit + 5; i++) {
+      handler.handle(genuine, impersonation);
+    }
+    assertEquals(limit + keyLimit, chained.size());
+    assertEquals(5L, handler.suppressedKeyNotAuthorizedCount());
+    assertEquals(100L - limit, handler.suppressedUnauthenticatedCount());
+  }
+
+  @Test
+  @DisplayName("a policy that dead-letters keyless rejections keeps every record but not every event")
+  void deadLetteredEventsFollowTheThrottle() {
+    InMemoryDeadLetterStore store = new InMemoryDeadLetterStore();
+    ConsumeFailureHandler handler = new ConsumeFailureHandler(ConsumeFailurePolicy.custom()
+        .with(ConsumeFailurePolicy.FailureKind.UNKNOWN_KEY,
+            ConsumeFailureAction.REJECT_AND_DEAD_LETTER)
+        .build(), store, bus, now::get);
+    ConsumePipeline consumer = fx.consumePipeline();
+
+    for (int i = 0; i < 100; i++) {
+      SignedJCustosEventEnvelope junk = junk(i);
+      assertEquals(ConsumeFailureAction.REJECT_AND_DEAD_LETTER,
+          handler.handle(junk, consumer.verify(junk, now.get())));
+    }
+
+    int limit = ConsumeFailureHandler.DEFAULT_UNAUTHENTICATED_EVENT_LIMIT;
+    assertEquals(100, store.findOpen(Integer.MAX_VALUE).size(),
+        "every rejection is kept for forensics");
+    assertEquals(limit, chained.stream().filter(DeadLetteredEvent.class::isInstance).count(),
+        "a DeadLettered event only for a rejection that was reported");
+    assertEquals(limit, chained.stream().filter(EnvelopeRejectedEvent.class::isInstance).count());
+    assertEquals(2 * limit, alerts.size(), "the alert stream stays bounded");
   }
 
   @Test

@@ -90,6 +90,20 @@ public interface RateLimitStore {
   int purgeOlderThan(Instant cutoff);
 
   /**
+   * The most events this store keeps under one key. {@link #tryAdmit} refuses
+   * once a key holds this many, whatever {@code limit} the caller asks for, so a
+   * policy whose limit is larger would be capped silently -
+   * {@link InMemoryRateLimitPolicy} refuses such a limit at construction
+   * instead. The default declares no bound; a store that has one overrides it.
+   *
+   * @return the per-key bound, {@link Integer#MAX_VALUE} for none
+   * @since 00.84.00
+   */
+  default int maxEventsPerKey() {
+    return Integer.MAX_VALUE;
+  }
+
+  /**
    * Outcome of {@link #tryAdmit}: whether the event was recorded and how many
    * events the key holds in the window afterwards.
    *

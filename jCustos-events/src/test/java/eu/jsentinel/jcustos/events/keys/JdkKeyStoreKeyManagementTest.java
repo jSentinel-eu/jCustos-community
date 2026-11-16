@@ -75,6 +75,23 @@ class JdkKeyStoreKeyManagementTest {
   }
 
   @Test
+  @DisplayName("an alias spelled in another case is unknown and cannot sign")
+  void aliasesMatchExactly() throws Exception {
+    KeyId shouted = KeyId.of("EVENTBUS-2026");
+    JdkKeyStoreKeyManagement km = load();
+
+    assertEquals(KeyStatus.UNKNOWN, km.keyStatus(shouted),
+        "PKCS12 itself finds eventbus-2026 under EVENTBUS-2026");
+    assertTrue(km.resolveVerificationKey(shouted).isEmpty());
+
+    Path p12 = Path.of(getClass().getResource("/test-eventbus.p12").toURI());
+    JdkKeyStoreKeyManagement respelled = JdkKeyStoreKeyManagement.loadPkcs12(
+        p12, "changeit".toCharArray(), "changeit".toCharArray(), shouted, algorithm);
+    assertThrows(KeyAccessException.class, respelled::currentSigningKey,
+        "a producer must not sign under a key id no verifier can resolve");
+  }
+
+  @Test
   @DisplayName("a wrong store password fails fast with KeyAccessException")
   void wrongPasswordFails() {
     Path p12;

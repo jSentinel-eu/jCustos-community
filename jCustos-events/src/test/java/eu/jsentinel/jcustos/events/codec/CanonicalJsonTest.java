@@ -33,6 +33,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("CanonicalJson parser — malformed input hardening (R015)")
 class CanonicalJsonTest {
@@ -77,6 +78,22 @@ class CanonicalJsonTest {
   @DisplayName("end of input where ',' or '}' is expected raises PayloadCodecException")
   void unexpectedEndAfterValueRaisesCodecException() {
     assertThrows(PayloadCodecException.class, () -> CanonicalJson.parse("{\"a\":1"));
+  }
+
+  @Test
+  @DisplayName("an object that names a key twice raises PayloadCodecException, at any depth")
+  void duplicateKeyRaisesCodecException() {
+    for (String json : new String[]{
+        "{\"a\":\"x\",\"a\":\"y\"}",
+        "{\"a\":{\"b\":1,\"b\":2}}",
+        "{\"a\":\"x\",\"\\u0061\":\"y\"}"}) {
+      PayloadCodecException duplicate =
+          assertThrows(PayloadCodecException.class, () -> CanonicalJson.parse(json), json);
+      assertTrue(duplicate.getMessage().contains("duplicate key"), duplicate.getMessage());
+    }
+    Map<?, ?> distinct = assertInstanceOf(Map.class,
+        CanonicalJson.parse("{\"a\":\"x\",\"b\":\"y\"}"));
+    assertEquals(2, distinct.size());
   }
 
   @Test

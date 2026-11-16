@@ -611,18 +611,6 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
         OidcState.class, OidcState.class, "bootstrap-oidc", false));
   }
 
-  /**
-   * Consumes the {@link AuditState} accumulated by {@code .audit(...)}
-   * calls, applies the validation rules from Konzept §6.4, builds the
-   * resulting {@link JCustosAuditService} (Konzept §6.2), registers
-   * it via {@link JCustosServiceResolver#setJCustosAuditService(JCustosAuditService)}
-   * and adds a {@link RegisteredJCustosService} entry plus any
-   * required warnings.
-   *
-   * <p>Called by each adapter's {@code install()} immediately after
-   * authn/authz wiring so the audit service is in place before any
-   * other dependent setup.
-   */
   /** Registration source of a service the bootstrap found through {@code META-INF/services}. */
   protected static final String SOURCE_SPI_REGISTERED = "spi-registered";
 
@@ -736,6 +724,18 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
     }
   }
 
+  /**
+   * Consumes the {@link AuditState} accumulated by {@code .audit(...)}
+   * calls, applies the validation rules from Konzept §6.4, builds the
+   * resulting {@link JCustosAuditService} (Konzept §6.2), registers
+   * it via {@link JCustosServiceResolver#setJCustosAuditService(JCustosAuditService)}
+   * and adds a {@link RegisteredJCustosService} entry plus any
+   * required warnings.
+   *
+   * <p>Called by each adapter's {@code install()} immediately after
+   * authn/authz wiring so the audit service is in place before any
+   * other dependent setup.
+   */
   protected final void applyAuditConfiguration(List<RegisteredJCustosService> services,
                                                List<JCustosBootstrapWarning> warnings) {
     if (!state.auditConfigured()) {
@@ -1302,27 +1302,6 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
   }
 
   /**
-   * V00.74: applies the direct-set services configured via the new
-   * top-level methods on {@link CommonJCustosBootstrap}.
-   *
-   * <p>Two categories:
-   * <ul>
-   *   <li><strong>Resolver-wired</strong> — {@link LogoutService} via
-   *       {@link JCustosServiceResolver#setLogoutService},
-   *       {@link LoginAttemptPolicy} via
-   *       {@link JCustosServiceResolver#setLoginAttemptPolicy}.</li>
-   *   <li><strong>DX-state only</strong> — {@link RateLimitPolicy},
-   *       {@link ApiKeyAuthenticationService}, {@link TokenService}.
-   *       These types have no global resolver setter; the bootstrap does
-   *       not touch any global singleton for them. They are recorded in
-   *       {@link BootstrapState} for adapter-DX modules to consume, and
-   *       (R029) surfaced as an {@code INFO} warning
-   *       ({@code dx/<feature>-recorded-not-wired}) rather than a
-   *       {@link JCustosRuntime#services()} entry — a recorded-but-unwired
-   *       feature must not read as an actively-wired service.</li>
-   * </ul>
-   */
-  /**
    * JS-SEC-124 (CWE-1188, CWE-307): two protections that used to be absent without a word.
    *
    * <ul>
@@ -1362,6 +1341,27 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
     }
   }
 
+  /**
+   * V00.74: applies the direct-set services configured via the new
+   * top-level methods on {@link CommonJCustosBootstrap}.
+   *
+   * <p>Two categories:
+   * <ul>
+   *   <li><strong>Resolver-wired</strong> — {@link LogoutService} via
+   *       {@link JCustosServiceResolver#setLogoutService},
+   *       {@link LoginAttemptPolicy} via
+   *       {@link JCustosServiceResolver#setLoginAttemptPolicy}.</li>
+   *   <li><strong>DX-state only</strong> — {@link RateLimitPolicy},
+   *       {@link ApiKeyAuthenticationService}, {@link TokenService}.
+   *       These types have no global resolver setter; the bootstrap does
+   *       not touch any global singleton for them. They are recorded in
+   *       {@link BootstrapState} for adapter-DX modules to consume, and
+   *       (R029) surfaced as an {@code INFO} warning
+   *       ({@code dx/<feature>-recorded-not-wired}) rather than a
+   *       {@link JCustosRuntime#services()} entry — a recorded-but-unwired
+   *       feature must not read as an actively-wired service.</li>
+   * </ul>
+   */
   @SuppressWarnings({"unchecked", "rawtypes"})
   protected final void applyDirectServiceConfiguration(
       List<RegisteredJCustosService> services,

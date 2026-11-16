@@ -59,8 +59,20 @@ public interface JCustosEventEnvelopeStore {
   /**
    * Appends an envelope, assigning it the next position in the stable order.
    *
+   * <p><strong>Atomic (JS-SEC-108):</strong> the method either stores the
+   * envelope and returns its position, or throws and has stored nothing — no
+   * entry, no position, nothing a restart could bring back. The
+   * {@link eu.jsentinel.jcustos.events.bus.DefaultJCustosEventBus} relies on
+   * this: when {@code append} throws, it hands the envelope's sequence back to
+   * the publish pipeline, and the next publish reuses it. An implementation
+   * that persisted the envelope and then threw would leave two envelopes with
+   * the same sequence, one of which every consumer rejects as a repeat. The
+   * shipped stores roll the entry back before they throw.
+   *
    * @param envelope the envelope to store
    * @return the assigned cursor position
+   * @throws RuntimeException if the envelope could not be stored; nothing was
+   *     stored then
    */
   JCustosEventCursor append(SignedJCustosEventEnvelope envelope);
 

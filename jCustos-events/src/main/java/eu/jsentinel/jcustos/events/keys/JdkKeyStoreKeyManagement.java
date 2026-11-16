@@ -37,12 +37,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateExpiredException;
 import java.security.cert.CertificateNotYetValidException;
 import java.security.cert.X509Certificate;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -65,6 +67,17 @@ import java.util.Set;
  * {@code rest-primary-2027}, state the binding with
  * {@link #withProducerBinding(KeyId, Set)}; an explicit binding replaces the
  * alias convention for that key.
+ *
+ * <p>Key ids are matched exactly, too (JS-SEC-101). A JDK key store looks
+ * aliases up case-insensitively — PKCS12 stores them in lower case and finds
+ * {@code VAADIN-CLIENT} under {@code vaadin-client} — so a key id that
+ * differed from the alias in case alone resolved the key, escaped an explicit
+ * binding stated for the alias and was compared with the producer id it
+ * spelled. A key id is therefore accepted only if it equals, character for
+ * character, an alias {@link KeyStore#aliases()} lists; any other spelling is
+ * an unknown key, may not vouch for a producer and cannot sign. Key stores
+ * keep their aliases in lower case, so key ids and current alias should be
+ * lower case as well.
  *
  * <p>Non-goals (Konzept §609): full secret management, HSM, Cloud-KMS. Those
  * can follow later behind the same SPI.
@@ -153,9 +166,26 @@ public final class JdkKeyStoreKeyManagement
     return currentAlias;
   }
 
+  // JS-SEC-101: the alias exactly as the store lists it, or empty. KeyStore's
+  // own lookups (getKey, getCertificate, containsAlias) ignore case.
+  private Optional<String> exactAlias(KeyId keyId) throws KeyStoreException {
+    String wanted = keyId.value();
+    Enumeration<String> aliases = keyStore.aliases();
+    while (aliases.hasMoreElements()) {
+      if (aliases.nextElement().equals(wanted)) {
+        return Optional.of(wanted);
+      }
+    }
+    return Optional.empty();
+  }
+
   @Override
   public PrivateKey currentSigningKey() {
     try {
+      if (exactAlias(currentAlias).isEmpty()) {
+        throw new KeyAccessException("Alias " + currentAlias.value()
+            + " is not in the key store with exactly this spelling", null);
+      }
       java.security.Key key = keyStore.getKey(currentAlias.value(), keyPassword);
       if (!(key instanceof PrivateKey privateKey)) {
         throw new KeyAccessException(
@@ -176,6 +206,9 @@ public final class JdkKeyStoreKeyManagement
   public Optional<PublicKey> resolveVerificationKey(KeyId keyId) {
     Objects.requireNonNull(keyId, "keyId");
     try {
+      if (exactAlias(keyId).isEmpty()) {
+        return Optional.empty();
+      }
       Certificate certificate = keyStore.getCertificate(keyId.value());
       return Optional.ofNullable(certificate).map(Certificate::getPublicKey);
     } catch (GeneralSecurityException e) {
@@ -188,6 +221,13 @@ public final class JdkKeyStoreKeyManagement
     Objects.requireNonNull(keyId, "keyId");
     Objects.requireNonNull(producerId, "producerId");
     Objects.requireNonNull(tenantId, "tenantId");
+    try {
+      if (exactAlias(keyId).isEmpty()) {
+        return false;
+      }
+    } catch (KeyStoreException e) {
+      throw new KeyAccessException("Cannot read the aliases of the key store", e);
+    }
     Set<EventProducerId> bound = producerBindings.get(keyId);
     if (bound != null) {
       return bound.contains(producerId);
@@ -200,7 +240,7 @@ public final class JdkKeyStoreKeyManagement
   public KeyStatus keyStatus(KeyId keyId) {
     Objects.requireNonNull(keyId, "keyId");
     try {
-      if (!keyStore.containsAlias(keyId.value())) {
+      if (exactAlias(keyId).isEmpty()) {
         return KeyStatus.UNKNOWN;
       }
       Certificate certificate = keyStore.getCertificate(keyId.value());

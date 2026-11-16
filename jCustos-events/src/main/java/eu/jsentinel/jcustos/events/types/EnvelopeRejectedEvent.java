@@ -39,16 +39,34 @@ import java.util.Objects;
  * @param metadata variable per-instance metadata
  * @param rejectedEnvelopeId the rejected envelope id
  * @param reason structured rejection reason code
+ * @param keyId the key the envelope's signature verified under, for a
+ *     rejection reached after the signature check that names a key holder —
+ *     {@code key-not-authorized-for-producer} (JS-SEC-101) — so the operator
+ *     knows whose key signed in another producer's name; {@code null}
+ *     otherwise. A {@code null} key id is left out of the canonical form, so
+ *     events without one canonicalise as before (since 00.84.00)
  * @since 00.75.00
  */
 @ExperimentalJCustosApi
-public record EnvelopeRejectedEvent(EventMetadata metadata, String rejectedEnvelopeId, String reason)
+public record EnvelopeRejectedEvent(EventMetadata metadata, String rejectedEnvelopeId,
+    String reason, String keyId)
     implements EventBusSelfObservabilityEvent {
 
   public static final EventType TYPE = EventType.of("EnvelopeRejected");
 
   public EnvelopeRejectedEvent {
     Objects.requireNonNull(metadata, "metadata");
+  }
+
+  /**
+   * A rejection that names no verified key.
+   *
+   * @param metadata variable per-instance metadata
+   * @param rejectedEnvelopeId the rejected envelope id
+   * @param reason structured rejection reason code
+   */
+  public EnvelopeRejectedEvent(EventMetadata metadata, String rejectedEnvelopeId, String reason) {
+    this(metadata, rejectedEnvelopeId, reason, null);
   }
 
   @Override

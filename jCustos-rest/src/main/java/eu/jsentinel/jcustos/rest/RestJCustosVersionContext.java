@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
@@ -67,5 +68,20 @@ public record RestJCustosVersionContext(
     requireNonNull(subjectId, "subjectId must not be null");
     tenant = tenant == null ? TenantId.DEFAULT : tenant;
     requireNonNull(snapshot, "snapshot must not be null");
+  }
+
+  /**
+   * Prints the session reference instead of {@code sessionId} (JS-SEC-117, CWE-532): in
+   * REST the value is all too often the bearer token itself, and the generated
+   * {@code toString()} printed it into any log line or exception message that
+   * stringified the context.
+   *
+   * @return a description that carries {@link SessionRef#ofNullable(String)} of the session id
+   * @since 00.84.00
+   */
+  @Override
+  public String toString() {
+    return "RestJCustosVersionContext[subjectId=" + subjectId + ", tenant=" + tenant
+        + ", snapshot=" + snapshot + ", sessionRef=" + SessionRef.ofNullable(sessionId) + "]";
   }
 }

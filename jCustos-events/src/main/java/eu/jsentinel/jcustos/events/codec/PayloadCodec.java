@@ -54,6 +54,12 @@ public interface PayloadCodec {
   byte[] encode(CanonicalJCustosEventPayload payload);
 
   /**
+   * Decodes bytes this codec encoded. The consume pipeline re-encodes the
+   * result and rejects the envelope unless {@link #encode} reproduces
+   * {@code bytes} exactly (JS-SEC-107), so a codec must decode its own output
+   * into a payload that encodes back to the same bytes; an encoding with more
+   * than one spelling for the same payload is rejected on the consume side.
+   *
    * @param bytes encoded bytes produced by this codec
    * @return the decoded canonical payload
    * @throws PayloadCodecException if the bytes are not valid for this codec

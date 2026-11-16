@@ -51,6 +51,10 @@ import java.util.Optional;
  * JS-SEC-131 (CWE-613): when a {@code SessionStore} is registered with
  * {@link RestSessionRevocation}, a request whose session record was revoked is
  * refused in the same way, with a {@code SessionInvalidated} event.
+ * <p>
+ * An audit sink that fails does not change the decision; since 00.84.00 the
+ * failure is logged as {@code rest/audit-failed}, at most once per
+ * {@link RestSessionRevocation#FAILURE_LOG_INTERVAL}.
  */
 public final class RestAuthenticationFilter {
 
@@ -98,7 +102,8 @@ public final class RestAuthenticationFilter {
       sink.publish(new AccessDenied(
           Instant.now(Clock.systemUTC()), null, request == null ? null : request.path(), reason));
     } catch (RuntimeException auditFailure) {
-      // never block the filter because the audit sink failed
+      // never block the filter because the audit sink failed - but say so
+      RestSessionRevocation.auditFailed(AccessDenied.class, auditFailure);
     }
   }
 
@@ -118,7 +123,8 @@ public final class RestAuthenticationFilter {
           null,
           reason));
     } catch (RuntimeException auditFailure) {
-      // never block the filter because the audit sink failed
+      // never block the filter because the audit sink failed - but say so
+      RestSessionRevocation.auditFailed(SessionExpired.class, auditFailure);
     }
   }
 }

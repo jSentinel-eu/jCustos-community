@@ -18,7 +18,9 @@ import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
+import eu.jsentinel.jcustos.dx.runtime.Severity;
 import eu.jsentinel.jcustos.logout.SubjectClearingLogoutService;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.rest.HttpStatusDecisionMapper;
@@ -110,6 +112,51 @@ class RestSessionRevocationBootstrapTest {
     assertTrue(runtime.services().stream().anyMatch(s -> s.spi() == RestSessionRevocation.class
             && "bootstrap-session-revocation".equals(s.source())),
         "the revocation wiring is listed as in the Vaadin bootstrap, got: " + runtime.services());
+  }
+
+  @Test
+  @DisplayName("XR08: a resolver that keeps the default resolveSessionId makes the wiring inert - reported as a WARNING")
+  void resolverWithoutSessionIds_isReportedAsInert() {
+    RestSubjectResolver withoutSessionIds = request -> Optional.of(
+        new JCustosSubject("alice", "Alice", Set.of(new RoleName("USER")), Set.of()));
+
+    JCustosRuntime runtime = bootstrap()
+        .subjectResolver(withoutSessionIds)
+        .sessions(s -> s.storeBacked(store).timeout(Duration.ofMinutes(15)))
+        .install();
+
+    JCustosBootstrapWarning inert = runtime.warnings().stream()
+        .filter(w -> RestJCustosBootstrapImpl.CODE_SESSION_REVOCATION_INERT.equals(w.code()))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("expected rest/session-revocation-inert, got: "
+            + runtime.warnings()));
+    assertEquals(Severity.WARNING, inert.severity());
+    assertTrue(inert.message().contains(withoutSessionIds.getClass().getName()), inert.message());
+    // the check really is inert: a revoked record does not stop the request
+    store.save(record(SessionStatus.REVOKED));
+    Outcome outcome = new Outcome();
+    new RestAuthenticationFilter(withoutSessionIds).requireAuthenticated(
+        request(), outcome.response, (rq, rs) -> outcome.handlerRan.set(true));
+    assertTrue(outcome.handlerRan.get(), "without session ids the revocation cannot apply");
+  }
+
+  @Test
+  @DisplayName("XR08: a resolver that resolves session ids, or no store at all, is not reported")
+  void resolverWithSessionIds_isNotReported() {
+    JCustosRuntime withStore = bootstrap()
+        .sessions(s -> s.storeBacked(store).timeout(Duration.ofMinutes(15)))
+        .install();
+    assertFalse(withStore.warnings().stream().anyMatch(
+            w -> RestJCustosBootstrapImpl.CODE_SESSION_REVOCATION_INERT.equals(w.code())),
+        "RecordedSessionResolver overrides resolveSessionId: " + withStore.warnings());
+
+    resetGlobals();
+    JCustosRuntime withoutStore = bootstrap()
+        .subjectResolver(request -> Optional.empty())
+        .install();
+    assertFalse(withoutStore.warnings().stream().anyMatch(
+            w -> RestJCustosBootstrapImpl.CODE_SESSION_REVOCATION_INERT.equals(w.code())),
+        "without a store there is no revocation check to be inert: " + withoutStore.warnings());
   }
 
   @Test

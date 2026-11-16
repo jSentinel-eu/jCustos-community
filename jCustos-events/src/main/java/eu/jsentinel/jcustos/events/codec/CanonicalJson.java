@@ -112,7 +112,12 @@ public final class CanonicalJson {
 
   /**
    * Parses a canonical JSON document into {@link Map} / {@link String} /
-   * {@link Long} values.
+   * {@link Long} values. An object that names a key twice is rejected
+   * (since 00.84.00): canonical output never contains one, and parsers
+   * disagree on which of the two values counts.
+   *
+   * @throws PayloadCodecException if the document is malformed, too deeply
+   *     nested or names a key twice
    */
   public static Object parse(String json) {
     Parser parser = new Parser(json);
@@ -187,6 +192,13 @@ public final class CanonicalJson {
         while (true) {
           skipWhitespace();
           String key = parseString();
+          // A canonical document names every key once. A duplicate is read
+          // differently by different parsers (last wins here, first wins in
+          // others), so it is malformed rather than silently resolved.
+          if (map.containsKey(key)) {
+            throw new PayloadCodecException("duplicate key in canonical JSON object at index "
+                + pos);
+          }
           skipWhitespace();
           expect(':');
           skipWhitespace();

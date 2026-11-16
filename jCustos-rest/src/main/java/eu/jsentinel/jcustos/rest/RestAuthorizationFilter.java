@@ -381,7 +381,8 @@ public final class RestAuthorizationFilter {
           null,
           reason));
     } catch (RuntimeException auditFailure) {
-      // never block the filter because the audit sink failed
+      // never block the filter because the audit sink failed - but say so
+      RestSessionRevocation.auditFailed(SessionExpired.class, auditFailure);
     }
   }
 
@@ -413,7 +414,8 @@ public final class RestAuthorizationFilter {
     try {
       sink.publish(event);
     } catch (RuntimeException auditFailure) {
-      // never block authorization because the audit sink failed
+      // never block authorisation because the audit sink failed - but say so
+      RestSessionRevocation.auditFailed(event.getClass(), auditFailure);
     }
 
     // Emit a structured StepUpChallenged event alongside the coarse
@@ -424,7 +426,8 @@ public final class RestAuthorizationFilter {
         sink.publish(new StepUpChallenged(
             now, subjectId, route, stepUp.method(), stepUp.reason()));
       } catch (RuntimeException auditFailure) {
-        // never block authorization because the audit sink failed
+        // never block authorisation because the audit sink failed - but say so
+        RestSessionRevocation.auditFailed(StepUpChallenged.class, auditFailure);
       }
     }
   }

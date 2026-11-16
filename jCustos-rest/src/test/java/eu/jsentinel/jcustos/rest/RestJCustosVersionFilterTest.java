@@ -24,6 +24,7 @@ import eu.jsentinel.jcustos.audit.DefaultCompositeAuditService;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.LoggingAuditSink;
 import eu.jsentinel.jcustos.audit.RingBufferAuditSink;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionStale;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -72,6 +73,21 @@ class RestJCustosVersionFilterTest {
     assertEquals(200, response.status);
     assertTrue(response.headers.isEmpty());
     assertTrue(audit.published.isEmpty());
+  }
+
+  @Test
+  @DisplayName("XR08: the context prints a session reference, never the session id a resolver handed over")
+  void contextToStringCarriesTheReferenceOnly() {
+    RestJCustosVersionContext context = new RestJCustosVersionContext(
+        ALICE, TenantId.DEFAULT, JCustosVersion.INITIAL, BEARER_TOKEN);
+
+    String text = context.toString();
+
+    assertFalse(text.contains(BEARER_TOKEN), text);
+    assertTrue(text.contains("sessionRef=" + SessionRef.of(BEARER_TOKEN)), text);
+    assertTrue(text.contains(ALICE.toString()), text);
+    assertTrue(new RestJCustosVersionContext(ALICE, null, JCustosVersion.INITIAL, null)
+        .toString().contains("sessionRef=null"));
   }
 
   @Test

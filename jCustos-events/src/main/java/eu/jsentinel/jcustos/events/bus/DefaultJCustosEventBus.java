@@ -136,10 +136,30 @@ public final class DefaultJCustosEventBus
       throw rejection;
     }
     if (envelopeStore != null) {
-      envelopeStore.append(envelope);
+      appendOrAbandon(envelope);
     }
     fanOutEnvelope(envelope);
     dispatch(event);
+  }
+
+  // JS-SEC-108 (CWE-754): the pipeline reserved and signed the sequence before
+  // the store saw the envelope. A failed append means — by the contract of
+  // JCustosEventEnvelopeStore.append — that nothing was stored, and the
+  // envelope is neither fanned out nor dispatched, so its sequence is handed
+  // back; otherwise a strict consumer would reject everything behind the hole.
+  // The append failure propagates unchanged; a failing hand-back travels with
+  // it as a suppressed exception.
+  private void appendOrAbandon(SignedJCustosEventEnvelope envelope) {
+    try {
+      envelopeStore.append(envelope);
+    } catch (RuntimeException appendFailure) {
+      try {
+        publishPipeline.abandon(envelope);
+      } catch (RuntimeException releaseFailure) {
+        appendFailure.addSuppressed(releaseFailure);
+      }
+      throw appendFailure;
+    }
   }
 
   // publishAsync delegates to publish() on the executor, so a pipeline

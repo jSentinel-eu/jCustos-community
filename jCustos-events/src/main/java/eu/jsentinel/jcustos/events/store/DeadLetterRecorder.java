@@ -60,7 +60,7 @@ import java.util.function.Supplier;
  *
  * <p>Routing policy — <em>which</em> rejections are dead-lettered at all — is
  * deliberately out of scope here; callers decide what to route into
- * {@link #record(SignedJCustosEventEnvelope, RejectionReason)}.
+ * {@link #record(SignedJCustosEventEnvelope, RejectionReason, boolean)}.
  *
  * @since 00.80.00
  */
@@ -82,29 +82,42 @@ public final class DeadLetterRecorder implements HasLogger {
    * Records a rejected envelope: builds the dead letter, stores it, then
    * emits a {@link DeadLetteredEvent} (reason string is
    * {@link RejectionReason#name()}). Whether the envelope counts as
-   * authenticated is derived from the reason: the cryptographic reasons
-   * ({@code INVALID_SIGNATURE}, {@code UNKNOWN_KEY}, {@code KEY_REVOKED}) do
-   * not. Callers that hold the verification result use
-   * {@link #record(SignedJCustosEventEnvelope, RejectionReason, boolean)}.
+   * authenticated has to be guessed from the reason, and the reason does not
+   * tell: {@code PRODUCER_NOT_ALLOWED} stands both for an authenticated
+   * producer outside the policy and for a key that is not bound to the
+   * producer the envelope claims, whose tenant and id are unverified. The
+   * guess therefore fails closed — {@code INVALID_SIGNATURE},
+   * {@code UNKNOWN_KEY}, {@code KEY_REVOKED} and {@code PRODUCER_NOT_ALLOWED}
+   * count as unauthenticated, so the event never adopts a tenant that may be
+   * forged (since 00.84.00; before, {@code PRODUCER_NOT_ALLOWED} counted as
+   * authenticated).
    *
    * @param envelope the rejected envelope
    * @param reason why it was rejected
    * @return the stored dead-letter record
    * @throws RuntimeException whatever the store throws — a failed store write
    *     is never swallowed
+   * @deprecated the reason alone cannot tell whether the envelope was
+   *     authenticated; use
+   *     {@link #record(SignedJCustosEventEnvelope, RejectionReason, boolean)}
+   *     with {@code JCustosEventVerificationResult.envelopeAuthenticated()}
    */
+  @Deprecated(since = "00.84.00")
   public JCustosEventDeadLetter record(SignedJCustosEventEnvelope envelope,
       RejectionReason reason) {
     Objects.requireNonNull(reason, "reason");
     boolean authenticated = reason != RejectionReason.INVALID_SIGNATURE
         && reason != RejectionReason.UNKNOWN_KEY
-        && reason != RejectionReason.KEY_REVOKED;
+        && reason != RejectionReason.KEY_REVOKED
+        && reason != RejectionReason.PRODUCER_NOT_ALLOWED;
     return record(envelope, reason, authenticated);
   }
 
   /**
-   * Records a rejected envelope, see
-   * {@link #record(SignedJCustosEventEnvelope, RejectionReason)}.
+   * Records a rejected envelope: builds the dead letter, stores it — or folds
+   * it into the open record of the same rejection — then emits a
+   * {@link DeadLetteredEvent} for a newly stored record (reason string is
+   * {@link RejectionReason#name()}).
    *
    * @param envelope the rejected envelope
    * @param reason why it was rejected

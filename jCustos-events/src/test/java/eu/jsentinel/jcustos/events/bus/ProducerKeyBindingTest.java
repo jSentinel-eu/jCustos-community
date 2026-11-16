@@ -35,6 +35,7 @@ import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
 import eu.jsentinel.jcustos.events.codec.CanonicalJsonPayloadCodec;
 import eu.jsentinel.jcustos.events.codec.RecordReflectionCanonicalizer;
 import eu.jsentinel.jcustos.events.keys.InMemoryKeyManagement;
+import eu.jsentinel.jcustos.events.keys.JCustosEventSigningKeyProvider;
 import eu.jsentinel.jcustos.events.keys.JCustosEventVerificationKeyResolver;
 import eu.jsentinel.jcustos.events.keys.JdkKeyStoreKeyManagement;
 import eu.jsentinel.jcustos.events.keys.KeyStatus;
@@ -45,6 +46,7 @@ import eu.jsentinel.jcustos.events.sequence.InMemorySequenceStore;
 import eu.jsentinel.jcustos.events.sequence.SequenceValidator;
 import eu.jsentinel.jcustos.events.sequence.SequenceViolationStrategy;
 import eu.jsentinel.jcustos.events.signature.Ed25519SignatureAlgorithm;
+import eu.jsentinel.jcustos.events.signature.SignatureAlgorithm;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithms;
 import eu.jsentinel.jcustos.events.types.LoginSucceededEvent;
 import eu.jsentinel.jcustos.logout.SubjectId;
@@ -52,6 +54,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.time.Duration;
 import java.time.Instant;
@@ -194,6 +197,65 @@ class ProducerKeyBindingTest {
         consumer.verify(envelope, BusFixtures.T0));
     // The in-memory manager itself is a single-party key holder and accepts it.
     assertTrue(fx.consumePipeline().verify(envelope, BusFixtures.T0).isValid());
+  }
+
+  /** Signs with the private key of {@code heldKey} but stamps {@code stamped} as key id. */
+  private static SignedJCustosEventEnvelope publishStamped(KeyId heldKey, KeyId stamped,
+      EventProducerId claimed, TenantId tenant) {
+    PrivateKey held = keyStore(heldKey).currentSigningKey();
+    JCustosEventSigningKeyProvider respelled = new JCustosEventSigningKeyProvider() {
+      @Override
+      public KeyId currentKeyId() {
+        return stamped;
+      }
+
+      @Override
+      public PrivateKey currentSigningKey() {
+        return held;
+      }
+
+      @Override
+      public SignatureAlgorithm currentAlgorithm() {
+        return new Ed25519SignatureAlgorithm();
+      }
+    };
+    PublishPipeline pipeline = new PublishPipeline(respelled,
+        new RecordReflectionCanonicalizer(), new CanonicalJsonPayloadCodec(),
+        PayloadHashAlgorithm.SHA_256, claimed, new InMemorySequenceStore(),
+        new InMemoryReplayStore(),
+        AllowListProducerPolicy.builder().allow(claimed, LoginSucceededEvent.TYPE).build(),
+        Duration.ofMinutes(5), () -> T0);
+    return pipeline.toEnvelope(new LoginSucceededEvent(
+        EventMetadata.create(tenant, SubjectId.of("alice"), T0, JCustosEventSeverity.INFO),
+        "password"));
+  }
+
+  @Test
+  @DisplayName("a key id that differs from the store alias in case alone is an unknown key")
+  void keyIdMustMatchTheAliasExactly() {
+    KeyId shouted = KeyId.of("VAADIN-CLIENT");
+    EventProducerId shoutedProducer = EventProducerId.of("VAADIN-CLIENT");
+    // The operator retired the UI key: it is bound to no producer any more.
+    JdkKeyStoreKeyManagement retired = keyStore(REST_KEY)
+        .withProducerBinding(VAADIN_KEY, Set.of());
+
+    assertTrue(retired.resolveVerificationKey(VAADIN_KEY).isPresent());
+    assertTrue(retired.resolveVerificationKey(shouted).isEmpty(),
+        "the PKCS12 store would find vaadin-client under VAADIN-CLIENT");
+    assertEquals(KeyStatus.UNKNOWN, retired.keyStatus(shouted));
+    assertFalse(retired.mayVerify(shouted, shoutedProducer, ACME),
+        "a respelled key id must not escape the binding stated for the alias");
+
+    // The holder of the retired key signs under the respelled id, for a producer
+    // id spelled the same way, which a consumer has allow-listed.
+    SignedJCustosEventEnvelope respelled = publishStamped(VAADIN_KEY, shouted,
+        shoutedProducer, ACME);
+    ConsumePipeline consumer = new ConsumePipeline(retired, SignatureAlgorithms.defaults(),
+        consumeReplay, consumeSequence, new SequenceValidator(), SequenceViolationStrategy.REJECT,
+        AllowListProducerPolicy.builder().allow(shoutedProducer, LoginSucceededEvent.TYPE).build());
+
+    assertInstanceOf(JCustosEventVerificationResult.UnknownKey.class,
+        consumer.verify(respelled, T0));
   }
 
   @Test

@@ -59,7 +59,8 @@ import java.util.function.Supplier;
  *
  * <p>The sequence is reserved as late as the signature base allows and handed
  * back if a later stage fails (JS-SEC-108), so a publish that produces no
- * envelope does not leave a hole in the producer's sequence.
+ * envelope does not leave a hole in the producer's sequence. An envelope that
+ * was produced but could not be stored is handed back with {@link #abandon}.
  *
  * @since 00.75.00
  */
@@ -179,6 +180,41 @@ public final class PublishPipeline {
       }
       throw failure;
     }
+  }
+
+  /**
+   * Hands back the sequence of an envelope this pipeline produced that will
+   * never be delivered (JS-SEC-108) — the caller could not store it, so it is
+   * neither fanned out nor sent. Without this a strict consumer
+   * ({@code maxTolerableGap} 0, {@code REJECT}) rejects every later envelope of
+   * the producer, because the abandoned sequence is a hole it never sees.
+   *
+   * <p>Call it only when the envelope demonstrably went nowhere: a sequence
+   * handed back is reserved again by the next publish, so an envelope that was
+   * stored or sent after all would share its sequence with that next envelope,
+   * and a consumer would reject one of the two as a repeat. The
+   * {@link DefaultJCustosEventBus} calls it when
+   * {@link eu.jsentinel.jcustos.events.store.JCustosEventEnvelopeStore#append}
+   * throws, which by that method's contract means nothing was stored.
+   *
+   * <p>Like the hand-back inside {@link #toEnvelope}, this is best effort: if a
+   * concurrent publish already reserved a later sequence, the hole stays and
+   * {@code false} is returned (see
+   * {@link JCustosEventSequenceStore#releaseReservation}).
+   *
+   * @param envelope an envelope returned by {@link #toEnvelope} of this pipeline
+   * @return {@code true} iff the sequence was handed back
+   * @throws IllegalArgumentException if the envelope names another producer
+   * @since 00.84.00
+   */
+  public boolean abandon(SignedJCustosEventEnvelope envelope) {
+    Objects.requireNonNull(envelope, "envelope");
+    if (!producerId.equals(envelope.producerId())) {
+      throw new IllegalArgumentException(
+          "Only an envelope of this pipeline's producer can be abandoned");
+    }
+    return sequenceStore.releaseReservation(envelope.tenantId(), producerId,
+        envelope.sequence());
   }
 
   // The message names the field only: the value is caller-supplied and, being

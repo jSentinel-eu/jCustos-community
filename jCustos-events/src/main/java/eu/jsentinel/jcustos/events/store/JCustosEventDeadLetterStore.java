@@ -41,13 +41,22 @@ import java.util.Objects;
 public interface JCustosEventDeadLetterStore {
 
   /**
-   * Stores a dead-letter record.
+   * Stores a dead-letter record, unless an open record of the same rejection
+   * is already there.
    *
    * <p>A dead-letter store keeps whole rejected envelopes, and a sender needs
    * no key to have one rejected. Implementations therefore have to bound the
    * number of open records they retain (JS-SEC-109, CWE-770) — the shipped
    * in-memory store evicts the oldest open record once its capacity is
    * reached.
+   *
+   * <p>Implementations may fold the record into an open record of the same
+   * rejection exactly as {@link #storeOrMerge} does; the shipped stores do.
+   * The id of {@code deadLetter} then never exists in the store, and a later
+   * eviction can remove the record before anyone looks. This method cannot
+   * tell the caller either way: a caller that needs the record standing for
+   * the rejection — to show its id, to {@link #markResolved} it — calls
+   * {@link #storeOrMerge} and uses the id of the record it returns.
    *
    * @param deadLetter the record
    */

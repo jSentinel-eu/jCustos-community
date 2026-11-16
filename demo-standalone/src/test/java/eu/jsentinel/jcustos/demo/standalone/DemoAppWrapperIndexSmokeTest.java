@@ -59,6 +59,11 @@ class DemoAppWrapperIndexSmokeTest {
         "expected addMember/removeMember/resetAll in delegated methods; got: "
             + memberDir.delegatedMethods());
     assertEquals("proxybuilder", memberDir.processor());
-    assertEquals("00.11.00", memberDir.proxyBuilderVersion());
+    // XR08 (00.84.00): the index names the proxybuilder release on the processor path, read
+    // from its jar - 00.11.01 today. A build of this module without jCustos-processor in the
+    // reactor takes the processor from the local repository, which may still be one that
+    // wrote the 00.11.00 literal; the assertion holds for both.
+    assertTrue(memberDir.proxyBuilderVersion().matches("\\d{2}\\.\\d{2}\\.\\d{2}"),
+        "expected a proxybuilder release number, got " + memberDir.proxyBuilderVersion());
   }
 }

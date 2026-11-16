@@ -25,10 +25,12 @@ import java.lang.annotation.Target;
  * {@code TokenExchangeStrategy}).
  *
  * <p>Meta-annotated with
- * {@link JCustosAnnotation @JCustosAnnotation(PropagateTokenAdvisor.class)}
- * so the V00.70 {@code JCustosAnnotationScanner} discovers it
- * through the same cache as {@code @RequiresRole} /
- * {@code @RequiresPermission}.
+ * {@link JCustosAnnotation @JCustosAnnotation(PropagateTokenAdvisor.class)}.
+ * {@code PropagateTokenAdvisor} is not an evaluator, so since 00.84.00 the
+ * restriction scanner ({@code JCustosAnnotationScanner}) does not take the
+ * annotation for a restriction: it neither guards an element nor keeps
+ * deny-by-default from applying to it. The propagation paths read it
+ * directly from the method or the contract type.
  *
  * <p>Resolution at runtime (V00.74 Prompts 008 + 011 + 013):
  * <ul>

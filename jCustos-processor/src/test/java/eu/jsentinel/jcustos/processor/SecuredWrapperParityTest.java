@@ -367,6 +367,32 @@ class SecuredWrapperParityTest {
       "    public String classLevel() { return \"ok\"; }",
       "}");
 
+  /**
+   * XR08 (00.84.00): {@code @PropagateToken} is bound through {@code @JCustosAnnotation}
+   * to a propagation advisor, not to an evaluator - on the class and on a method it is no
+   * restriction for either path, so deny-by-default and the other restrictions apply.
+   */
+  private static final JavaFileObject PROPAGATING = JavaFileObjects.forSourceLines(
+      "fixture.Propagating",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.annotations.PropagateToken;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@Secured",
+      "@PropagateToken",
+      "public class Propagating {",
+      "    public String unguarded() { return \"ok\"; }",
+      "    @PropagateToken(strategy = \"exchange\", audience = \"billing\")",
+      "    public String propagatesItself() { return \"ok\"; }",
+      "    @RequiresRole(\"ADMIN\")",
+      "    public String nativeRole() { return \"ok\"; }",
+      "    @PropagateToken",
+      "    @AdminOnly",
+      "    public String customNextToPropagation() { return \"ok\"; }",
+      "    @PublicRoute",
+      "    public String publicRoute() { return \"ok\"; }",
+      "}");
+
   private static final List<String> FIXTURES = List.of(
       "fixture.Plain",
       "fixture.NativeClassGuard",
@@ -379,7 +405,8 @@ class SecuredWrapperParityTest {
       "fixture.OverridesUnderNativeGuard",
       "fixture.OverridesUnderCustomGuard",
       "fixture.OverridesUnderInheritedGuard",
-      "fixture.ComposedOnMethod");
+      "fixture.ComposedOnMethod",
+      "fixture.Propagating");
 
   /** Subject name to roles and permissions; {@code null} is the anonymous caller. */
   private static final Map<String, List<Set<String>>> SUBJECTS = subjects();
@@ -394,7 +421,7 @@ class SecuredWrapperParityTest {
         OVERRIDES_GUARD, MARKED, IMPLEMENTS_MARKED, PUBLIC_CLASS,
         GUARDED_CONTRACT, RESTRICTED_BASE, OVERRIDES_BARE, OVERRIDES_UNDER_NATIVE_GUARD,
         OVERRIDES_UNDER_CUSTOM_GUARD, GUARDED_BASE, OVERRIDES_UNDER_INHERITED_GUARD,
-        COMPOSED_ADMIN, COMPOSED_ON_METHOD,
+        COMPOSED_ADMIN, COMPOSED_ON_METHOD, PROPAGATING,
         WrapperFixtures.OWNER_ONLY, WrapperFixtures.ADMIN_ONLY,
         WrapperFixtures.ADMIN_ONLY_EVALUATOR);
   }
@@ -471,6 +498,8 @@ class SecuredWrapperParityTest {
         "fromInterface", "fromInterfaceAnyPermission", "fromInterfaceCustom",
         "fromInterfaceDefault", "fromSuperclassCustom", "fromSuperclassNative"));
     expected.put("fixture.ComposedOnMethod", List.of("classLevel", "composed"));
+    expected.put("fixture.Propagating", List.of(
+        "customNextToPropagation", "nativeRole", "propagatesItself", "publicRoute", "unguarded"));
     for (Map.Entry<String, List<String>> entry : expected.entrySet()) {
       Class<?> fixture = harness.load(entry.getKey());
       List<String> names = guardedSurface(fixture).stream().map(Method::getName).toList();
@@ -549,6 +578,55 @@ class SecuredWrapperParityTest {
       String runTime = decide(() -> runTimeCheck(fixture, method));
       String generated = decide(() -> GeneratedWrapperHarness.call(wrapper, method.getName()));
       String where = expectation[0] + "#" + expectation[1] + " subject=" + expectation[2];
+      if (!expectation[3].equals(runTime)) {
+        wrong.add(where + ": run-time path " + runTime + ", expected " + expectation[3]);
+      }
+      if (!expectation[3].equals(generated)) {
+        wrong.add(where + ": generated wrapper " + generated + ", expected " + expectation[3]);
+      }
+    }
+    assertTrue(wrong.isEmpty(), String.join("\n", wrong));
+  }
+
+  /**
+   * XR08 (00.84.00): parity would also hold if both paths had taken {@code @PropagateToken}
+   * for a restriction and failed alike. The decisions are pinned under deny-by-default,
+   * where a method without a restriction is denied and only {@code @PublicRoute} opens it.
+   */
+  @Test
+  @DisplayName("XR08: class-level @PropagateToken leaves deny-by-default in force, on both paths")
+  void propagateTokenDoesNotSuspendDenyByDefault() {
+    List<String[]> expectations = List.of(
+        // method, subject, deny-by-default, expected decision
+        new String[] {"unguarded", "admin", "true", DENIED},
+        new String[] {"unguarded", "admin", "false", ALLOWED},
+        new String[] {"propagatesItself", "admin", "true", DENIED},
+        new String[] {"nativeRole", "reader", "true", DENIED},
+        new String[] {"nativeRole", "admin", "true", ALLOWED},
+        new String[] {"customNextToPropagation", "admin", "true", ALLOWED},
+        new String[] {"customNextToPropagation", "owner", "false", DENIED},
+        new String[] {"publicRoute", "anonymous", "true", ALLOWED});
+
+    Class<?> fixture = harness.load("fixture.Propagating");
+    Object wrapper = harness.newWrapper("fixture.Propagating");
+    List<String> wrong = new ArrayList<>();
+    for (String[] expectation : expectations) {
+      Method method = guardedSurface(fixture).stream()
+          .filter(candidate -> candidate.getName().equals(expectation[0]))
+          .findFirst()
+          .orElseThrow(() -> new AssertionError("fixture.Propagating has no " + expectation[0]));
+      JCustosServiceResolver.setDenyByDefault(Boolean.parseBoolean(expectation[2]));
+      assertTrue(SUBJECTS.containsKey(expectation[1]), "unknown subject " + expectation[1]);
+      List<Set<String>> grants = SUBJECTS.get(expectation[1]);
+      if (grants == null) {
+        GeneratedWrapperHarness.unbindSubject();
+      } else {
+        GeneratedWrapperHarness.bindSubject(expectation[1], grants.get(0), grants.get(1));
+      }
+      String runTime = decide(() -> runTimeCheck(fixture, method));
+      String generated = decide(() -> GeneratedWrapperHarness.call(wrapper, method.getName()));
+      String where = "Propagating#" + expectation[0] + " subject=" + expectation[1]
+          + " denyByDefault=" + expectation[2];
       if (!expectation[3].equals(runTime)) {
         wrong.add(where + ": run-time path " + runTime + ", expected " + expectation[3]);
       }

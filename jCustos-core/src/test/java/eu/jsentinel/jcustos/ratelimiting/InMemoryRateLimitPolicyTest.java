@@ -236,6 +236,40 @@ class InMemoryRateLimitPolicyTest {
   }
 
   @Test
+  @DisplayName("a limit above the store's per-key bound is refused, not capped without a word")
+  void limitAboveTheStoreBoundIsRefused() {
+    CollectingAuditService audit = new CollectingAuditService();
+    InMemoryRateLimitStore small = new InMemoryRateLimitStore(10, 3);
+    assertEquals(3, small.maxEventsPerKey());
+
+    IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+        () -> new InMemoryRateLimitPolicy(small, audit, 4, Duration.ofMinutes(1), fixed(T0)));
+    assertTrue(refused.getMessage().contains("limit 4 exceeds the 3 events"),
+        refused.getMessage());
+    int defaultBound = InMemoryRateLimitStore.DEFAULT_MAX_EVENTS_PER_KEY;
+    assertThrows(IllegalArgumentException.class, () -> new InMemoryRateLimitPolicy(
+        new InMemoryRateLimitStore(), audit, defaultBound + 1, Duration.ofMinutes(1)));
+
+    // at the bound the configured limit is reached exactly
+    InMemoryRateLimitPolicy atBound = new InMemoryRateLimitPolicy(
+        small, audit, 3, Duration.ofMinutes(1), fixed(T0));
+    for (int i = 0; i < 3; i++) {
+      assertInstanceOf(RateLimitDecision.Allowed.class, atBound.tryAcquire(IP_KEY));
+    }
+    assertInstanceOf(RateLimitDecision.Throttled.class, atBound.tryAcquire(IP_KEY));
+    // a store that declares no bound accepts any positive limit
+    RateLimitStore unbounded = new RateLimitStore() {
+      @Override public void recordEvent(RateLimitKey key, Instant at) { }
+      @Override public int countSince(RateLimitKey key, Instant since) { return 0; }
+      @Override public void reset(RateLimitKey key) { }
+      @Override public int purgeOlderThan(Instant cutoff) { return 0; }
+    };
+    assertEquals(Integer.MAX_VALUE, unbounded.maxEventsPerKey());
+    assertEquals(defaultBound + 1, new InMemoryRateLimitPolicy(
+        unbounded, audit, defaultBound + 1, Duration.ofMinutes(1)).limit());
+  }
+
+  @Test
   @DisplayName("limit() / window() expose the configured values")
   void exposeConfiguration() {
     InMemoryRateLimitPolicy policy = new InMemoryRateLimitPolicy(

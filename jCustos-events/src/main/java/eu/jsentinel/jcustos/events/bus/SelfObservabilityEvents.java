@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.events.bus;
  * #L%
  */
 
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.events.api.EventMetadata;
@@ -211,8 +212,13 @@ public final class SelfObservabilityEvents {
           rejected(envelope, now, REASON_KEY_REVOKED, authenticated);
       case JCustosEventVerificationResult.KeyExpired ignored ->
           rejected(envelope, now, REASON_KEY_EXPIRED, authenticated);
-      case JCustosEventVerificationResult.KeyNotAuthorizedForProducer ignored ->
-          rejected(envelope, now, REASON_KEY_NOT_AUTHORIZED, authenticated);
+      // The signature verified under this key, so the key id is a fact even
+      // though the producer the envelope claims is not (JS-SEC-101).
+      case JCustosEventVerificationResult.KeyNotAuthorizedForProducer unbound ->
+          Optional.of(new EnvelopeRejectedEvent(
+              failureMetadata(envelope, now, JCustosEventSeverity.ERROR, authenticated),
+              reportedId(envelope.envelopeId().value(), authenticated),
+              REASON_KEY_NOT_AUTHORIZED, unbound.keyId().value()));
       case JCustosEventVerificationResult.Expired ignored ->
           rejected(envelope, now, REASON_EXPIRED, authenticated);
       case JCustosEventVerificationResult.ProducerNotAllowed ignored ->
@@ -225,13 +231,17 @@ public final class SelfObservabilityEvents {
   /**
    * Renders an envelope id claimed by an unauthenticated envelope: the
    * {@link #UNVERIFIED_ID_PREFIX} followed by at most
-   * {@link #MAX_UNVERIFIED_ID_LENGTH} code points of the claim. The marker
-   * keeps a reader from correlating the id with a genuine envelope, the clip
-   * keeps a sender from inflating every event, alert and audit entry with an
-   * id of its own length.
+   * {@link #MAX_UNVERIFIED_ID_LENGTH} code points of the claim, scrubbed with
+   * {@link LogFieldScrubber#scrub(String)}. The marker keeps a reader from
+   * correlating the id with a genuine envelope, the clip keeps a sender from
+   * inflating every event, alert and audit entry with an id of its own
+   * length, and the scrub keeps line terminators (CR, LF, U+2028), bidi and
+   * other format characters, spaces and unpaired surrogates of the sender's
+   * choosing out of every log line and export the event reaches
+   * (JS-SEC-110). Each replaced code point becomes one {@code '?'}.
    *
    * @param claimedId the id as the envelope states it
-   * @return the marked, clipped form
+   * @return the marked, clipped, scrubbed form
    * @since 00.84.00
    */
   public static String unverifiedId(String claimedId) {
@@ -240,7 +250,7 @@ public final class SelfObservabilityEvents {
     String clipped = codePoints <= MAX_UNVERIFIED_ID_LENGTH
         ? claimedId
         : claimedId.substring(0, claimedId.offsetByCodePoints(0, MAX_UNVERIFIED_ID_LENGTH));
-    return UNVERIFIED_ID_PREFIX + clipped;
+    return UNVERIFIED_ID_PREFIX + LogFieldScrubber.scrub(clipped);
   }
 
   /**

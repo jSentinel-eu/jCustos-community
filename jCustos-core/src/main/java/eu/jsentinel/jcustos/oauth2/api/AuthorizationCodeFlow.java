@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.oauth2.api;
 
 import com.svenruppert.functional.result.Result;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 
 import java.net.URI;
 import java.util.Map;
@@ -130,15 +131,22 @@ public interface AuthorizationCodeFlow {
      * tokens, and the generated {@code toString()} printed it into any log line or exception
      * message that stringified the parameters.
      *
-     * @return a description without the code
+     * <p>Since 00.84.00 the {@code state} is masked as well - it is the key of the
+     * pending login, and a log reader must not be able to complete it - and the values
+     * the sender of the callback chooses freely ({@code error}, {@code error_description},
+     * {@code iss}) are scrubbed with {@link LogFieldScrubber}, so they can forge no log
+     * line (CWE-117).
+     *
+     * @return a description without code and state
      */
     @Override
     public String toString() {
       return "CallbackParams[code=" + (code.isPresent() ? "***" : "<none>")
-          + ", state=" + state
-          + ", error=" + error.orElse("<none>")
-          + ", errorDescription=" + errorDescription.orElse("<none>")
-          + ", iss=" + iss.orElse("<none>") + "]";
+          + ", state=" + (state.isEmpty() ? "<empty>" : "***")
+          + ", error=" + error.map(LogFieldScrubber::scrub).orElse("<none>")
+          + ", errorDescription="
+          + errorDescription.map(LogFieldScrubber::scrubMessage).orElse("<none>")
+          + ", iss=" + iss.map(LogFieldScrubber::scrub).orElse("<none>") + "]";
     }
   }
 }

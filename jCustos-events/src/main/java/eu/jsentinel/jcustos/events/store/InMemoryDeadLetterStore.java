@@ -105,6 +105,13 @@ public final class InMemoryDeadLetterStore implements JCustosEventDeadLetterStor
     this.capacity = capacity;
   }
 
+  /**
+   * Same as {@link #storeOrMerge} without its result: a repeat of an open
+   * rejection is folded into that record, and {@code deadLetter}'s own id is
+   * then not stored — see {@link JCustosEventDeadLetterStore#store}.
+   *
+   * @param deadLetter the record
+   */
   @Override
   public void store(JCustosEventDeadLetter deadLetter) {
     storeOrMerge(deadLetter);

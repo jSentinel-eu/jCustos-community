@@ -180,6 +180,9 @@ class SelfObservabilityEventsTest {
     String id = ENVELOPE.envelopeId().value();
     assertEquals(result.envelopeAuthenticated() ? id : "unverified:" + id,
         event.rejectedEnvelopeId());
+    // Only the key-holder rejection names the key the signature verified under.
+    assertEquals(result instanceof JCustosEventVerificationResult.KeyNotAuthorizedForProducer
+        ? ENVELOPE.keyId().value() : null, event.keyId(), name);
   }
 
   @Test
@@ -315,5 +318,22 @@ class SelfObservabilityEventsTest {
     String clipped = SelfObservabilityEvents.unverifiedId(emoji.repeat(100));
     assertEquals("unverified:" + emoji.repeat(64), clipped);
     assertEquals("unverified:short", SelfObservabilityEvents.unverifiedId("short"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-110: unverifiedId scrubs separators, bidi controls and lone surrogates")
+  void unverifiedIdIsScrubbed() {
+    String hostile = "a\r\nb\u2028c\u202Ed e\u0085f" + '\uD800' + "g";
+
+    assertEquals("unverified:a??b?c?d?e?f?g", SelfObservabilityEvents.unverifiedId(hostile));
+    // The clip still counts the claim's code points: 64 of them, each one a '?' at most.
+    String scrubbedClip = SelfObservabilityEvents.unverifiedId("\n".repeat(100));
+    assertEquals("unverified:" + "?".repeat(64), scrubbedClip);
+
+    SignedJCustosEventEnvelope junk = claiming("victim-tenant", "forged\nINFO admin ok");
+    EnvelopeRejectedEvent event = (EnvelopeRejectedEvent) SelfObservabilityEvents
+        .fromVerification(new JCustosEventVerificationResult.UnknownKey(junk.keyId()), junk, NOW)
+        .orElseThrow();
+    assertEquals("unverified:forged?INFO?admin?ok", event.rejectedEnvelopeId());
   }
 }

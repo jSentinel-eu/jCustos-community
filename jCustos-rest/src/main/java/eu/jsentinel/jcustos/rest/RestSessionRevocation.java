@@ -30,6 +30,7 @@ import eu.jsentinel.jcustos.session.SessionStatus;
 import eu.jsentinel.jcustos.session.SessionStore;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -82,8 +83,8 @@ import static java.util.Objects.requireNonNull;
  * the id. The handler does not run, whatever the mapper returns.
  *
  * <p><strong>Failure and side effects.</strong> A store that throws must not log every
- * user out: the failure is logged and the request proceeds to the lifetime and
- * authorisation checks. The check only reads. It never writes a record - not even the
+ * user out: the failure is logged - at most once per {@link #FAILURE_LOG_INTERVAL}, the
+ * rest counted - and the request proceeds to the lifetime and authorisation checks. The check only reads. It never writes a record - not even the
  * last-activity instant - because {@link SessionStore} offers no atomic update, and a
  * read-modify-write on the request path could bring back a record an administrator
  * removed in the same moment.
@@ -118,6 +119,28 @@ public final class RestSessionRevocation {
    * megabytes.
    */
   public static final int SEEN_CAPACITY = 10_000;
+
+  /**
+   * Minimum time between two WARN lines about the same failure of the REST filters: a
+   * session store that cannot be read, an audit sink that refuses an event. The filters go
+   * on without them, and one line per request would bury the log during an outage; the
+   * occurrences in between are counted and named in the next line.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration FAILURE_LOG_INTERVAL = Duration.ofMinutes(1);
+
+  /** WARN code: the session store failed, the revocation check was skipped. */
+  static final String CODE_STORE_FAILED = "rest/session-revocation-store-failed";
+
+  /** WARN code: the audit sink refused an event of a REST filter. */
+  static final String CODE_AUDIT_FAILED = "rest/audit-failed";
+
+  static final RateLimitedWarning STORE_FAILURES = new RateLimitedWarning(
+      CODE_STORE_FAILED, FAILURE_LOG_INTERVAL, HasLogger.staticLogger());
+
+  static final RateLimitedWarning AUDIT_FAILURES = new RateLimitedWarning(
+      CODE_AUDIT_FAILED, FAILURE_LOG_INTERVAL, HasLogger.staticLogger());
 
   private static final AtomicReference<SessionStore> STORE = new AtomicReference<>();
 
@@ -251,8 +274,10 @@ public final class RestSessionRevocation {
       record = store.findById(sessionId);
     } catch (RuntimeException storeFailure) {
       // An unreachable store must not refuse every request; lifetime and drift checks still run.
-      HasLogger.staticLogger().warn("Session revocation check skipped, the SessionStore failed: {}",
-          storeFailure.toString());
+      // The type only: the message of a store failure may quote the session key.
+      STORE_FAILURES.warn("the SessionStore failed (" + storeFailure.getClass().getName()
+          + "), the revocation check was skipped and the request proceeds. A revoked session "
+          + "is not recognised until the store answers again.");
       return Optional.empty();
     }
     String reference = SessionRef.of(sessionId.value());
@@ -278,8 +303,19 @@ public final class RestSessionRevocation {
           SessionRef.of(sessionId.value()),
           REASON_REVOKED));
     } catch (RuntimeException auditFailure) {
-      // never serve a revoked session because the audit sink failed
+      // never serve a revoked session because the audit sink failed - but say so
+      auditFailed(SessionInvalidated.class, auditFailure);
     }
+  }
+
+  /**
+   * Announces an audit event a REST filter could not publish (ER13, CWE-778): the request
+   * decision stands, the event is lost. Rate-limited, see {@link #FAILURE_LOG_INTERVAL}.
+   */
+  static void auditFailed(Class<?> eventType, RuntimeException auditFailure) {
+    AUDIT_FAILURES.warn("the audit sink failed (" + auditFailure.getClass().getName()
+        + ") to publish " + eventType.getSimpleName() + "; the event is lost, the request "
+        + "decision stands. Check the configured JCustosAuditService.");
   }
 
   private static void rememberSeen(String reference) {

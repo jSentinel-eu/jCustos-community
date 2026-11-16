@@ -1737,7 +1737,7 @@ nothing pinned it. The parity test now covers interface methods with `@RequiresR
 `@RequiresAnyPermission`, a consumer-defined restriction and a `default` method, and superclass
 methods with a native, an `@ProtectedBy` and a consumer-defined restriction, each overridden without
 annotation under no class-level restriction, a native, a custom and an inherited one, and with
-`@PublicRoute` on the override: 888 decisions over twelve fixture classes are identical on the
+`@PublicRoute` on the override: 948 decisions over thirteen fixture classes (after the exit-review addition of `@PropagateToken` fixtures) are identical on the
 `SecuredProxy` path and in the wrapper, and the decisions for these cases are also pinned
 explicitly. The run-time scanner is the reference: a class-level restriction of the `@Secured`
 class, declared or inherited, takes precedence over the restriction of the overridden declaration,
@@ -2032,6 +2032,92 @@ warning. `PasswordChangeResult.VerificationUnavailable`, `LoginAttemptStore.Atte
 `LoginAttemptStore.AttemptStatus` and `AtomicLoginAttemptStoreContract` now carry
 `@ExperimentalJCustosApi`. **Consumers:** point the storage at the directory a link targets, not at
 the link.
+
+## A sequence is no longer lost when the envelope store refuses an envelope (addition to SA08, JS-SEC-108, CWE-754)
+
+`DefaultJCustosEventBus.publish` appended the signed envelope to the envelope store after the
+publish pipeline had reserved and signed its sequence, outside the hand-back SA08 introduced; when
+`append` threw, the reservation stayed and a strict consumer (`maxTolerableGap` 0, `REJECT`)
+rejected every later envelope of the producer. The bus now hands the sequence back through the new
+`PublishPipeline.abandon(envelope)` before the append failure propagates unchanged.
+`JCustosEventEnvelopeStore.append` is documented as atomic: it stores the envelope, or it throws and
+has stored nothing. **Consumers:** custom envelope stores must honour that contract.
+
+## The `@Secured` processor reports every restriction its wrapper cannot enforce, and `@PropagateToken` is no restriction (addition to SA56 and SA59, JS-SEC-156, JS-SEC-159, CWE-862)
+
+The processor checked only the method's own annotation when the wrapper left a method out: an
+unannotated override of a restricted interface or superclass method excluded through `@SkipProxy`,
+`excludeMethodNames` or a protected override compiled silently and the wrapper ran it for everyone,
+and a class-level restriction on an excluded public method went unreported. Such methods are now the
+compile error `processing/unenforceable-security-annotation`; an excluded public method with no
+restriction at all is the warning `processing/deny-by-default-not-applied`. Scanner and processor
+count only annotations that `@JCustosAnnotation` binds to an `AccessEvaluator` or
+`AuthorizationEvaluator`: a class-level `@PropagateToken` used to make the enforcer fail on every
+call and the wrapper leave methods unguarded under deny-by-default; it is now ignored on both paths.
+A restriction composed more than one level deep used to protect nothing; it is now the compile error
+`processing/nested-composed-security-annotation`, and the scanner refuses it at run time. The
+wrapper index names the proxybuilder release that generated the wrapper. **Consumers:** expect new
+compile errors for these cases; `@PropagateToken` next to a restriction is no longer "more than one
+annotation".
+
+## A rate limit above the store's per-key bound is refused, not capped (addition to SA18, JS-SEC-118, CWE-684, CWE-770)
+
+`InMemoryRateLimitStore` keeps at most `maxEventsPerKey` events per key (default 10 000), so a
+policy configured with a higher limit was capped without a word. `RateLimitStore` now declares its
+bound (`maxEventsPerKey()`; the in-memory and Eclipse-Store stores report theirs), and
+`InMemoryRateLimitPolicy` refuses a larger limit at construction. **Consumers:** lower the limit, or
+construct the store with a larger bound.
+
+## OAuth2 callback parameters and the REST version context print no secrets (addition to SA27 and SA17, JS-SEC-127, JS-SEC-117, CWE-532, CWE-117)
+
+`AuthorizationCodeFlow.CallbackParams.toString()` printed the `state` and the freely chosen `error`,
+`error_description` and `iss` values unscrubbed; the state is masked now and the three fields are
+scrubbed. `RestJCustosVersionContext` printed `sessionId` — in REST usually the bearer token; it
+prints the `SessionRef` now, and the jCustos-rest record guard treats a `sessionId` component as
+secret-bearing.
+
+## An inert REST revocation check is reported, and REST store outages and lost audit events are logged at most once a minute (addition to SA31, JS-SEC-131, CWE-684, CWE-613, CWE-778, CWE-779)
+
+A REST bootstrap with `.storeBacked(...)` lists `bootstrap-session-revocation`, but with a subject
+resolver that keeps the default `resolveSessionId` the check finds no session for any request; the
+bootstrap now reports the WARNING `rest/session-revocation-inert`. The REST filters swallowed a
+failing audit sink without a word, and the revocation check logged one WARN with the exception text
+per request while the session store was down; both are now logged as `rest/audit-failed` and
+`rest/session-revocation-store-failed`, at most one line per
+`RestSessionRevocation.FAILURE_LOG_INTERVAL` (one minute), with exception types only. **Consumers:**
+override `RestSubjectResolver.resolveSessionId(...)` or drop `.storeBacked(...)`; alert on the two
+codes.
+
+## Key-holder impersonation is reported with its key and cannot be hidden behind junk; key ids must name their alias exactly (addition to SA01 and SA04, JS-SEC-101, JS-SEC-104, CWE-778, CWE-770, CWE-178, CWE-290)
+
+A `KeyNotAuthorizedForProducer` rejection shared the throttle budget for unsigned junk, so a key
+holder could spend it with unsigned envelopes and then sign in another producer's name unreported.
+These rejections now have a budget of their own (`DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT` per
+`DEFAULT_KEY_NOT_AUTHORIZED_EVENT_WINDOW`, `suppressedKeyNotAuthorizedCount()`), and
+`EnvelopeRejectedEvent` carries the verified key id in the new `keyId` component.
+`JdkKeyStoreKeyManagement` looked keys up case-insensitively (`VAADIN-CLIENT` resolved
+`vaadin-client`); a key id is now accepted only if it equals an alias the store lists.
+**Consumers:** the three-argument `EnvelopeRejectedEvent` constructor stays, record patterns need
+the fourth component; use the lower-case aliases PKCS12 stores as key ids.
+
+## A signed payload must be canonical (addition to SA07, JS-SEC-107, CWE-436, CWE-347)
+
+The payload check decoded the signed payload with a parser on which the last of two equal keys wins
+and did not require the canonical form, so a payload with two `tenantId` keys could be read
+differently downstream. `CanonicalJson.parse` now rejects duplicate keys, and the consume pipeline
+rejects a payload unless re-encoding the decoded payload reproduces the signed bytes
+(`PayloadMetadataMismatch`, field `canonicalPayload`). **Consumers:** producers outside jCustos must
+write exactly the canonical form; a custom `PayloadCodec` must round-trip its own output.
+
+## Dead-letter events follow the throttle, and unverified ids are scrubbed (addition to SA09, SA04 and SA10, JS-SEC-109, JS-SEC-104, JS-SEC-110, CWE-770, CWE-345, CWE-117)
+
+With a policy that dead-letters keyless rejections, every stored record raised a `DeadLettered`
+event outside the throttle; a rejection whose report is throttled is still stored, but its event is
+suppressed. The two-argument `DeadLetterRecorder.record` is deprecated and treats
+`PRODUCER_NOT_ALLOWED` as unauthenticated as well. The `JCustosEventDeadLetterStore.store` Javadoc
+states that a repeat is folded into the open record. `SelfObservabilityEvents.unverifiedId` now
+scrubs the clipped id with `LogFieldScrubber`. **Consumers:** call `record(envelope, reason,
+envelopeAuthenticated)`.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

@@ -227,10 +227,31 @@ class JCustosAnnotationScannerTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-154: composition is resolved one level deep, not transitively")
-  void compositionIsNotTransitive() {
-    assertTrue(scanner.scan(TwoLevelsDeepView.class).isEmpty(),
-        "@TwoLevels -> @ComposedStub -> @StubRestriction is two levels away and is not followed");
+  @DisplayName("a restriction composed two or more levels deep fails closed instead of opening the element")
+  void deeperCompositionFailsClosed() throws NoSuchMethodException {
+    IllegalStateException twoLevels = assertThrows(IllegalStateException.class,
+        () -> scanner.scan(TwoLevelsDeepView.class),
+        "@TwoLevels -> @ComposedStub -> @StubRestriction is not resolved, so it must not scan open");
+    assertTrue(twoLevels.getMessage().contains("one level deep"), twoLevels.getMessage());
+    assertThrows(IllegalStateException.class, () -> scanner.scan(ThreeLevelsDeepView.class));
+    Method method = DeeplyComposedHandler.class.getDeclaredMethod("purge");
+    assertThrows(IllegalStateException.class, () -> scanner.scan(method));
+    assertThrows(IllegalStateException.class,
+        () -> scanner.scan(method, DeeplyComposedHandler.class));
+  }
+
+  @Test
+  @DisplayName("an annotation bound through @JCustosAnnotation to a non-evaluator is no restriction")
+  void nonEvaluatorBindingIsNoRestriction() throws NoSuchMethodException {
+    assertTrue(scanner.scan(AdvisedView.class).isEmpty(),
+        "a binding the enforcer cannot evaluate must not make the class scan as restricted");
+    Method method = AdvisedHandler.class.getDeclaredMethod("call");
+    assertTrue(scanner.scan(method, AdvisedHandler.class).isEmpty());
+    // next to a real restriction it is not "a second one"
+    assertSame(StubRestriction.class,
+        scanner.scan(AdvisedAndRestrictedView.class).orElseThrow().annotation().annotationType());
+    // and a composition of it neither restricts nor fails
+    assertTrue(scanner.scan(ComposedAdviceView.class).isEmpty());
   }
 
   @Test
@@ -509,6 +530,55 @@ class JCustosAnnotationScannerTest {
 
   @TwoLevels
   static class TwoLevelsDeepView {
+  }
+
+  @TwoLevels
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface ThreeLevels {
+  }
+
+  @ThreeLevels
+  static class ThreeLevelsDeepView {
+  }
+
+  static class DeeplyComposedHandler {
+    @TwoLevels
+    public void purge() {
+    }
+  }
+
+  /** Bound through @JCustosAnnotation to a type that is neither kind of evaluator. */
+  static final class Advisor {
+  }
+
+  @Retention(RetentionPolicy.RUNTIME)
+  @JCustosAnnotation(Advisor.class)
+  @interface Advised {
+  }
+
+  @Advised
+  static class AdvisedView {
+  }
+
+  @Advised
+  static class AdvisedHandler {
+    @Advised
+    public void call() {
+    }
+  }
+
+  @Advised
+  @StubRestriction
+  static class AdvisedAndRestrictedView {
+  }
+
+  @Advised
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface ComposedAdvice {
+  }
+
+  @ComposedAdvice
+  static class ComposedAdviceView {
   }
 
   @Retention(RetentionPolicy.RUNTIME)

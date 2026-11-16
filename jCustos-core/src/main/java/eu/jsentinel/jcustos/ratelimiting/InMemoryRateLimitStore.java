@@ -55,8 +55,9 @@ import static java.util.Objects.requireNonNull;
  *       candidate, not the first.</li>
  *   <li><strong>Bound per key</strong>: at most {@code maxEventsPerKey}
  *       events. {@link #recordEvent} then drops the oldest event of the key;
- *       {@link #tryAdmit} refuses, so a limit above this bound is never
- *       reached silently.</li>
+ *       {@link #tryAdmit} refuses, so a limit above this bound would never be
+ *       reached - {@link InMemoryRateLimitPolicy} therefore refuses such a
+ *       limit at construction ({@link #maxEventsPerKey()}).</li>
  * </ul>
  *
  * <p>Events that left the window are dropped per key on {@link #tryAdmit};
@@ -108,6 +109,15 @@ public final class InMemoryRateLimitStore implements RateLimitStore {
   public InMemoryRateLimitStore(int maxEntries, int maxEventsPerKey) {
     this.maxEntries = CapacityBound.requirePositiveCapacity(maxEntries);
     this.maxEventsPerKey = CapacityBound.requirePositiveCapacity(maxEventsPerKey);
+  }
+
+  /**
+   * @return the most events kept under one key
+   * @since 00.84.00
+   */
+  @Override
+  public int maxEventsPerKey() {
+    return maxEventsPerKey;
   }
 
   int trackedKeyCount() {
