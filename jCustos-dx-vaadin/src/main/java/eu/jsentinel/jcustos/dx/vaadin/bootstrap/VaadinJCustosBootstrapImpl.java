@@ -11,7 +11,6 @@
 package eu.jsentinel.jcustos.dx.vaadin.bootstrap;
 
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
-import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
@@ -158,33 +157,11 @@ final class VaadinJCustosBootstrapImpl
     List<JCustosBootstrapWarning> warnings = new ArrayList<>();
 
     AuthenticationService<?, ?> authn = state.authenticationService();
-    AuthorizationService<?> authz = state.authorizationService();
 
-    if (authn != null) {
-      JCustosServiceResolver.setAuthenticationService(authn);
-      services.add(new RegisteredJCustosService(
-          AuthenticationService.class, authn.getClass(), "bootstrap-explicit", false));
-    } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-authentication-service",
-          "No AuthenticationService configured for VaadinSecurity.bootstrap().",
-          "Call .authentication(...) before install(), or register an implementation "
-              + "via @JCustosAutoService(AuthenticationService.class)."));
-    }
-
-    if (authz != null) {
-      JCustosServiceResolver.setAuthorizationService(authz);
-      services.add(new RegisteredJCustosService(
-          AuthorizationService.class, authz.getClass(), "bootstrap-explicit", false));
-    } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-authorization-service",
-          "No AuthorizationService configured for VaadinSecurity.bootstrap().",
-          "Call .authorization(...) before install(), or register an implementation "
-              + "via @JCustosAutoService(AuthorizationService.class)."));
-    }
+    // The explicit service wins; otherwise the one registered through META-INF/services, as
+    // the resolver finds it at run time. Until 00.84.00 an SPI-registered service was
+    // reported as missing (ERROR) although the hint itself called the registration enough.
+    applyAuthenticationAndAuthorization("VaadinSecurity.bootstrap()", services, warnings);
 
     if (loginRoute != null) {
       // JS-SEC-084 (CWE-684): .loginRoute(...) used to be discarded, so an application with a

@@ -1813,12 +1813,12 @@ the store as a `SessionStore` service, and the REST bootstrap adds the revocatio
 `bootstrap-session-revocation`, as the Vaadin bootstrap does. **Consumers:** in front of one of the
 other filters the store is read twice for a session that is not revoked.
 
-## REST and standalone bootstraps accept services registered through `META-INF/services` (addition to SA24, DX)
+## REST, standalone and Vaadin bootstraps accept services registered through `META-INF/services` (addition to SA24, DX)
 
-`RestSecurity.bootstrap().install()` and `StandaloneSecurity.bootstrap().install()` read only
+`RestSecurity.bootstrap().install()`, `StandaloneSecurity.bootstrap().install()` and `VaadinSecurity.bootstrap().install()` read only
 `.authentication(...)` and `.authorization(...)` and reported `missing-authentication-service` /
 `missing-authorization-service` as ERROR although the service was registered through
-`META-INF/services` — a `STRICT` bootstrap refused to start. Both now fall back to the registered
+`META-INF/services` — a `STRICT` bootstrap refused to start. All three now fall back to the registered
 service as `JCustosServiceResolver` resolves it at run time and list it with the source
 `spi-registered`; several registered implementations are the ERROR
 `ambiguous-authentication-service` / `ambiguous-authorization-service`. The REST bootstrap does the

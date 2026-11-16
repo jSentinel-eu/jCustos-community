@@ -70,8 +70,7 @@ Every 401 of the three REST filters is rendered through that mapper,
 with a `WWW-Authenticate: Bearer` challenge (`SessionStale` for a
 drifted session) and an audit event (JS-SEC-086). A 401 your own
 handler writes — a failed login, say — should go through
-`RestDecisionContext.mapper().orElseGet(HttpStatusDecisionMapper::new)`
-too, so it carries the same challenge and body.
+`RestDecisionContext.mapperOrDefault()` too, so it carries the same challenge and body.
 
 ## Adapter checklist (00.84.00)
 
