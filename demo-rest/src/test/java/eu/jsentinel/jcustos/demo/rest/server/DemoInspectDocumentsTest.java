@@ -52,7 +52,7 @@ class DemoInspectDocumentsTest {
 
   @BeforeAll
   void start() throws IOException {
-    server = DemoRestServer.start(0, BootstrapConfiguration.disabled());
+    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), true);
     client = new CliOperationClient("http://localhost:" + server.port());
   }
 

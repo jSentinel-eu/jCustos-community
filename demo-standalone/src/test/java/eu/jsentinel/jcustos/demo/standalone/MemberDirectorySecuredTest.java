@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.demo.standalone;
 import eu.jsentinel.jcustos.authorization.api.AccessDeniedException;
 import eu.jsentinel.jcustos.standalone.StandaloneLoginFlow;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -42,6 +43,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("Demo standalone — compile-time @Secured wrapper for MemberDirectory")
 class MemberDirectorySecuredTest {
+
+  @BeforeAll
+  static void seedDemoAccounts() {
+    // JS-SEC-137: the fixed-password accounts exist only on explicit request.
+    UserDirectory.instance().seedInsecureDemoAccounts();
+  }
 
   private final StandaloneLoginFlow<Credentials, User> flow = new StandaloneLoginFlow<>();
   private final MemberDirectory members = new MemberDirectorySecured();

@@ -14,6 +14,12 @@
 | Programmatic health / monitoring / `/health` endpoint | `runtime.healthCheck()` + `runtime.toJson()` (V00.74.10) |
 | CLI boot banner | `runtime.summary()` (V00.74.10) |
 | App + framework persistence in one parent dir | `JCustosStorageFactory.openAt(parent)` returns a `JCustosStoragePair` with linked-lifecycle two-phase close (V00.74.20) |
+| Vaadin: route without a security annotation | `.denyByDefault(true)`; public views (home, login, setup, step-up) get `@PublicRoute` and live outside restricted layouts (00.84.00) |
+| Vaadin: step-up policy | `.stepUpRoute(...)` only together with a registered step-up view; otherwise configure no step-up route (00.84.00) |
+| Vaadin: session administration / "Revoke" | `.sessions(s -> s.storeBacked(store))` + `VaadinSessionRevocation::revoke`, or mark the record `REVOKED`; show `SessionRef`, never the session id (00.84.00) |
+| Vaadin: version drift incl. WebSocket push | `JCustosVersionEnforcerListener.register(serviceInitEvent)` (00.84.00) |
+| Vaadin: OIDC / OAuth2 callback route | extend `AbstractOAuth2CallbackView` — passes `iss`, rotates the session id (00.84.00) |
+| Vaadin: OIDC sign-out link | `AbstractOidcLogoutView.logoutLocation(MyLogoutView.class)`; the route alone only asks for confirmation (00.84.00) |
 
 ## When to use
 
@@ -63,8 +69,10 @@
 - Don't call `.roles(r -> r.mapping(...))` — `RolePermissionMapping` is
   deliberately not part of the V00.73 fluent surface (Konzept §9).
   Register it directly through `JCustosServiceResolver` if needed.
-- Don't expect `.sessions(s -> s.storeBacked(...))` on REST or
-  Standalone to register anything globally — there is no global
-  `setSessionStore(...)` resolver setter. REST records
-  `rest/session-store-unused` INFO; Standalone records
-  `standalone/sessions-not-applicable` INFO.
+- Don't expect `.sessions(s -> s.storeBacked(...))` on Standalone to
+  register anything globally — there is no global
+  `setSessionStore(...)` resolver setter; Standalone records
+  `standalone/sessions-not-applicable` INFO. On REST it does take
+  effect since 00.84.00: the store goes to `RestSessionRevocation`, and
+  with `RestSubjectResolver.resolveSessionId` a revoked record ends the
+  session on its next request (JS-SEC-131).

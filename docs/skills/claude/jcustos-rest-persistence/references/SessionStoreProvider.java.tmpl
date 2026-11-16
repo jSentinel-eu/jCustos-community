@@ -15,6 +15,6 @@ public final class SessionStoreProvider {
   }
 
   public static SessionStore sessionStore() {
-    return JCustosStorageProvider.storage().sessionStore();
+    return JCustosStorageProvider.framework().sessionStore();
   }
 }

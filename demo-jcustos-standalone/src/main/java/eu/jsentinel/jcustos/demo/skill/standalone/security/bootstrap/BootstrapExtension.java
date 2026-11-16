@@ -1,5 +1,6 @@
 package eu.jsentinel.jcustos.demo.skill.standalone.security.bootstrap;
 
+import eu.jsentinel.jcustos.bootstrap.PasswordPolicy;
 import eu.jsentinel.jcustos.dx.bootstrap.AuditBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.CredentialBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.SessionBootstrap;
@@ -30,6 +31,17 @@ public interface BootstrapExtension {
   }
 
   default void contributeCredentials(CredentialBootstrap c) {
+  }
+
+  /**
+   * Adds checks to the password policy of the first administrator — the
+   * account the bootstrap-token flow of the persistence layer creates.
+   * Return {@code base} combined with further checks; the default keeps
+   * {@code base}. Applied in {@link #order()} by
+   * {@link BootstrapBuilder#initialAdminPasswordPolicy(PasswordPolicy)}.
+   */
+  default PasswordPolicy initialAdminPasswordPolicy(PasswordPolicy base) {
+    return base;
   }
 
   default int order() {

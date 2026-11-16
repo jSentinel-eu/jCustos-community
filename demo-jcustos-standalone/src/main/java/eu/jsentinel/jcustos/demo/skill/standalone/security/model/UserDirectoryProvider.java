@@ -8,19 +8,24 @@ import java.util.Objects;
  * <p>Needed because consumers loaded via {@link java.util.ServiceLoader}
  * — {@code MyAuthenticationService},
  * {@code MyAuthorizationService} — cannot receive the
- * directory through constructor injection. Tests can replace the
- * directory via {@link #setDirectory(UserDirectory)} and reset with
- * {@link #reset()}.
+ * directory through constructor injection. The default directory is
+ * created on first use; tests can replace it via
+ * {@link #setDirectory(UserDirectory)} and reset with {@link #reset()}.
  */
 public final class UserDirectoryProvider {
 
-  private static volatile UserDirectory directory = new InMemoryUserDirectory();
+  private static volatile UserDirectory directory;
 
   private UserDirectoryProvider() {
   }
 
   public static UserDirectory directory() {
-    return directory;
+    UserDirectory local = directory;
+    if (local != null) return local;
+    synchronized (UserDirectoryProvider.class) {
+      if (directory == null) directory = buildDefault();
+      return directory;
+    }
   }
 
   /** Test seam — install a custom directory. */
@@ -28,8 +33,16 @@ public final class UserDirectoryProvider {
     directory = Objects.requireNonNull(replacement, "replacement");
   }
 
-  /** Test seam — restore the default in-memory directory. */
-  public static void reset() {
-    directory = new InMemoryUserDirectory();
+  /** Test seam — the default directory is rebuilt on next use. */
+  public static synchronized void reset() {
+    directory = null;
+  }
+
+  private static UserDirectory buildDefault() {
+    InMemoryUserDirectory created = new InMemoryUserDirectory();
+    if (InMemoryUserDirectory.insecureSeedAccountsRequested()) {
+      created.seedInsecureDemoAccounts();
+    }
+    return created;
   }
 }

@@ -44,7 +44,7 @@ class DemoRestServerTest {
   void start() throws IOException {
     // These tests rely on the pre-populated admin/editor/viewer accounts,
     // so explicitly disable the bootstrap mechanism (admin/admin must exist).
-    server = DemoRestServer.start(0, BootstrapConfiguration.disabled());
+    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), true);
     client = new CliOperationClient("http://localhost:" + server.port());
   }
 

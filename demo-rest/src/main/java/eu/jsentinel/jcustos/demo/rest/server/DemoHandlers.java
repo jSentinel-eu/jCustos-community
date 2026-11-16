@@ -18,11 +18,13 @@ package eu.jsentinel.jcustos.demo.rest.server;
 
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
+import eu.jsentinel.jcustos.audit.LoginFailed;
 import eu.jsentinel.jcustos.audit.LoginSucceeded;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresAnyPermission;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
 import eu.jsentinel.jcustos.authorization.annotations.RequiresPolicy;
+import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.demo.rest.domain.DemoOwnedDocument;
 import eu.jsentinel.jcustos.demo.rest.domain.DemoOwnedDocumentStore;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -39,6 +41,7 @@ import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordPolicy;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordResult;
 import eu.jsentinel.jcustos.credential.compromised.LocalBlocklistCompromisedPasswordChecker;
 import eu.jsentinel.jcustos.credential.compromised.NoOpCompromisedPasswordChecker;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
 import eu.jsentinel.jcustos.logout.LogoutScope;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
@@ -60,7 +63,10 @@ import eu.jsentinel.jcustos.jwt.api.JwtValidator;
 import eu.jsentinel.jcustos.jwt.api.ValidatedJwt;
 import eu.jsentinel.jcustos.rest.BearerTokenExtractor;
 import eu.jsentinel.jcustos.rest.BodyRestRequest;
+import eu.jsentinel.jcustos.rest.HttpStatusDecisionMapper;
 import eu.jsentinel.jcustos.rest.RestClientAddress;
+import eu.jsentinel.jcustos.rest.RestDecisionContext;
+import eu.jsentinel.jcustos.rest.RestHeaders;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 import eu.jsentinel.jcustos.accountlifecycle.PasswordResetService;
@@ -96,8 +102,24 @@ import java.util.Set;
  * Demo REST handlers. Permission-protected handlers carry
  * {@link RequiresPermission} so that {@code RestAuthorizationFilter} can
  * enforce them. Authenticated-only endpoints are handled by the router.
+ * <p>
+ * {@link #login(RestRequest, RestResponse)} runs the complete login-attempt protocol
+ * (JS-SEC-123, JS-SEC-124, JS-SEC-126): every attempt the {@link LoginAttemptPolicy}
+ * allowed is reported back exactly once - {@code confirmSuccess}, {@code recordFailure}
+ * or {@code abandonAttempt}. A rejected password is audited as {@link LoginFailed} by the
+ * policy's {@code recordFailure}, a login the policy refuses after the check by the handler
+ * itself, and a verification the KDF limiter shed is answered with {@code 503}, without
+ * counting a failure. Every {@code 401} written here goes through the published decision mapper
+ * (JS-SEC-086) and so carries a {@code WWW-Authenticate} challenge. Sessions are named by
+ * their {@linkplain DemoTokenStore#sessionReference(String) reference}, never by the
+ * bearer token (JS-SEC-117).
  */
 public final class DemoHandlers {
+
+  /** {@code Retry-After} answer, in seconds, when a verification was shed (JS-SEC-126). */
+  static final long VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS = 1L;
+
+  private static final String RETRY_AFTER = "Retry-After";
 
   private final DemoUserStore userStore;
   private final DemoTokenStore tokenStore;
@@ -468,7 +490,7 @@ public final class DemoHandlers {
           "login:ip:" + (clientAddress == null ? "unknown" : clientAddress));
       RateLimitDecision decision = loginRateLimit.tryAcquire(key);
       if (decision instanceof RateLimitDecision.Throttled throttled) {
-        response.header("Retry-After",
+        response.header(RETRY_AFTER,
             Long.toString(Math.max(1L, throttled.retryAfter().toSeconds())));
         writeError(response, HttpStatus.TOO_MANY_REQUESTS);
         return;
@@ -485,7 +507,7 @@ public final class DemoHandlers {
 
     AbuseDecision abuseDecision = abuseDetection.evaluate(abuseContext);
     if (abuseDecision instanceof AbuseDecision.Block block) {
-      response.header("Retry-After",
+      response.header(RETRY_AFTER,
           Long.toString(Math.max(1L, block.retryAfter().toSeconds())));
       writeError(response, HttpStatus.TOO_MANY_REQUESTS);
       return;
@@ -493,26 +515,53 @@ public final class DemoHandlers {
 
     LoginAttemptDecision decision = loginAttemptPolicy.beforeAttempt(attempt);
     if (decision instanceof LoginAttemptDecision.LockedOut lockout) {
-      response.header("Retry-After",
+      response.header(RETRY_AFTER,
           Long.toString(Math.max(1L, lockout.remaining().toSeconds())));
       writeError(response, HttpStatus.TOO_MANY_REQUESTS);
       return;
     }
 
-    Optional<DemoUser> user = userStore.authenticate(username, password);
+    // JS-SEC-123: the allowed attempt is a reservation. From here on every path reports it
+    // back exactly once - confirmSuccess, recordFailure or abandonAttempt.
+    Optional<DemoUser> user;
+    try {
+      user = userStore.authenticate(username, password);
+    } catch (CredentialVerificationUnavailableException unavailable) {
+      // JS-SEC-126 (CWE-703): the KDF limiter shed the verification. That is no verdict on
+      // the password: give the attempt back, count nothing, audit no LoginFailed.
+      loginAttemptPolicy.abandonAttempt(attempt);
+      response.header(RETRY_AFTER, Long.toString(VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS));
+      writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
+      return;
+    } catch (RuntimeException failure) {
+      loginAttemptPolicy.abandonAttempt(attempt);
+      throw failure;
+    }
     if (user.isEmpty()) {
+      // The shipped policies publish LoginFailed from recordFailure; no second event here.
       loginAttemptPolicy.recordFailure(attempt);
       abuseDetection.recordOutcome(abuseContext, AttemptOutcome.FAILURE);
-      writeError(response, HttpStatus.UNAUTHORIZED);
+      unauthenticated(response, "invalid-credentials");
       return;
     }
-    loginAttemptPolicy.recordSuccess(attempt);
+    // JS-SEC-123 (CWE-367): the key can have been locked while the password was being
+    // checked; a correct password neither lifts that lockout nor passes it.
+    if (loginAttemptPolicy.confirmSuccess(attempt)
+        instanceof LoginAttemptDecision.LockedOut lockout) {
+      auditLoginFailed(username, clientAddress, "Locked out while the attempt was in flight");
+      response.header(RETRY_AFTER,
+          Long.toString(Math.max(1L, lockout.remaining().toSeconds())));
+      writeError(response, HttpStatus.TOO_MANY_REQUESTS);
+      return;
+    }
     abuseDetection.recordOutcome(abuseContext, AttemptOutcome.SUCCESS);
     DemoUser u = user.get();
     JCustosVersion snapshot = securityVersionStore.current(
         new JCustosVersionKey(TenantId.DEFAULT, SubjectId.of(u.username())));
     String token = tokenStore.issue(u, snapshot);
-    auditLoginSucceeded(u.username(), clientAddress, token);
+    // JS-SEC-117 (CWE-522): the audit trail names the session by its reference - the token
+    // is a credential and is returned to its owner in this response only.
+    auditLoginSucceeded(u.username(), clientAddress, DemoTokenStore.sessionReference(token));
     JCustosSubject subject = subjectResolver
         .resolveSubject(withAuth(request, token))
         .orElseThrow();
@@ -526,14 +575,36 @@ public final class DemoHandlers {
     response.body(DemoJson.encode(payload));
   }
 
-  private static void auditLoginSucceeded(String username, String clientAddress, String token) {
+  private static void auditLoginSucceeded(String username, String clientAddress,
+                                          String sessionReference) {
     JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
     try {
       sink.publish(new LoginSucceeded(
-          Instant.now(Clock.systemUTC()), username, clientAddress, token));
+          Instant.now(Clock.systemUTC()), username, clientAddress, sessionReference));
     } catch (RuntimeException ignored) {
       // never block a successful login because the audit sink failed
     }
+  }
+
+  private static void auditLoginFailed(String username, String clientAddress, String reason) {
+    JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
+    try {
+      sink.publish(new LoginFailed(
+          Instant.now(Clock.systemUTC()), username, clientAddress, reason));
+    } catch (RuntimeException ignored) {
+      // never block the login answer because the audit sink failed
+    }
+  }
+
+  /**
+   * JS-SEC-086 (CWE-778): a 401 written by a handler goes through the mapper the bootstrap
+   * published - the same seam the REST filters render through - so it carries the
+   * {@code WWW-Authenticate} challenge and the configured error body.
+   */
+  private static void unauthenticated(RestResponse response, String reason) {
+    RestDecisionContext.mapper()
+        .orElseGet(HttpStatusDecisionMapper::new)
+        .apply(AuthorizationDecision.unauthenticated(reason), response);
   }
 
   public void me(RestRequest request, RestResponse response) {
@@ -559,14 +630,12 @@ public final class DemoHandlers {
     Optional<JwtValidator> validator = JCustosServiceResolver.findJwtValidator();
     Optional<String> bearer = new BearerTokenExtractor().extract(request);
     if (validator.isEmpty() || bearer.isEmpty()) {
-      response.status(HttpStatus.UNAUTHORIZED.code());
-      response.body("Unauthorized");
+      unauthenticated(response, "no-valid-jwt");
       return;
     }
     Optional<ValidatedJwt> validated = validator.get().validate(bearer.get()).toOptional();
     if (validated.isEmpty()) {
-      response.status(HttpStatus.UNAUTHORIZED.code());
-      response.body("Unauthorized");
+      unauthenticated(response, "no-valid-jwt");
       return;
     }
     ValidatedJwt jwt = validated.get();
@@ -744,8 +813,10 @@ public final class DemoHandlers {
     }
     Optional<TokenService.TokenPair> rotated = tokenService.rotate(refreshToken);
     if (rotated.isEmpty()) {
-      response.header("WWW-Authenticate", "TokenRotated");
-      writeError(response, HttpStatus.UNAUTHORIZED);
+      // JS-SEC-086: rendered through the published mapper; the more specific challenge
+      // replaces the mapper's generic Bearer challenge.
+      unauthenticated(response, "refresh-token-rejected");
+      response.header(RestHeaders.WWW_AUTHENTICATE, "TokenRotated");
       return;
     }
     response.status(HttpStatus.OK.code());

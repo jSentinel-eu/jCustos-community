@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.demo.standalone;
 
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -37,6 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("DemoApp — CLI flow")
 class DemoAppCliTest {
+
+  @BeforeAll
+  static void seedDemoAccounts() {
+    // JS-SEC-137: the fixed-password accounts exist only on explicit request.
+    UserDirectory.instance().seedInsecureDemoAccounts();
+  }
 
   @AfterEach
   void clearSubject() {

@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.demo.standalone;
 
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +28,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("DemoAuthenticationService")
 class DemoAuthenticationServiceTest {
+
+  @BeforeAll
+  static void seedDemoAccounts() {
+    // JS-SEC-137: the fixed-password accounts exist only on explicit request.
+    UserDirectory.instance().seedInsecureDemoAccounts();
+  }
 
   private final DemoAuthenticationService service = new DemoAuthenticationService();
 

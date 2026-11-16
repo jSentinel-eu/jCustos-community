@@ -1,6 +1,6 @@
 ---
 name: jcustos-rest
-description: Battle-tested integration of jCustos (V00.73+) into a JDK-`HttpServer`-based REST application. Minimal stack — V00.73 fluent `RestSecurity.bootstrap()` + `@JCustosAutoService`-registered `AuthenticationService` / `AuthorizationService` + pre-seeded in-memory admin + regular user + in-memory `TokenStore` for Bearer tokens + 4 endpoint groups (auth, audit, sessions, users). Use PROACTIVELY when the project shows REST signals (`HttpServer`, `HttpHandler`, `com.sun.net.httpserver`, JAX-RS, `@Produces`, `@Consumes`) AND the user mentions jCustos, integrate jCustos REST, secure my REST API, `RestSecurity.bootstrap`, `RestSubjectResolver`, `RestAuthorizationFilter`, `RestRequest`, `RestResponse`, `BearerTokenExtractor`, "add auth to my REST server", "minimum viable REST auth", "/api/auth/login + token". Provides POM patch (`jCustos-rest`, `jCustos-dx-rest`, `jakarta.servlet-api`), 15 ready-to-render templates (User + Credentials + UserDirectory + TokenStore + JSON helper + Router + 4 handler groups), in-memory admin/admin + user/user seed, Bearer-token-based session management, problem+JSON error bodies. Does NOT cover OpenAPI metadata, CORS configuration, refresh tokens, API keys, rate limiting (all available since V00.72 — see `jCustos-dx-rest.openApiMetadata(...)` / `.cors(...)` and the V00.70 token / rate-limit services), nor OAuth2 / OIDC / JWT-bearer resource-server validation (the released V00.76–V00.79 identity stack — a separate skill), and does NOT cover token-based first-admin bootstrap or persistence — those are the `jcustos-rest-persistence` skill.
+description: Battle-tested integration of jCustos (V00.73+) into a JDK-`HttpServer`-based REST application. Minimal stack — V00.73 fluent `RestSecurity.bootstrap()` + `@JCustosAutoService`-registered `AuthenticationService` / `AuthorizationService` + in-memory user directory (fixed-password demo accounts only behind a development switch) + in-memory `TokenStore` for Bearer tokens + 4 endpoint groups (auth, audit, sessions, users). Use PROACTIVELY when the project shows REST signals (`HttpServer`, `HttpHandler`, `com.sun.net.httpserver`, JAX-RS, `@Produces`, `@Consumes`) AND the user mentions jCustos, integrate jCustos REST, secure my REST API, `RestSecurity.bootstrap`, `RestSubjectResolver`, `RestAuthorizationFilter`, `RestRequest`, `RestResponse`, `BearerTokenExtractor`, "add auth to my REST server", "minimum viable REST auth", "/api/auth/login + token". Provides POM patch (`jCustos-rest`, `jCustos-dx-rest`, `jakarta.servlet-api`), 15 ready-to-render templates (User + Credentials + UserDirectory + TokenStore + JSON helper + Router + 4 handler groups), opt-in development seed (`-Djcustos.demo.insecure-seed-accounts=true`), Bearer-token-based session management, problem+JSON error bodies. Does NOT cover OpenAPI metadata, CORS configuration, refresh tokens, API keys, rate limiting (all available since V00.72 — see `jCustos-dx-rest.openApiMetadata(...)` / `.cors(...)` and the V00.70 token / rate-limit services), nor OAuth2 / OIDC / JWT-bearer resource-server validation (the released V00.76–V00.79 identity stack — a separate skill), and does NOT cover token-based first-admin bootstrap or persistence — those are the `jcustos-rest-persistence` skill.
 ---
 
 # jCustos ↦ REST — full integration
@@ -8,12 +8,18 @@ description: Battle-tested integration of jCustos (V00.73+) into a JDK-`HttpServ
 Drops the jCustos security stack into a JDK-`HttpServer`-based
 REST app. End state: a running server with:
 
-- two pre-seeded users (admin/admin, user/user) in memory
-- `POST /api/auth/login` returns a Bearer token
+- an in-memory user directory that starts **empty**; the fixed-password
+  accounts admin/admin and user/user exist only with
+  `-Djcustos.demo.insecure-seed-accounts=true`, and the server refuses
+  that switch outside `DEVELOPMENT` mode
+- a server bound to the loopback interface only, deny-by-default on
+- `POST /api/auth/login` returns a Bearer token — the only response
+  that ever carries one
 - `POST /api/auth/logout` revokes it
 - `GET /api/whoami` returns the current subject
 - `GET /api/audit` (`@RequiresPermission("audit:read")`)
-- `GET /api/sessions`, `DELETE /api/sessions/{id}` (`@RequiresPermission("admin:sessions")`)
+- `GET /api/sessions`, `DELETE /api/sessions/{ref}` (`@RequiresPermission("admin:sessions")`;
+  a session is named by its `SessionRef`, `sref-…`, never by its token)
 - `GET /api/users`, `POST /api/users`, `DELETE /api/users/{id}`, `POST /api/users/{id}/roles/{role}`, `DELETE /api/users/{id}/roles/{role}` (`@RequiresPermission("admin:roles")`)
 
 Audit + sessions are in-memory (ring buffer + map). Layer 2
@@ -29,8 +35,9 @@ Audit + sessions are in-memory (ring buffer + map). Layer 2
 4. **Render every template** in `references/` with substitutions.
 5. **Run** `./mvnw -pl <module> -am compile` then
    `./mvnw -pl <module> exec:java -Dexec.mainClass="<base>.RestServer"`.
-6. **Verify**: `curl -X POST -d '{"username":"admin","password":"admin"}'
-   http://localhost:8080/api/auth/login` returns a token.
+6. **Verify**: start with `-Djcustos.demo.insecure-seed-accounts=true`, then
+   `curl -X POST -d '{"username":"admin","password":"admin"}'
+   http://127.0.0.1:8080/api/auth/login` returns a token.
 
 ## Slots
 
@@ -75,12 +82,38 @@ Audit + sessions are in-memory (ring buffer + map). Layer 2
 - **JDK `HttpServer` only.** No Jetty / Spring / JAX-RS to keep the
   surface tiny. Real deployments swap the server, but the
   `RestSubjectResolver` + handlers stay.
-- **Bearer-token sessions.** Login returns a fresh UUID; the
-  `TokenStore` maps token → user + creation time. Logout removes the
-  mapping.
-- **Permission annotations on handler methods.** The `Router`
-  resolves the annotation and runs the matching evaluator before
-  delegating; no per-handler `if (!subject.hasPerm) { return 403; }`.
+- **Bearer-token sessions.** Login returns 32 random bytes as hex;
+  the `TokenStore` keeps only the token's SHA-256 → user **id**,
+  security-version snapshot, creation and last-activity time. The
+  resolver loads the user on every request, so a deleted user or a
+  revoked role takes effect for open tokens at once (JS-SEC-132).
+  Logout removes the mapping. Every session is named by
+  `SessionRef.of(token)` — audit events, session records, the admin
+  endpoint — never by the token (JS-SEC-117).
+- **Permission annotations on handler methods.** Routes name a
+  `public static` handler method; the `Router` hands it to
+  `RestAuthorizationFilter.authorizeAndHandle(request, response, handler,
+  method, handlerClass)` (JS-SEC-114), which evaluates the annotation,
+  audits the decision and renders refusals; no per-handler
+  `if (!subject.hasPerm) { return 403; }`. Routes are path patterns
+  (`/api/users/{id}/roles/{role}`), the most specific wins, and a
+  duplicate route key fails at start-up.
+- **Every header line reaches the library.** The `Router` refuses a
+  repeated `Authorization`, `X-Api-Key` or `Cookie` header with 400
+  before anything runs and builds the `RestRequest` with
+  `RestHeaderLines` (JS-SEC-113).
+- **Per-request session checks.** `MyRestSubjectResolver` reports
+  session metadata (idle / absolute lifetime), the version snapshot
+  (drift, layer 3) and `resolveSessionId`; the login saves a
+  `SessionRecord` under the `SessionRef`, and a record set to
+  `REVOKED` ends the session on its next request (JS-SEC-131).
+- **Login protocol.** `AuthHandler.login` runs a per-address rate
+  limit, then `beforeAttempt` and exactly one of `confirmSuccess`,
+  `recordFailure`, `abandonAttempt` on the registered
+  `LoginAttemptPolicy`. An unknown name costs one KDF run; a
+  verification shed under load answers 503, not 401 (JS-SEC-126).
+  Every 401 goes through the published decision mapper and carries
+  `WWW-Authenticate` (JS-SEC-086).
 - **Errors as plain text.** Production swaps the body strategy via
   `.errorBodies(new ProblemJsonErrorBodyStrategy())` in the bootstrap
   chain — that's a `jCustos-dx-rest` one-liner.
@@ -94,10 +127,17 @@ internals reference servlet-api types via type-only paths. Without
 `jakarta.servlet-api` in `provided` scope the compiler stops on
 `HttpSessionBindingListener` or similar.
 
+### `PRODUCTION` / `STRICT` profiles
+
+The demo runs `DEVELOPMENT`. A `PRODUCTION` or `STRICT` bootstrap also
+needs a `LogoutService` (`.logout(...)`, otherwise
+`logout/missing-service`), and the development seed switch is refused.
+
 ### Token theft is not addressed
 
 Bearer tokens are not bound to client IP or device. A leaked token
-grants full access until logout or process restart. For real
+grants access until logout, revocation, or the session policy's idle
+(30 min) / absolute (12 h) lifetime ends it. For real
 deployments add device binding or move to short-lived JWT +
 refresh-token flow (`jCustos-rest`'s `TokenService` shipping in
 V00.71).

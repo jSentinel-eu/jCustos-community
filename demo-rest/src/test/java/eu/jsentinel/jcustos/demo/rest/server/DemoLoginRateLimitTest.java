@@ -65,7 +65,8 @@ class DemoLoginRateLimitTest {
     JCustosAuditService audit = JCustosServiceResolver.securityAuditService();
     DemoTokenStore tokens = new DemoTokenStore();
     DemoUserStore users = new DemoUserStore(
-        PasswordHashingServices.defaults(), false);
+        PasswordHashingServices.defaults(),
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
     DemoDocumentStore documents = new DemoDocumentStore();
     DemoRolePermissionMapping mapping = new DemoRolePermissionMapping();
     DemoSubjectResolver resolver = new DemoSubjectResolver(tokens, mapping);

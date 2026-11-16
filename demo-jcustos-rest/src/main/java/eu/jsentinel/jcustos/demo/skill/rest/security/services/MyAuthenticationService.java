@@ -1,22 +1,23 @@
 package eu.jsentinel.jcustos.demo.skill.rest.security.services;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
-import eu.jsentinel.jcustos.audit.JCustosAuditService;
-import eu.jsentinel.jcustos.audit.LoginSucceeded;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.autoservice.api.JCustosAutoService;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.User;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.UserDirectoryProvider;
 
-import java.time.Clock;
-import java.time.Instant;
-
 /**
- * REST-side AuthenticationService — same shape as the Vaadin skill,
- * minus the {@code VaadinRequest.getCurrent()} client-address lookup
- * (the REST handlers pass the address explicitly via the audit hook).
+ * REST-side AuthenticationService — same shape as the Vaadin skill.
+ *
+ * <p>The service only answers whether credentials are valid. Throttling
+ * and the audit trail belong to the login flow that calls it — in this
+ * application {@code AuthHandler.login}, which knows the client address
+ * and the session — so the service neither consults the
+ * {@code LoginAttemptPolicy} nor publishes {@code LoginSucceeded}; doing
+ * both here would count and audit every attempt twice. A verification
+ * shed under load surfaces as
+ * {@code CredentialVerificationUnavailableException} (JS-SEC-126).
  */
 @JCustosAutoService(AuthenticationService.class)
 public class MyAuthenticationService
@@ -27,11 +28,7 @@ public class MyAuthenticationService
     if (credentials == null) {
       return false;
     }
-    boolean ok = UserDirectoryProvider.directory().checkCredentials(credentials);
-    if (ok) {
-      auditLoginSucceeded(credentials.username());
-    }
-    return ok;
+    return UserDirectoryProvider.directory().checkCredentials(credentials);
   }
 
   @Override
@@ -42,15 +39,5 @@ public class MyAuthenticationService
   @Override
   public Class<User> subjectType() {
     return User.class;
-  }
-
-  private static void auditLoginSucceeded(String username) {
-    JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
-    try {
-      sink.publish(new LoginSucceeded(
-          Instant.now(Clock.systemUTC()), username, null, null));
-    } catch (RuntimeException ignored) {
-      // never block a successful login because the audit sink failed
-    }
   }
 }

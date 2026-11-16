@@ -17,15 +17,30 @@
 package eu.jsentinel.jcustos.demo.rest.server;
 
 import eu.jsentinel.jcustos.rest.BodyRestRequest;
+import eu.jsentinel.jcustos.rest.RestHeaderLines;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
-/** Demo {@link BodyRestRequest} implementation backed by raw byte payloads. */
+/**
+ * Demo {@link BodyRestRequest} implementation backed by raw byte payloads.
+ * <p>
+ * JS-SEC-113 (CWE-348, CWE-290): the request keeps every header line it was built from.
+ * {@link #headers()} joins repeated lines in wire order with {@code ", "} and
+ * {@link #headerValues(String)} returns each line, so the client-address resolution sees
+ * the {@code X-Forwarded-For} line a trusted proxy appended even when the client sent one
+ * of its own. {@link DemoHttpRouter} builds requests with
+ * {@link #fromHeaderLines(String, String, Map, Map, byte[], String)} and refuses a request
+ * that repeats a credential header before any filter runs.
+ */
 public final class DemoHttpRequest implements BodyRestRequest {
 
   private final String method;
   private final String path;
+  private final Map<String, List<String>> headerLines;
   private final Map<String, String> headers;
   private final Map<String, String> queryParameters;
   private final byte[] body;
@@ -51,12 +66,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
       Map<String, String> queryParameters,
       byte[] body,
       String remoteAddress) {
-    this.method = method;
-    this.path = path;
-    this.headers = Map.copyOf(headers);
-    this.queryParameters = Map.copyOf(queryParameters);
-    this.body = body == null ? new byte[0] : body.clone();
-    this.remoteAddress = remoteAddress;
+    this(singleLines(headers), method, path, queryParameters, body, remoteAddress);
   }
 
   public DemoHttpRequest(
@@ -81,6 +91,43 @@ public final class DemoHttpRequest implements BodyRestRequest {
         body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8));
   }
 
+  private DemoHttpRequest(
+      Map<String, List<String>> headerLines,
+      String method,
+      String path,
+      Map<String, String> queryParameters,
+      byte[] body,
+      String remoteAddress) {
+    this.method = method;
+    this.path = path;
+    this.headerLines = copyLines(headerLines);
+    this.headers = Map.copyOf(RestHeaderLines.joined(this.headerLines));
+    this.queryParameters = Map.copyOf(queryParameters);
+    this.body = body == null ? new byte[0] : body.clone();
+    this.remoteAddress = remoteAddress;
+  }
+
+  /**
+   * Builds a request from the header lines as the transport received them (JS-SEC-113).
+   *
+   * @param method          HTTP method
+   * @param path            request path
+   * @param headerLines     every header line, per name in wire order
+   * @param queryParameters decoded query parameters
+   * @param body            raw body, or {@code null}
+   * @param remoteAddress   connection peer, or {@code null}
+   * @return the request
+   */
+  public static DemoHttpRequest fromHeaderLines(
+      String method,
+      String path,
+      Map<String, List<String>> headerLines,
+      Map<String, String> queryParameters,
+      byte[] body,
+      String remoteAddress) {
+    return new DemoHttpRequest(headerLines, method, path, queryParameters, body, remoteAddress);
+  }
+
   @Override
   public String method() {
     return method;
@@ -101,6 +148,12 @@ public final class DemoHttpRequest implements BodyRestRequest {
     return headers;
   }
 
+  /** Every line of the header, in wire order (JS-SEC-113). */
+  @Override
+  public List<String> headerValues(String name) {
+    return RestHeaderLines.values(headerLines, name);
+  }
+
   @Override
   public Map<String, String> queryParameters() {
     return queryParameters;
@@ -109,5 +162,33 @@ public final class DemoHttpRequest implements BodyRestRequest {
   @Override
   public byte[] bodyBytes() {
     return body.clone();
+  }
+
+  private static Map<String, List<String>> singleLines(Map<String, String> headers) {
+    Map<String, List<String>> lines = new LinkedHashMap<>();
+    headers.forEach((name, value) -> {
+      if (name != null && value != null) {
+        lines.put(name, List.of(value));
+      }
+    });
+    return lines;
+  }
+
+  private static Map<String, List<String>> copyLines(Map<String, List<String>> headerLines) {
+    Map<String, List<String>> copy = new LinkedHashMap<>();
+    if (headerLines != null) {
+      headerLines.forEach((name, values) -> {
+        if (name != null && values != null) {
+          List<String> kept = new ArrayList<>();
+          for (String value : values) {
+            if (value != null) {
+              kept.add(value);
+            }
+          }
+          copy.put(name, List.copyOf(kept));
+        }
+      });
+    }
+    return copy;
   }
 }

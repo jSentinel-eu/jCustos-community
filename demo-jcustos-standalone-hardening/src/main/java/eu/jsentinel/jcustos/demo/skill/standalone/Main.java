@@ -9,6 +9,7 @@ import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.bootstrap.CreateInitialAdminCommand;
 import eu.jsentinel.jcustos.bootstrap.InitialAdminCreationResult;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.standalone.bootstrap.StandaloneSecurity;
@@ -35,6 +36,9 @@ import java.util.ServiceLoader;
  */
 public final class Main implements HasLogger {
 
+  /** Bootstrap mode of this CLI. */
+  public static final JCustosBootstrapMode MODE = JCustosBootstrapMode.DEVELOPMENT;
+
   private final BufferedReader in;
   private final PrintStream out;
   private final StandaloneLoginFlow<Credentials, User> loginFlow;
@@ -48,21 +52,29 @@ public final class Main implements HasLogger {
   }
 
   public static void main(String[] args) throws Exception {
+    installSecurity();
+    BufferedReader reader = new BufferedReader(
+        new InputStreamReader(System.in, StandardCharsets.UTF_8));
+    new Main(reader, System.out).run();
+  }
+
+  /** Installs the security stack; {@link #main} calls it before the CLI starts. */
+  static JCustosRuntime installSecurity() {
     AuthenticationService<?, ?> authn = ServiceLoader.load(AuthenticationService.class)
         .findFirst().orElseThrow();
     AuthorizationService<?> authz = ServiceLoader.load(AuthorizationService.class)
         .findFirst().orElseThrow();
     JCustosRuntime runtime = eu.jsentinel.jcustos.demo.skill.standalone.security.bootstrap.BootstrapBuilder.apply(
         StandaloneSecurity.bootstrap()
-            .mode(JCustosBootstrapMode.DEVELOPMENT)
+            .mode(MODE)
+            .denyByDefault(true)
             .authentication(authn)
             .authorization(authz)
     ).install();
     HasLogger.staticLogger().info("{}", runtime.log());
-
-    BufferedReader reader = new BufferedReader(
-        new InputStreamReader(System.in, StandardCharsets.UTF_8));
-    new Main(reader, System.out).run();
+    // After install(): the first administrator is hashed with the configured pipeline.
+    BootstrapWiring.instance();
+    return runtime;
   }
 
   void run() throws IOException {
@@ -137,13 +149,22 @@ public final class Main implements HasLogger {
     out.flush();
     String password = in.readLine();
     if (password == null) return null;
-    StandaloneLoginFlow.LoginResult<User> result =
-        loginFlow.login(new Credentials(username, password), username);
+    StandaloneLoginFlow.LoginResult<User> result;
+    try {
+      result = loginFlow.login(new Credentials(username, password), username);
+    } catch (CredentialVerificationUnavailableException shed) {
+      // JS-SEC-126: the check was shed under load - nothing was counted; not a wrong password.
+      out.println("Login temporarily unavailable. Try again later.");
+      return null;
+    }
+    // LockedOut is also the answer when the account was locked while the
+    // password was being checked (JS-SEC-123): no subject is bound then.
     return switch (result) {
       case StandaloneLoginFlow.LoginResult.Success<User> s -> s.subject();
       case StandaloneLoginFlow.LoginResult.Rejected<User> ignored -> null;
       case StandaloneLoginFlow.LoginResult.LockedOut<User> l -> {
-        out.println("Locked.");
+        out.println("Locked. Try again in "
+            + l.decision().remaining().toSeconds() + " s.");
         yield null;
       }
     };

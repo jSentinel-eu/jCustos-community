@@ -64,7 +64,7 @@ class DemoApiKeyTest {
 
   @BeforeAll
   void start() throws IOException {
-    server = DemoRestServer.start(0, BootstrapConfiguration.disabled());
+    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), true);
     baseUrl = "http://localhost:" + server.port();
     client = new CliOperationClient(baseUrl);
     http = HttpClient.newHttpClient();

@@ -10,6 +10,12 @@ is mostly latent — single-session CLIs rarely trigger it — but
 wiring it consistently across all three adapters keeps the surface
 uniform.
 
+Argon2id is really used (JS-SEC-134): the user directory and the
+first-admin bootstrap hash through
+`JCustosServiceResolver.credentialHashingService()`. `PasswordPreflight`
+applies to the first administrator through
+`HardeningBootstrapExtension.initialAdminPasswordPolicy(...)`.
+
 ## Templates
 
 | Template | Source |
@@ -18,6 +24,6 @@ uniform.
 | `SubjectIdResolverImpl.java.tmpl` | shared |
 | `VersionBumper.java.tmpl` | shared |
 | `PasswordPreflight.java.tmpl` | shared |
-| `Main.java.tmpl` | OVERWRITE — `BouncyCastleHashingServices.modern()` + sessions.securityVersion(...) |
+| `HardeningBootstrapExtension.java.tmpl` | NEW — `BouncyCastleHashingServices.modern()` + sessions.securityVersion(...) + preflight for the first admin |
 | `services-JCustosVersionStore.tmpl` | shared |
 | `services-SubjectIdResolver.tmpl` | shared |

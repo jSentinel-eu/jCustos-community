@@ -2,7 +2,9 @@ package {{BASE_PACKAGE}}.security.bootstrap;
 
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
+import eu.jsentinel.jcustos.bootstrap.PasswordPolicy;
 import eu.jsentinel.jcustos.credential.password.bouncycastle.BouncyCastleHashingServices;
+import {{BASE_PACKAGE}}.security.services.PasswordPreflight;
 import eu.jsentinel.jcustos.dx.bootstrap.CredentialBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.SessionBootstrap;
 import eu.jsentinel.jcustos.session.JCustosVersionStore;
@@ -15,6 +17,12 @@ import java.util.Optional;
  * largely latent, but wiring it through {@code
  * BootstrapBuilder.apply(...)} keeps the surface uniform across all
  * three adapters.
+ *
+ * <p>The Argon2id pipeline set with {@code .hashing(...)} is the one
+ * the user directory and the first-admin bootstrap hash with — they
+ * read {@code JCustosServiceResolver.credentialHashingService()}
+ * (JS-SEC-134). The first administrator's password passes the
+ * {@link PasswordPreflight}.
  */
 public final class HardeningBootstrapExtension implements BootstrapExtension {
 
@@ -31,6 +39,17 @@ public final class HardeningBootstrapExtension implements BootstrapExtension {
         JCustosServiceResolver.findSubjectIdResolver();
     versionStore.ifPresent(s::securityVersion);
     resolver.ifPresent(s::subjectIdResolver);
+  }
+
+  /**
+   * The first administrator's password passes {@link PasswordPreflight}
+   * too (JS-SEC-134): the most privileged account is not the one exempt
+   * from the blocklist and the breach check. Before 00.84.00 the
+   * standalone preflight had no caller at all.
+   */
+  @Override
+  public PasswordPolicy initialAdminPasswordPolicy(PasswordPolicy base) {
+    return PasswordPreflight.policy(base);
   }
 
   @Override

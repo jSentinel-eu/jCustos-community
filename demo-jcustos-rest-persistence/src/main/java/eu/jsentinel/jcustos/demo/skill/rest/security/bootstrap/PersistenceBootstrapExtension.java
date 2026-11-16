@@ -2,7 +2,6 @@ package eu.jsentinel.jcustos.demo.skill.rest.security.bootstrap;
 
 import eu.jsentinel.jcustos.dx.bootstrap.AuditBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.SessionBootstrap;
-import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosStorage;
 
 /**
  * Persistence-layer extension. Contributes Eclipse-Store-backed
@@ -16,27 +15,23 @@ import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosStorage;
  * so hardening (or any later layer) can configure further aspects
  * without overwriting these.
  *
- * <p>The static initialiser eagerly opens the storage backend and
- * triggers {@link BootstrapWiring#instance()} so the bootstrap token
- * is generated / persisted before the first request.
+ * <p>The storage is opened when the bootstrap chain asks for it, not
+ * when the class is loaded, so a test can install its own storage
+ * first. The first-admin bootstrap ({@link BootstrapWiring}) is built by
+ * the server after {@code install()}, when the credential pipeline is
+ * known.
  */
 public final class PersistenceBootstrapExtension implements BootstrapExtension {
 
-  private static final EclipseStoreJCustosStorage STORAGE;
-
-  static {
-    STORAGE = JCustosStorageProvider.framework();
-    BootstrapWiring.instance();
-  }
-
   @Override
   public void contributeAudit(AuditBootstrap a) {
-    a.storeBacked(STORAGE.auditEventStore()).logging();
+    a.storeBacked(JCustosStorageProvider.framework().auditEventStore()).logging();
   }
 
   @Override
   public void contributeSessions(SessionBootstrap s) {
-    s.storeBacked(STORAGE.sessionStore());
+    // JS-SEC-131: the REST filters consult this store on every request.
+    s.storeBacked(JCustosStorageProvider.framework().sessionStore());
   }
 
   @Override

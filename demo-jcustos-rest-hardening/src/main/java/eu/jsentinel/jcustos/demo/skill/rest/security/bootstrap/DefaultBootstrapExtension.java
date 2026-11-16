@@ -3,17 +3,30 @@ package eu.jsentinel.jcustos.demo.skill.rest.security.bootstrap;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
 import eu.jsentinel.jcustos.dx.bootstrap.AuditBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.CredentialBootstrap;
+import eu.jsentinel.jcustos.dx.bootstrap.SessionBootstrap;
+import eu.jsentinel.jcustos.demo.skill.rest.security.SessionStoreProvider;
 
 /**
  * Layer-1 defaults: in-memory ring buffer for audit, PBKDF2 for
- * password hashing. Registered via
+ * password hashing, and the session store the login records every
+ * session in. Registered via
  * {@code META-INF/services/eu.jsentinel.jcustos.demo.skill.rest.security.bootstrap.BootstrapExtension}.
+ *
+ * <p>{@code .storeBacked(...)} hands the store to the REST filters,
+ * which refuse a session whose record was revoked (JS-SEC-131). The
+ * store comes from {@link SessionStoreProvider} — in-memory here, the
+ * Eclipse-Store one once the persistence layer replaces the provider.
  */
 public final class DefaultBootstrapExtension implements BootstrapExtension {
 
   @Override
   public void contributeAudit(AuditBootstrap a) {
     a.ringBuffer(256).logging();
+  }
+
+  @Override
+  public void contributeSessions(SessionBootstrap s) {
+    s.storeBacked(SessionStoreProvider.sessionStore());
   }
 
   @Override

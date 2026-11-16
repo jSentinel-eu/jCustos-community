@@ -8,8 +8,8 @@ import eu.jsentinel.jcustos.demo.skill.rest.security.model.User;
 /**
  * Maps the application's typed {@link User} to the framework's
  * {@link SubjectId} key. Required for Phase-4c drift detection: the
- * {@code LoginView} needs to derive a stable {@code SubjectId} from
- * the just-authenticated subject to capture a
+ * login ({@code AuthHandler.login}) derives a stable {@code SubjectId} from
+ * the just-authenticated user to capture a
  * {@code JCustosVersion} snapshot, and the
  * {@code VersionBumper} needs the same mapping to increment that
  * key on role changes.

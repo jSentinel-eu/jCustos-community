@@ -12,13 +12,14 @@ import java.util.Optional;
 
 /**
  * Increments the per-subject {@code JCustosVersion} so any session
- * captured before the bump drifts on the next request and the
- * affected user is rerouted to {@code MyLoginView} by
- * {@code JCustosVersionEnforcerListener}.
+ * captured before the bump drifts: the {@code Router}'s
+ * {@code RestJCustosVersionFilter} refuses the affected user's open
+ * Bearer token on its next request with
+ * {@code 401 + WWW-Authenticate: SessionStale}.
  *
  * <p>Call sites: every role-mutating operation in
- * {@code AdminRolesView} — {@code assignRole}, {@code revokeRole},
- * {@code deleteUser}. The bumper itself is a no-op when the SPI is
+ * {@code UsersHandler} — {@code assignRole}, {@code revokeRole},
+ * {@code delete}. The bumper itself is a no-op when the SPI is
  * absent — so the call sites can stay unconditional.
  */
 public final class VersionBumper implements HasLogger {

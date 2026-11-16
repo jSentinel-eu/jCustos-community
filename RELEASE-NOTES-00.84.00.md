@@ -1549,6 +1549,69 @@ explicit exceptions. A security policy (`SECURITY.md`) is prepared, but its repo
 response times, disclosure deadline, supported versions and release-key fingerprint are still to be
 decided, and it is not part of this build yet. **Consumers:** no change.
 
+## A REST skill token names a user, not a frozen copy of it, and every route has its own key (SA32, JS-SEC-132, CWE-613, CWE-672, CWE-436, CWE-284)
+
+The three REST skill demos (`demo-jcustos-rest`, `-persistence`, `-hardening`) and the
+`jcustos-rest*` skill templates bound a bearer token to the `User` record captured at login. A user
+who had been deleted or had lost a role therefore kept every old permission until the server
+restarted. The hardening layer's drift detection raised a security version that nothing read. The
+route table placed four routes on two keys, so `DELETE /api/users/{id}/roles/{role}` deleted the
+user and a role assignment never reached its handler.
+
+The `TokenStore` now keeps only the token's SHA-256, the user id, the security-version snapshot and
+the creation and activity times, and the resolver loads the user on every request. The `Router`
+matches path patterns: the most specific wins, and a path with extra segments matches nothing. It
+refuses a duplicate route key at start-up, runs `RestJCustosVersionFilter` whenever a version store
+is registered, and authorises every request through `RestAuthorizationFilter`. The last
+administrator can be neither deleted nor stripped of `ADMIN`. **Consumers:** projects generated from
+the skill should re-render `Router`, `TokenStore`, `MyRestSubjectResolver`, the handlers and
+`RestServer`.
+
+## The REST and standalone hardening demos hash with Argon2id, and the first administrator can log in and passes the preflight (SA34, JS-SEC-134, CWE-684, CWE-916)
+
+The hardening demos and skills configured `BouncyCastleHashingServices.modern()`, but their user
+directories read the legacy `PasswordHasher` slot and stored PBKDF2. The first-admin bootstrap
+hashed with a different pipeline, so the administrator it created could not log in.
+`PasswordPreflight` checked users created later but never the first administrator, and in the
+standalone demo it had no caller at all. The user directories of all REST and standalone skill demos
+now hash and verify through `JCustosServiceResolver.credentialHashingService()`, rehash outdated
+hashes on login and run one KDF for an unknown name. `BootstrapWiring` hashes the first
+administrator with the same pipeline and is built after `install()`. A new
+`BootstrapExtension.initialAdminPasswordPolicy(...)` hook lets the hardening layer apply the
+preflight on top of a 12-character minimum. **Consumers:** re-render the user directory,
+`BootstrapWiring`, the bootstrap extensions, `PasswordPreflight` and `RestServer` / `Main`;
+`UserDirectory.passwordHasher()` is now `hashingService()`. Stored PBKDF2 hashes keep verifying and
+become Argon2id on the next login.
+
+## The REST and standalone demos listen on loopback and have no fixed-password account by default (SA37, JS-SEC-137, CWE-1188, CWE-798, CWE-319, CWE-256)
+
+The REST demos bound to every interface, the demos and skills seeded `admin/admin`-style accounts,
+`demo-rest` created `admin/admin` silently when the bootstrap was disabled, and `demo-standalone`
+stored passwords in clear text and compared them with `String.equals`. Every REST server now binds
+to the loopback interface. Fixed-password accounts exist only with the development switch
+`-Djcustos.demo.insecure-seed-accounts=true`, which is refused outside `DEVELOPMENT` mode;
+`demo-rest` refuses to start in bootstrap mode `DISABLED` without that switch. `demo-standalone`
+hashes through the credential pipeline. **Consumers:** start a demo with the switch to get the old
+demo accounts, or create the first administrator through the bootstrap flow. Expose a demo only
+behind a TLS reverse proxy.
+
+## REST and standalone demos and skill templates follow the fixes of this release
+
+The routers hand every header line to the library and refuse a repeated `Authorization`, `X-Api-Key`
+or `Cookie` header with 400 (SA13) and authorise with the handler-class overload (SA14). A session
+is named by its `SessionRef` in audit events, session records and admin endpoints; no response after
+the login carries a token, and sessions are revoked by reference (SA17). The demos record each login
+in a published `SessionStore` and implement `resolveSessionId`, so a `REVOKED` record ends the
+session on its next request (SA31). Logins run the full login-attempt protocol behind a per-address
+rate limit, run a dummy KDF for unknown names and refuse a correct password when the account was
+locked during the check (SA23, SA24). A verification shed by the KDF limiter is answered with 503
+and `Retry-After`, or "try again later" in the CLIs (SA26). A failed rehash keeps the login and asks
+for a new password (SA33). Every 401 goes through the published decision mapper (ER19). The skill
+demos run deny-by-default, and `demo-rest` wires its `LogoutService` through `.logout(...)` (SA24).
+`5-minute-setup-propagation.md` names `exchange` as the regular case and explains the audience rule
+of pass-through (SA51). Not covered: the password reset of `demo-rest` is token-only and does not
+show the reset and change seams of SA21/SA28.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

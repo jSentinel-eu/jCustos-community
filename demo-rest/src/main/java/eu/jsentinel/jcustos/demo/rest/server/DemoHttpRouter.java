@@ -22,6 +22,7 @@ import eu.jsentinel.jcustos.demo.rest.shared.DemoEndpoints;
 import eu.jsentinel.jcustos.policy.api.ResourceRef;
 import eu.jsentinel.jcustos.rest.RestAuthenticationFilter;
 import eu.jsentinel.jcustos.rest.RestAuthorizationFilter;
+import eu.jsentinel.jcustos.rest.RestHeaderLines;
 import eu.jsentinel.jcustos.rest.RestJCustosVersionFilter;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
@@ -35,13 +36,27 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Routes incoming {@link HttpExchange} requests to demo handlers and applies
  * the generic {@link RestAuthorizationFilter} for permission-protected paths.
+ * <p>
+ * JS-SEC-113 (CWE-348, CWE-290): every header line reaches the library - the request is
+ * built with {@link DemoHttpRequest#fromHeaderLines} - and a request that repeats
+ * {@code Authorization}, {@code X-Api-Key} or {@code Cookie} is answered with {@code 400}
+ * before any filter or handler runs, public routes included.
+ * <p>
+ * JS-SEC-114 (CWE-862): handler methods are authorised with the handler-class overload
+ * {@link RestAuthorizationFilter#authorizeAndHandle(eu.jsentinel.jcustos.rest.RestRequest,
+ * eu.jsentinel.jcustos.rest.RestResponse, eu.jsentinel.jcustos.rest.RestHandler, Method,
+ * Class)}, so a restriction on the handler class also reaches a method the class inherits.
  */
 public final class DemoHttpRouter implements HttpHandler {
+
+  /** The class whose instance serves every protected route (JS-SEC-114). */
+  private static final Class<DemoHandlers> HANDLER_CLASS = DemoHandlers.class;
 
   private final DemoHandlers handlers;
   private final DemoBootstrapHandlers bootstrapHandlers;
@@ -106,8 +121,14 @@ public final class DemoHttpRouter implements HttpHandler {
   @Override
   public void handle(HttpExchange exchange) throws IOException {
     try {
-      DemoHttpRequest request = readRequest(exchange);
       DemoHttpResponse response = new DemoHttpResponse();
+      // JS-SEC-113: two lines of a credential header are never legitimate - refuse before
+      // any filter or handler sees the request.
+      if (RestHeaderLines.rejectDuplicates(exchange.getRequestHeaders(), response)) {
+        writeResponse(exchange, response);
+        return;
+      }
+      DemoHttpRequest request = readRequest(exchange);
       dispatch(request, response);
       writeResponse(exchange, response);
     } catch (RuntimeException e) {
@@ -185,19 +206,19 @@ public final class DemoHttpRouter implements HttpHandler {
     // that fires.
     if (DemoEndpoints.DOCUMENTS_INSPECT.equals(path) && "GET".equals(method)) {
       filter.authorizeAndHandle(request, response,
-          handlers::inspectDocuments, inspectDocumentsMethod);
+          handlers::inspectDocuments, inspectDocumentsMethod, HANDLER_CLASS);
       return;
     }
     if (DemoEndpoints.DOCUMENTS.equals(path)) {
       switch (method) {
-        case "GET" -> filter.authorizeAndHandle(request, response, handlers::listDocuments, listDocumentsMethod);
-        case "POST" -> filter.authorizeAndHandle(request, response, handlers::createDocument, createDocumentMethod);
+        case "GET" -> filter.authorizeAndHandle(request, response, handlers::listDocuments, listDocumentsMethod, HANDLER_CLASS);
+        case "POST" -> filter.authorizeAndHandle(request, response, handlers::createDocument, createDocumentMethod, HANDLER_CLASS);
         default -> notAllowed(response);
       }
       return;
     }
     if (path.startsWith(DemoEndpoints.DOCUMENT_BY_ID) && "DELETE".equals(method)) {
-      filter.authorizeAndHandle(request, response, handlers::deleteDocument, deleteDocumentMethod);
+      filter.authorizeAndHandle(request, response, handlers::deleteDocument, deleteDocumentMethod, HANDLER_CLASS);
       return;
     }
     // V00.70 Policy-DSL — the /api/owned-documents/{id} path carries
@@ -212,30 +233,30 @@ public final class DemoHttpRouter implements HttpHandler {
               new ResourceRef(DemoOwnedDocumentResolver.RESOURCE_TYPE,
                   id, TenantId.DEFAULT));
       filter.authorizeAndHandle(request, response,
-          handlers::inspectOwnedDocument, inspectOwnedDocumentMethod,
+          handlers::inspectOwnedDocument, inspectOwnedDocumentMethod, HANDLER_CLASS,
           "get", attributes);
       return;
     }
     if (DemoEndpoints.ADMIN_STATUS.equals(path) && "GET".equals(method)) {
-      filter.authorizeAndHandle(request, response, handlers::adminStatus, adminStatusMethod);
+      filter.authorizeAndHandle(request, response, handlers::adminStatus, adminStatusMethod, HANDLER_CLASS);
       return;
     }
     if (DemoEndpoints.AUDIT.equals(path) && "GET".equals(method)) {
-      filter.authorizeAndHandle(request, response, handlers::auditEvents, auditEventsMethod);
+      filter.authorizeAndHandle(request, response, handlers::auditEvents, auditEventsMethod, HANDLER_CLASS);
       return;
     }
     if (DemoEndpoints.ADMIN_USERS.equals(path)) {
       switch (method) {
-        case "GET" -> filter.authorizeAndHandle(request, response, handlers::listUsers, listUsersMethod);
-        case "POST" -> filter.authorizeAndHandle(request, response, handlers::createUser, createUserMethod);
+        case "GET" -> filter.authorizeAndHandle(request, response, handlers::listUsers, listUsersMethod, HANDLER_CLASS);
+        case "POST" -> filter.authorizeAndHandle(request, response, handlers::createUser, createUserMethod, HANDLER_CLASS);
         default -> notAllowed(response);
       }
       return;
     }
     if (path.startsWith(DemoEndpoints.ADMIN_USER_BY_NAME)) {
       switch (method) {
-        case "PUT" -> filter.authorizeAndHandle(request, response, handlers::setUserRole, setUserRoleMethod);
-        case "DELETE" -> filter.authorizeAndHandle(request, response, handlers::deleteUser, deleteUserMethod);
+        case "PUT" -> filter.authorizeAndHandle(request, response, handlers::setUserRole, setUserRoleMethod, HANDLER_CLASS);
+        case "DELETE" -> filter.authorizeAndHandle(request, response, handlers::deleteUser, deleteUserMethod, HANDLER_CLASS);
         default -> notAllowed(response);
       }
       return;
@@ -244,12 +265,12 @@ public final class DemoHttpRouter implements HttpHandler {
     // /revoke path before the bare /api-keys collection.
     if (DemoEndpoints.ADMIN_API_KEYS_REVOKE.equals(path) && "POST".equals(method)) {
       filter.authorizeAndHandle(request, response,
-          handlers::revokeApiKey, revokeApiKeyMethod);
+          handlers::revokeApiKey, revokeApiKeyMethod, HANDLER_CLASS);
       return;
     }
     if (DemoEndpoints.ADMIN_API_KEYS.equals(path) && "POST".equals(method)) {
       filter.authorizeAndHandle(request, response,
-          handlers::createApiKey, createApiKeyMethod);
+          handlers::createApiKey, createApiKeyMethod, HANDLER_CLASS);
       return;
     }
     response.status(HttpStatus.NOT_FOUND.code());
@@ -267,13 +288,12 @@ public final class DemoHttpRouter implements HttpHandler {
       body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
     }
     URI uri = exchange.getRequestURI();
-    Map<String, String> headers = flattenHeaders(exchange.getRequestHeaders());
-    return new DemoHttpRequest(
+    return DemoHttpRequest.fromHeaderLines(
         exchange.getRequestMethod(),
         uri.getPath(),
-        headers,
+        headerLines(exchange.getRequestHeaders()),
         parseQuery(uri.getRawQuery()),
-        body,
+        body.getBytes(StandardCharsets.UTF_8),
         remoteAddress(exchange));
   }
 
@@ -289,11 +309,12 @@ public final class DemoHttpRouter implements HttpHandler {
     }
   }
 
-  private static Map<String, String> flattenHeaders(Headers headers) {
-    Map<String, String> map = new LinkedHashMap<>();
+  /** JS-SEC-113: every line of every header, in wire order - nothing is dropped. */
+  private static Map<String, List<String>> headerLines(Headers headers) {
+    Map<String, List<String>> map = new LinkedHashMap<>();
     for (var entry : headers.entrySet()) {
       if (!entry.getValue().isEmpty()) {
-        map.put(entry.getKey(), entry.getValue().get(0));
+        map.put(entry.getKey(), List.copyOf(entry.getValue()));
       }
     }
     return map;

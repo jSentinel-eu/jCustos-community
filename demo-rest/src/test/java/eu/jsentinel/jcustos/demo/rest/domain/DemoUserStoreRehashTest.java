@@ -61,7 +61,8 @@ class DemoUserStoreRehashTest {
   @DisplayName("authenticate with same policy → no drift → stored hash unchanged")
   void noDrift_noRehash() {
     PasswordHashingService service = PasswordHashingServices.defaults(fastPolicy(1000));
-    DemoUserStore store = new DemoUserStore(service, false);
+    DemoUserStore store = new DemoUserStore(service,
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
 
     String hashBefore = store.storedPasswordHash("admin").orElseThrow();
     Optional<DemoUser> user = store.authenticate("admin", "admin");
@@ -76,7 +77,8 @@ class DemoUserStoreRehashTest {
   void driftDetected_rehash() {
     // Seed the store at the lower iteration count
     DemoUserStore seedStore = new DemoUserStore(
-        PasswordHashingServices.defaults(fastPolicy(1000)), false);
+        PasswordHashingServices.defaults(fastPolicy(1000)),
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
     String hashBefore = seedStore.storedPasswordHash("admin").orElseThrow();
     assertTrue(hashBefore.contains("$p=i=1000,"),
         "seed hash must record 1000 iterations: " + hashBefore);
@@ -84,7 +86,8 @@ class DemoUserStoreRehashTest {
     // Build a new store under a higher-iteration policy and import the
     // older hash so authenticate sees parameter drift.
     DemoUserStore upgradeStore = new DemoUserStore(
-        PasswordHashingServices.defaults(fastPolicy(2000)), false);
+        PasswordHashingServices.defaults(fastPolicy(2000)),
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
     upgradeStore.register(new DemoUser(
         "drift-user", "Drift User", hashBefore, DemoRole.ROLE_ADMIN));
 
@@ -104,7 +107,8 @@ class DemoUserStoreRehashTest {
   @DisplayName("authenticate with wrong password → no rehash, no change")
   void wrongPassword_noRehash() {
     DemoUserStore store = new DemoUserStore(
-        PasswordHashingServices.defaults(fastPolicy(1000)), false);
+        PasswordHashingServices.defaults(fastPolicy(1000)),
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
     String hashBefore = store.storedPasswordHash("admin").orElseThrow();
 
     Optional<DemoUser> user = store.authenticate("admin", "wrong");
@@ -117,7 +121,8 @@ class DemoUserStoreRehashTest {
   @DisplayName("authenticate against unknown user → returns empty without touching the store")
   void unknownUser_noChange() {
     DemoUserStore store = new DemoUserStore(
-        PasswordHashingServices.defaults(fastPolicy(1000)), false);
+        PasswordHashingServices.defaults(fastPolicy(1000)),
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
 
     Optional<DemoUser> result = store.authenticate("nobody", "anything");
 

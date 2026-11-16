@@ -1,5 +1,6 @@
 package eu.jsentinel.jcustos.demo.skill.standalone.security.bootstrap;
 
+import eu.jsentinel.jcustos.bootstrap.PasswordPolicy;
 import eu.jsentinel.jcustos.dx.standalone.bootstrap.StandaloneJCustosBootstrap;
 
 import java.util.ArrayList;
@@ -19,12 +20,30 @@ public final class BootstrapBuilder {
   }
 
   public static StandaloneJCustosBootstrap apply(StandaloneJCustosBootstrap builder) {
-    List<BootstrapExtension> extensions = new ArrayList<>();
-    ServiceLoader.load(BootstrapExtension.class).forEach(extensions::add);
-    extensions.sort(Comparator.comparingInt(BootstrapExtension::order));
+    List<BootstrapExtension> extensions = extensions();
     return builder
         .audit(a -> extensions.forEach(e -> e.contributeAudit(a)))
         .sessions(s -> extensions.forEach(e -> e.contributeSessions(s)))
         .credentials(c -> extensions.forEach(e -> e.contributeCredentials(c)));
+  }
+
+  /**
+   * The password policy for the first administrator: {@code base}, passed
+   * through every extension's
+   * {@link BootstrapExtension#initialAdminPasswordPolicy(PasswordPolicy)}.
+   */
+  public static PasswordPolicy initialAdminPasswordPolicy(PasswordPolicy base) {
+    PasswordPolicy policy = base;
+    for (BootstrapExtension extension : extensions()) {
+      policy = extension.initialAdminPasswordPolicy(policy);
+    }
+    return policy;
+  }
+
+  private static List<BootstrapExtension> extensions() {
+    List<BootstrapExtension> extensions = new ArrayList<>();
+    ServiceLoader.load(BootstrapExtension.class).forEach(extensions::add);
+    extensions.sort(Comparator.comparingInt(BootstrapExtension::order));
+    return extensions;
   }
 }

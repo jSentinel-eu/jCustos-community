@@ -33,7 +33,7 @@ class JwtDemoRouteTest {
     stub = new JwtIssuerStub();
     // wire the stub's validator the way a .jwt(...) bootstrap would install it
     JCustosServiceResolver.setJwtValidator(stub.validator(NOW));
-    server = DemoRestServer.start(0, BootstrapConfiguration.disabled());
+    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), true);
     base = "http://127.0.0.1:" + server.port();
   }
 

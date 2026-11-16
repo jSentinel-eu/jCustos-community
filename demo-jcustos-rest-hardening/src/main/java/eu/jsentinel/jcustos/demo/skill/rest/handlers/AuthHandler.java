@@ -1,17 +1,49 @@
 package eu.jsentinel.jcustos.demo.skill.rest.handlers;
 
-import eu.jsentinel.jcustos.authentication.AuthenticationService;
+import com.svenruppert.dependencies.core.net.HttpStatus;
+import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.AuditEvent;
+import eu.jsentinel.jcustos.audit.LoginFailed;
+import eu.jsentinel.jcustos.audit.LoginSucceeded;
+import eu.jsentinel.jcustos.audit.LogoutPerformed;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
+import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
+import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
+import eu.jsentinel.jcustos.logout.LogoutScope;
+import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.ratelimiting.InMemoryRateLimitPolicy;
+import eu.jsentinel.jcustos.ratelimiting.InMemoryRateLimitStore;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitDecision;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitKey;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
+import eu.jsentinel.jcustos.rest.BearerTokenExtractor;
+import eu.jsentinel.jcustos.rest.RestClientAddress;
+import eu.jsentinel.jcustos.rest.RestRequest;
+import eu.jsentinel.jcustos.session.JCustosVersion;
+import eu.jsentinel.jcustos.session.JCustosVersionKey;
+import eu.jsentinel.jcustos.session.SessionId;
+import eu.jsentinel.jcustos.session.SessionRecord;
+import eu.jsentinel.jcustos.session.SessionStatus;
 import com.sun.net.httpserver.HttpExchange;
 import eu.jsentinel.jcustos.demo.skill.rest.Json;
 import eu.jsentinel.jcustos.demo.skill.rest.Router;
+import eu.jsentinel.jcustos.demo.skill.rest.security.SessionStoreProvider;
 import eu.jsentinel.jcustos.demo.skill.rest.security.TokenStore;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.User;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.UserDirectoryProvider;
 
 import java.io.IOException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -21,57 +53,172 @@ import java.util.Optional;
  * <ul>
  *   <li>{@code POST /api/auth/login} — body
  *       {@code {"username":"...","password":"..."}} returns
- *       {@code {"token":"<uuid>"}}.</li>
+ *       {@code {"token":"..."}}. The only response that ever carries
+ *       a token.</li>
  *   <li>{@code POST /api/auth/logout} — Bearer token revoked.</li>
  *   <li>{@code GET  /api/whoami} — subject summary as JSON.</li>
  * </ul>
+ *
+ * <p>The login runs the complete protocol of the library's
+ * {@link LoginAttemptPolicy} (JS-SEC-123/124): an allowed
+ * {@code beforeAttempt} is followed by exactly one of
+ * {@code confirmSuccess}, {@code recordFailure} or
+ * {@code abandonAttempt}. In front of it a per-address rate limit
+ * caps password spraying across many names; a failed login is audited
+ * as {@code LoginFailed} (by the policy's {@code recordFailure}, and here
+ * for a login refused after the check); a verification shed under load is
+ * "try again later" (503), not a wrong password (JS-SEC-126).
  */
 public final class AuthHandler {
+
+  /** Login attempts per client address and {@link #LOGIN_RATE_WINDOW}. */
+  public static final int LOGIN_RATE_LIMIT = 60;
+
+  /** Window of {@link #LOGIN_RATE_LIMIT}. */
+  public static final Duration LOGIN_RATE_WINDOW = Duration.ofMinutes(1);
+
+  /** Retry-After of a shed verification. */
+  public static final Duration VERIFICATION_RETRY_AFTER = Duration.ofSeconds(1);
+
+  private static final BearerTokenExtractor BEARER = new BearerTokenExtractor();
+
+  private static volatile RateLimitPolicy loginRateLimit = defaultLoginRateLimit();
 
   private AuthHandler() {
   }
 
-  @SuppressWarnings("unchecked")
+  @PublicRoute
   public static void login(HttpExchange exchange, JCustosSubject ignored) throws IOException {
     Map<String, String> body = Json.parseFlat(Router.readBody(exchange));
     String username = body.get("username");
     String password = body.get("password");
-    Credentials credentials = new Credentials(username, password);
-    AuthenticationService<Credentials, User> authn =
-        JCustosServiceResolver.authenticationService();
-    if (!authn.checkCredentials(credentials)) {
-      Router.respondJson(exchange, 401, Json.encode(Map.of("error", "invalid credentials")));
+    if (username == null || password == null) {
+      Router.respondJson(exchange, HttpStatus.BAD_REQUEST.code(),
+          Json.encode(Map.of("error", "username and password required")));
       return;
     }
-    Optional<User> user = UserDirectoryProvider.directory().findByCredentials(credentials);
+    RestRequest request = Router.restRequest(exchange);
+    // JS-SEC-061: the client address comes from the registered ClientAddressResolver.
+    String clientAddress = RestClientAddress.resolve(request).orElse(null);
+
+    RateLimitDecision rate = loginRateLimit.tryAcquire(new RateLimitKey(TenantId.DEFAULT,
+        "login:ip:" + (clientAddress == null ? "unknown" : clientAddress)));
+    if (rate instanceof RateLimitDecision.Throttled throttled) {
+      tooManyRequests(exchange, throttled.retryAfter());
+      return;
+    }
+
+    LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
+    LoginAttemptContext attempt = LoginAttemptContext.now(username, clientAddress, null);
+    if (policy.beforeAttempt(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
+      tooManyRequests(exchange, lockout.remaining());
+      return;
+    }
+
+    Optional<User> user;
+    try {
+      user = UserDirectoryProvider.directory().findByCredentials(new Credentials(username, password));
+    } catch (CredentialVerificationUnavailableException shed) {
+      // JS-SEC-126: no verdict - give the attempt back, count nothing, audit no failure.
+      policy.abandonAttempt(attempt);
+      exchange.getResponseHeaders().set("Retry-After",
+          Long.toString(VERIFICATION_RETRY_AFTER.toSeconds()));
+      Router.respondJson(exchange, HttpStatus.SERVICE_UNAVAILABLE.code(),
+          Json.encode(Map.of("error", "temporarily unavailable, try again later")));
+      return;
+    } catch (RuntimeException failure) {
+      policy.abandonAttempt(attempt);
+      throw failure;
+    }
+
     if (user.isEmpty()) {
-      Router.respondJson(exchange, 401, Json.encode(Map.of("error", "user not loadable")));
+      // The library's login-attempt policies publish the LoginFailed event themselves.
+      policy.recordFailure(attempt);
+      Router.refuse(exchange, AuthorizationDecision.unauthenticated("invalid-credentials"));
       return;
     }
-    String token = TokenStore.INSTANCE.issue(user.get());
-    Router.respondJson(exchange, 200, Json.encode(Map.of(
+    // JS-SEC-123: the key may have been locked while the password was being checked.
+    if (policy.confirmSuccess(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
+      audit(new LoginFailed(now(), username, clientAddress,
+          "Locked out while the attempt was in flight"));
+      tooManyRequests(exchange, lockout.remaining());
+      return;
+    }
+
+    User u = user.get();
+    JCustosVersionKey versionKey =
+        new JCustosVersionKey(TenantId.DEFAULT, SubjectId.of(String.valueOf(u.id())));
+    JCustosVersion snapshot = JCustosServiceResolver.findJCustosVersionStore()
+        .map(store -> store.current(versionKey))
+        .orElse(null);
+    String token = TokenStore.INSTANCE.issue(u.id(), snapshot);
+    TokenStore.Session session = TokenStore.INSTANCE.resolve(token).orElseThrow();
+    // JS-SEC-131: the record the REST filters consult on every request - keyed by the
+    // session reference, never by the token (JS-SEC-117).
+    SessionStoreProvider.sessionStore().save(new SessionRecord(
+        SessionId.of(session.reference()),
+        versionKey.subjectId(),
+        TenantId.DEFAULT,
+        session.createdAt(),
+        session.lastActivityAt(),
+        snapshot == null ? JCustosVersion.INITIAL : snapshot,
+        SessionStatus.ACTIVE));
+    audit(new LoginSucceeded(now(), username, clientAddress, session.reference()));
+    Router.respondJson(exchange, HttpStatus.OK.code(), Json.encode(Map.of(
         "token", token,
-        "user", user.get().name())));
+        "user", u.name())));
   }
 
+  @PublicRoute
   public static void logout(HttpExchange exchange, JCustosSubject subject) throws IOException {
-    String auth = exchange.getRequestHeaders().getFirst("Authorization");
-    if (auth != null && auth.startsWith("Bearer ")) {
-      TokenStore.INSTANCE.revoke(auth.substring("Bearer ".length()).trim());
-    }
-    Router.respondJson(exchange, 200, "{\"ok\":true}");
+    Optional<String> token = BEARER.extract(Router.restRequest(exchange));
+    Optional<TokenStore.Session> session = token.flatMap(TokenStore.INSTANCE::resolve);
+    token.ifPresent(TokenStore.INSTANCE::revoke);
+    session.ifPresent(s -> {
+      SessionStoreProvider.sessionStore().delete(SessionId.of(s.reference()));
+      audit(new LogoutPerformed(now(), String.valueOf(s.userId()), s.reference(),
+          LogoutScope.CurrentSession));
+    });
+    Router.respondJson(exchange, HttpStatus.OK.code(), "{\"ok\":true}");
   }
 
+  @RequiresPermission("api:view")
   public static void whoami(HttpExchange exchange, JCustosSubject subject) throws IOException {
-    if (subject == null) {
-      Router.respondJson(exchange, 401, Json.encode(Map.of("error", "unauthorized")));
-      return;
-    }
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("id", subject.subjectId());
     body.put("displayName", subject.displayName());
-    body.put("roles", subject.roles().stream().map(Object::toString).toList());
-    body.put("permissions", subject.permissions().stream().map(Object::toString).toList());
-    Router.respondJson(exchange, 200, Json.encode(body));
+    body.put("roles", subject.roles().stream().map(Object::toString).sorted().toList());
+    body.put("permissions", subject.permissions().stream().map(Object::toString).sorted().toList());
+    Router.respondJson(exchange, HttpStatus.OK.code(), Json.encode(body));
+  }
+
+  /** Test seam — replaces the per-address login rate limit. */
+  public static void useLoginRateLimit(RateLimitPolicy replacement) {
+    loginRateLimit = replacement == null ? defaultLoginRateLimit() : replacement;
+  }
+
+  private static RateLimitPolicy defaultLoginRateLimit() {
+    return new InMemoryRateLimitPolicy(new InMemoryRateLimitStore(),
+        JCustosServiceResolver.securityAuditService(), LOGIN_RATE_LIMIT, LOGIN_RATE_WINDOW);
+  }
+
+  private static void tooManyRequests(HttpExchange exchange, Duration retryAfter) throws IOException {
+    exchange.getResponseHeaders().set("Retry-After",
+        Long.toString(Math.max(1L, retryAfter.toSeconds())));
+    Router.respondJson(exchange, HttpStatus.TOO_MANY_REQUESTS.code(),
+        Json.encode(Map.of("error", "too many attempts, try again later")));
+  }
+
+  private static Instant now() {
+    return Instant.now(Clock.systemUTC());
+  }
+
+  private static void audit(AuditEvent event) {
+    JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
+    try {
+      sink.publish(event);
+    } catch (RuntimeException ignored) {
+      // never block a login or logout because the audit sink failed
+    }
   }
 }

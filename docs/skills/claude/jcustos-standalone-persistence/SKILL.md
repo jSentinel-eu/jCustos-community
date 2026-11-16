@@ -88,3 +88,20 @@ Fix: the rendered `AppStoragePaths` helper reads the
 `${project.build.directory}/test-data`. Every test fork writes
 under `target/`. `mvn clean` is now the only state-reset command
 needed.
+
+## First administrator (JS-SEC-134)
+
+- `BootstrapWiring` hashes the first administrator with the user
+  directory's own pipeline (`UserDirectory.hashingService()`, i.e.
+  `JCustosServiceResolver.credentialHashingService()`), so the account
+  the setup creates can log in. Build it after `install()` — the
+  server / CLI calls `BootstrapWiring.instance()` right after the
+  bootstrap; `PersistenceBootstrapExtension` no longer triggers it from
+  a static initialiser.
+- The password must pass `MinimumLengthPasswordPolicy(12)` plus every
+  `BootstrapExtension.initialAdminPasswordPolicy(...)` contribution
+  (the hardening layer adds its `PasswordPreflight`).
+- Test seam: `BootstrapWiring.setInstance(BootstrapWiring.create(config,
+  new InMemoryBootstrapTokenStore(), capturingOutput))` before the
+  server starts, together with `JCustosStorageProvider.setPair(...)`
+  and `UserDirectoryProvider.setDirectory(...)`.

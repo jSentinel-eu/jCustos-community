@@ -64,10 +64,45 @@ System.out.println(runtime.log());
 The default `SubjectStore` is `ThreadLocalSubjectStore` — set a custom
 one with `.subjectStore(...)` if you have background workers.
 
+## Login outcomes (00.84.00)
+
+`StandaloneLoginFlow.login(...)` has three results and one exception,
+and a CLI has to handle all four:
+
+```java
+StandaloneLoginFlow.LoginResult<User> result;
+try {
+  result = loginFlow.login(new Credentials(username, password), username);
+} catch (CredentialVerificationUnavailableException shed) {
+  // JS-SEC-126: the KDF limiter shed the check - nothing was counted.
+  out.println("Login temporarily unavailable. Try again later.");
+  return null;
+}
+return switch (result) {
+  case StandaloneLoginFlow.LoginResult.Success<User> s -> s.subject();
+  case StandaloneLoginFlow.LoginResult.Rejected<User> r -> null;
+  // Also the answer when the account was locked while the password was
+  // being checked (JS-SEC-123): no subject is bound.
+  case StandaloneLoginFlow.LoginResult.LockedOut<User> l -> null;
+};
+```
+
+Login throttling is on without configuration (JS-SEC-124): the
+resolver falls back to an `InMemoryLoginAttemptPolicy`. Hash passwords
+through `JCustosServiceResolver.credentialHashingService()` — the
+pipeline `.credentials(c -> c.hashing(...))` sets — and run
+`verifyAgainstNothing` for an unknown name. `demo-jcustos-standalone`
+and `demo-standalone` show the pattern.
+
 ## Method-level security and the wrapper index
 
 Method-level security on a concrete class without an interface uses the
 compile-time `<Type>Secured` wrapper (`@Secured` + `jCustos-processor`).
+Since 00.84.00 the wrapper enforces every restriction annotation and
+deny-by-default, and a restriction on a method it cannot override
+(`final`, `static`, `private`, `protected`, package-private) is the
+compile error `processing/unenforceable-security-annotation`
+(JS-SEC-156).
 V00.73 completes the wrapper-index pipeline: `jCustos-processor` now
 writes `META-INF/jcustos/generated-wrappers.idx` after each
 compile (the V00.72 reader path was already in place). One line per

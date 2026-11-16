@@ -1,24 +1,23 @@
 package {{BASE_PACKAGE}}.security.model;
 
 import {{BASE_PACKAGE}}.security.bootstrap.JCustosStorageProvider;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 
 import java.util.Objects;
 
 /**
- * Replacement for the layer-1 {@code jcustos-vaadin} provider.
+ * Replacement for the layer-1 {@code jcustos-rest} provider.
  *
  * <p>Default wires an {@link EclipseStoreUserDirectoryPersistence}
  * around the app-side storage manager exposed by
- * {@link JCustosStorageProvider#app()} and injects it into a
+ * {@link JCustosStorageProvider#app()}, then injects it into a
  * {@link PersistentUserDirectory}. The user-directory storage shares
  * the {@code JCustosStoragePair}'s lifecycle — no separate manager,
- * no separate shutdown hook.
+ * no separate shutdown hook (V00.74.20+).
  *
  * <p>Lazy via the
  * <a href="https://en.wikipedia.org/wiki/Initialization-on-demand_holder_idiom">
- * Initialization-on-Demand Holder</a> idiom: the pair is opened the
- * first time {@link #directory()} is called <em>and</em> no test
+ * Initialization-on-Demand Holder</a> idiom: Eclipse-Store is opened
+ * the first time {@link #directory()} is called <em>and</em> no test
  * override is installed via {@link #setDirectory(UserDirectory)}. So
  * loading {@code UserDirectoryProvider} (e.g. by a static-analysis
  * tool or a PIT mutation worker) does NOT touch the filesystem.
@@ -71,10 +70,8 @@ public final class UserDirectoryProvider {
     UserDirectoryPersistence persistence =
         new EclipseStoreUserDirectoryPersistence(JCustosStorageProvider.app());
     // No shutdown hook here — JCustosStorageProvider owns the
-    // single shutdown hook that closes the JCustosStoragePair, and
-    // the pair's two-phase close() handles the app manager.
-    return new PersistentUserDirectory(
-        persistence,
-        JCustosServiceResolver.passwordHashingService());
+    // single shutdown hook that closes the pair.
+    // Hashes through the pipeline the bootstrap configured (JS-SEC-134).
+    return new PersistentUserDirectory(persistence);
   }
 }

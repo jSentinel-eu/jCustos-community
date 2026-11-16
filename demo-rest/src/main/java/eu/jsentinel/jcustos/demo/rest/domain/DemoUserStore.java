@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.demo.rest.domain;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.RoleAssigned;
 import eu.jsentinel.jcustos.audit.RoleRevoked;
@@ -24,6 +25,7 @@ import eu.jsentinel.jcustos.audit.UserCreated;
 import eu.jsentinel.jcustos.audit.UserDeleted;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.password.RehashDecision;
 
@@ -38,26 +40,75 @@ import java.util.Optional;
 /**
  * In-memory demo user store. Demo-only — not for production.
  * <p>
- * When {@code bootstrapMode} is {@code true}, the administrator user is
- * not pre-populated; the first administrator must be created via the
- * bootstrap mechanism.
+ * JS-SEC-137 (CWE-798, CWE-1188): the store starts <strong>empty</strong>. Accounts with
+ * fixed, publicly known passwords ({@code editor/editor}, {@code viewer/viewer} and, without
+ * a bootstrap flow, {@code admin/admin}) are created only when the caller asks for them by
+ * name with {@link InsecureSeed}; the server does so only when the development switch
+ * {@value #INSECURE_SEED_ACCOUNTS_PROPERTY} is set. The first administrator of a regular
+ * start comes from the bootstrap mechanism.
+ * <p>
+ * {@link #authenticate(String, String)} runs a key derivation for unknown user names as
+ * well (CWE-203, CWE-208) and reports a verification the KDF limiter shed as
+ * {@link CredentialVerificationUnavailableException}, never as a wrong password
+ * (JS-SEC-126).
  */
-public final class DemoUserStore {
+public final class DemoUserStore implements HasLogger {
+
+  /**
+   * Development switch for the fixed-password demo accounts (JS-SEC-137). Off unless the
+   * system property is exactly {@code true}. Never set it on anything reachable by others.
+   */
+  public static final String INSECURE_SEED_ACCOUNTS_PROPERTY = "jcustos.demo.insecure-seed-accounts";
+
+  /** Which fixed-password demo accounts a new store is seeded with. */
+  public enum InsecureSeed {
+    /** No accounts; the regular start. */
+    NONE,
+    /** {@code editor/editor} and {@code viewer/viewer}. */
+    DEMO_ACCOUNTS,
+    /** {@code editor/editor}, {@code viewer/viewer} and {@code admin/admin}. */
+    DEMO_ACCOUNTS_AND_ADMINISTRATOR
+  }
 
   private final Map<String, DemoUser> users = new LinkedHashMap<>();
   private final PasswordHashingService hashingService;
 
+  /**
+   * Creates an empty store.
+   *
+   * @param hashingService the password-hashing pipeline; non-null
+   */
   public DemoUserStore(PasswordHashingService hashingService) {
-    this(hashingService, false);
+    this(hashingService, InsecureSeed.NONE);
   }
 
-  public DemoUserStore(PasswordHashingService hashingService, boolean bootstrapMode) {
+  /**
+   * Creates a store with the named fixed-password demo accounts.
+   *
+   * @param hashingService the password-hashing pipeline; non-null
+   * @param seed           which demo accounts to create; non-null
+   */
+  public DemoUserStore(PasswordHashingService hashingService, InsecureSeed seed) {
     this.hashingService = Objects.requireNonNull(hashingService, "hashingService");
-    if (!bootstrapMode) {
+    Objects.requireNonNull(seed, "seed");
+    if (seed == InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR) {
       register("admin", "admin", "Admin User", DemoRole.ROLE_ADMIN);
     }
-    register("editor", "editor", "Editor User", DemoRole.ROLE_EDITOR);
-    register("viewer", "viewer", "Viewer User", DemoRole.ROLE_VIEWER);
+    if (seed != InsecureSeed.NONE) {
+      register("editor", "editor", "Editor User", DemoRole.ROLE_EDITOR);
+      register("viewer", "viewer", "Viewer User", DemoRole.ROLE_VIEWER);
+      logger().warn("Development switch {} is on: {} demo account(s) with fixed, publicly "
+              + "known passwords were created. Never expose this instance.",
+          INSECURE_SEED_ACCOUNTS_PROPERTY, users.size());
+    }
+  }
+
+  /**
+   * @return {@code true} when the development switch {@value #INSECURE_SEED_ACCOUNTS_PROPERTY}
+   *         is set to {@code true}
+   */
+  public static boolean insecureSeedAccountsRequested() {
+    return Boolean.getBoolean(INSECURE_SEED_ACCOUNTS_PROPERTY);
   }
 
   private void register(String username, String plaintextPassword, String displayName, DemoRole role) {
@@ -65,17 +116,30 @@ public final class DemoUserStore {
     users.put(username, new DemoUser(username, displayName, hash, role));
   }
 
+  /**
+   * Verifies a user name and password.
+   *
+   * @param username user name as typed
+   * @param password password as typed
+   * @return the user when the password verified, otherwise empty
+   * @throws CredentialVerificationUnavailableException when the verification could not be
+   *         carried out - the KDF limiter shed it (JS-SEC-126). That is no verdict: the
+   *         caller answers "try again later" and counts no failed attempt.
+   */
   public synchronized Optional<DemoUser> authenticate(String username, String password) {
     char[] raw = password.toCharArray();
     DemoUser user = users.get(username);
     if (user == null) {
       // unknown user — still run a comparable dummy KDF so the response
       // is not distinguishable from a wrong password (CWE-203, CWE-208)
-      hashingService.verifyAgainstNothing(raw);
+      CredentialVerificationUnavailableException.throwIfUnavailable(
+          hashingService.verifyAgainstNothing(raw));
       return Optional.empty();
     }
     CredentialVerificationResult result =
         hashingService.verify(raw, user.passwordHash());
+    // JS-SEC-126 (CWE-703): a shed verification is "could not verify", not "wrong".
+    CredentialVerificationUnavailableException.throwIfUnavailable(result);
     if (!(result instanceof CredentialVerificationResult.Verified)) {
       return Optional.empty();
     }
@@ -89,9 +153,13 @@ public final class DemoUserStore {
         users.put(upgraded.username(), upgraded);
         current = upgraded;
       } catch (RuntimeException rehashFailure) {
-        // Login already succeeded against the existing hash; failing to
-        // upgrade the hash on this login attempt is not a security
-        // failure. Fall through with the original user.
+        // Login already succeeded against the existing hash. A rehash can fail for a
+        // password the new algorithm refuses - JS-SEC-133: bcrypt rejects a legacy password
+        // of 72 bytes or one containing U+0000 - so the old hash stays and the user has to
+        // choose a new password. Only the exception type is logged, never the password.
+        logger().warn("Password hash of a user could not be upgraded ({}); the old hash stays "
+            + "in place and the user should choose a new password.",
+            rehashFailure.getClass().getSimpleName());
       }
     }
     return Optional.of(current);

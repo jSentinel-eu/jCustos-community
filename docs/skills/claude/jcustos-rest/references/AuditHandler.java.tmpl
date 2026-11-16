@@ -1,8 +1,10 @@
 package {{BASE_PACKAGE}}.handlers;
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import com.sun.net.httpserver.HttpExchange;
@@ -19,12 +21,15 @@ import java.util.Map;
  * array (newest first).
  *
  * <p>Requires permission {@code audit:read} (enforced by the router).
+ * Session identifiers in the events are {@code SessionRef}s, never
+ * tokens (JS-SEC-117).
  */
 public final class AuditHandler {
 
   private AuditHandler() {
   }
 
+  @RequiresPermission("audit:read")
   public static void list(HttpExchange exchange, JCustosSubject subject) throws IOException {
     JCustosAuditService audit = JCustosServiceResolver.securityAuditService();
     List<AuditEvent> events = audit.query(AuditQuery.all());
@@ -32,7 +37,7 @@ public final class AuditHandler {
         .map(AuditHandler::project)
         .toList()
         .reversed();
-    Router.respondJson(exchange, 200, Json.encode(body));
+    Router.respondJson(exchange, HttpStatus.OK.code(), Json.encode(body));
   }
 
   private static Map<String, Object> project(AuditEvent event) {

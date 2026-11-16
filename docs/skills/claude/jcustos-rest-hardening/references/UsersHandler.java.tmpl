@@ -1,9 +1,12 @@
 package {{BASE_PACKAGE}}.handlers;
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
+import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import com.sun.net.httpserver.HttpExchange;
 import {{BASE_PACKAGE}}.Json;
 import {{BASE_PACKAGE}}.Router;
+import {{BASE_PACKAGE}}.security.TokenStore;
 import {{BASE_PACKAGE}}.security.model.{{SUBJECT_TYPE}};
 import {{BASE_PACKAGE}}.security.model.UserDirectory;
 import {{BASE_PACKAGE}}.security.model.UserDirectoryProvider;
@@ -19,25 +22,40 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Hardening-skill replacement for the users endpoint.
+ * {@code GET /api/users}                      — list users
+ * {@code POST /api/users}                     — create
+ *     body {@code {"username":"...","password":"...","name":"...","role":"USER"}}
+ * {@code DELETE /api/users/{id}}              — delete
+ * {@code POST /api/users/{id}/roles/{role}}   — assign role
+ * {@code DELETE /api/users/{id}/roles/{role}} — revoke role
  *
- * <p>Every mutation calls {@link VersionBumper#bump(Object)} so the
- * affected user's open Bearer token starts returning 401 on the next
- * request. New passwords pass through {@link PasswordPreflight}.
+ * <p>Hardening-skill replacement for the users endpoint. Requires
+ * permission {@code admin:roles}. Each route has its own path pattern,
+ * so a role revocation can never reach {@code delete} (JS-SEC-132). The
+ * last administrator can neither be deleted nor lose the {@code ADMIN}
+ * role.
+ *
+ * <p>Every mutation calls {@link VersionBumper#bump({{SUBJECT_TYPE}})}, so the
+ * affected user's open Bearer token is refused with
+ * {@code 401 + WWW-Authenticate: SessionStale} on the next request by
+ * the drift filter the {@code Router} runs. New passwords pass through
+ * {@link PasswordPreflight}.
  */
 public final class UsersHandler {
 
   private UsersHandler() {
   }
 
+  @RequiresPermission("admin:roles")
   public static void list(HttpExchange exchange, JCustosSubject subject) throws IOException {
     UserDirectory dir = UserDirectoryProvider.directory();
     List<Map<String, Object>> body = dir.all()
         .map(UsersHandler::project)
         .toList();
-    Router.respondJson(exchange, 200, Json.encode(body));
+    Router.respondJson(exchange, HttpStatus.OK.code(), Json.encode(body));
   }
 
+  @RequiresPermission("admin:roles")
   public static void create(HttpExchange exchange, JCustosSubject subject) throws IOException {
     Map<String, String> body = Json.parseFlat(Router.readBody(exchange));
     String username = body.get("username");
@@ -45,59 +63,83 @@ public final class UsersHandler {
     String name = body.getOrDefault("name", username);
     String roleName = body.getOrDefault("role", "USER");
     if (username == null || password == null) {
-      Router.respondJson(exchange, 400, Json.encode(Map.of("error", "username and password required")));
+      Router.respondJson(exchange, HttpStatus.BAD_REQUEST.code(),
+          Json.encode(Map.of("error", "username and password required")));
       return;
     }
     if (!PasswordPreflight.isAcceptable(password)) {
-      Router.respondJson(exchange, 422, Json.encode(Map.of(
-          "error", "password rejected: on a known-bad list")));
+      Router.respondJson(exchange, HttpStatus.UNPROCESSABLE_CONTENT.code(), Json.encode(Map.of(
+          "error", PasswordPreflight.REJECTION_REASON)));
       return;
     }
     AuthorizationRole role;
     try {
       role = AuthorizationRole.valueOf(roleName);
     } catch (IllegalArgumentException e) {
-      Router.respondJson(exchange, 400, Json.encode(Map.of("error", "unknown role")));
+      Router.respondJson(exchange, HttpStatus.BAD_REQUEST.code(),
+          Json.encode(Map.of("error", "unknown role")));
       return;
     }
     Long id = nextId();
     {{SUBJECT_TYPE}} user = new {{SUBJECT_TYPE}}(id, name, EnumSet.of(AuthorizationRole.USER, role));
     UserDirectoryProvider.directory().addUser(username, password, user);
-    Router.respondJson(exchange, 201, Json.encode(project(user)));
+    Router.respondJson(exchange, HttpStatus.CREATED.code(), Json.encode(project(user)));
   }
 
+  @RequiresPermission("admin:roles")
   public static void delete(HttpExchange exchange, JCustosSubject subject) throws IOException {
-    Long id = idFromPath(exchange, "/api/users/");
-    if (id == null) {
-      Router.respond(exchange, 400, "Bad Request");
+    Optional<{{SUBJECT_TYPE}}> existing = userFromPath(exchange);
+    if (existing.isEmpty()) {
+      Router.respond(exchange, HttpStatus.NOT_FOUND.code(), HttpStatus.NOT_FOUND.reason());
       return;
     }
-    Optional<{{SUBJECT_TYPE}}> existing = UserDirectoryProvider.directory().findById(id);
-    UserDirectoryProvider.directory().deleteUser(id);
-    existing.ifPresent(VersionBumper::bump);
-    Router.respondJson(exchange, 200, "{\"ok\":true}");
+    if (isLastAdministrator(existing.get())) {
+      Router.respondJson(exchange, HttpStatus.CONFLICT.code(),
+          Json.encode(Map.of("error", "the last administrator cannot be deleted")));
+      return;
+    }
+    UserDirectoryProvider.directory().deleteUser(existing.get().id());
+    VersionBumper.bump(existing.get());
+    TokenStore.INSTANCE.revokeAllOf(existing.get().id());
+    Router.respondJson(exchange, HttpStatus.OK.code(), "{\"ok\":true}");
   }
 
+  @RequiresPermission("admin:roles")
   public static void assignRole(HttpExchange exchange, JCustosSubject subject) throws IOException {
-    RoleTarget t = roleTargetFromPath(exchange);
-    if (t == null) {
-      Router.respond(exchange, 400, "Bad Request");
+    Optional<{{SUBJECT_TYPE}}> existing = userFromPath(exchange);
+    Optional<AuthorizationRole> role = roleFromPath(exchange);
+    if (existing.isEmpty() || role.isEmpty()) {
+      Router.respond(exchange, HttpStatus.NOT_FOUND.code(), HttpStatus.NOT_FOUND.reason());
       return;
     }
-    UserDirectoryProvider.directory().assignRole(t.id, t.role);
-    UserDirectoryProvider.directory().findById(t.id).ifPresent(VersionBumper::bump);
-    Router.respondJson(exchange, 200, "{\"ok\":true}");
+    UserDirectoryProvider.directory().assignRole(existing.get().id(), role.get());
+    VersionBumper.bump(existing.get());
+    Router.respondJson(exchange, HttpStatus.OK.code(), "{\"ok\":true}");
   }
 
+  @RequiresPermission("admin:roles")
   public static void revokeRole(HttpExchange exchange, JCustosSubject subject) throws IOException {
-    RoleTarget t = roleTargetFromPath(exchange);
-    if (t == null) {
-      Router.respond(exchange, 400, "Bad Request");
+    Optional<{{SUBJECT_TYPE}}> existing = userFromPath(exchange);
+    Optional<AuthorizationRole> role = roleFromPath(exchange);
+    if (existing.isEmpty() || role.isEmpty()) {
+      Router.respond(exchange, HttpStatus.NOT_FOUND.code(), HttpStatus.NOT_FOUND.reason());
       return;
     }
-    UserDirectoryProvider.directory().revokeRole(t.id, t.role);
-    UserDirectoryProvider.directory().findById(t.id).ifPresent(VersionBumper::bump);
-    Router.respondJson(exchange, 200, "{\"ok\":true}");
+    if (role.get() == AuthorizationRole.ADMIN && isLastAdministrator(existing.get())) {
+      Router.respondJson(exchange, HttpStatus.CONFLICT.code(),
+          Json.encode(Map.of("error", "the last administrator cannot lose the ADMIN role")));
+      return;
+    }
+    UserDirectoryProvider.directory().revokeRole(existing.get().id(), role.get());
+    VersionBumper.bump(existing.get());
+    Router.respondJson(exchange, HttpStatus.OK.code(), "{\"ok\":true}");
+  }
+
+  private static boolean isLastAdministrator({{SUBJECT_TYPE}} user) {
+    return user.roles().contains(AuthorizationRole.ADMIN)
+        && UserDirectoryProvider.directory().all()
+            .filter(u -> u.roles().contains(AuthorizationRole.ADMIN))
+            .count() <= 1;
   }
 
   private static Long nextId() {
@@ -111,37 +153,28 @@ public final class UsersHandler {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("id", user.id());
     out.put("name", user.name());
-    out.put("roles", user.roles().stream().map(Enum::name).toList());
+    out.put("roles", user.roles().stream().map(Enum::name).sorted().toList());
     return out;
   }
 
-  private static Long idFromPath(HttpExchange exchange, String prefix) {
-    String path = exchange.getRequestURI().getPath();
-    if (!path.startsWith(prefix)) return null;
-    String tail = path.substring(prefix.length());
-    int slash = tail.indexOf('/');
-    String idStr = slash < 0 ? tail : tail.substring(0, slash);
+  /** The user named by the {@code {id}} path variable. */
+  private static Optional<{{SUBJECT_TYPE}}> userFromPath(HttpExchange exchange) {
     try {
-      return Long.parseLong(idStr);
+      return UserDirectoryProvider.directory()
+          .findById(Long.parseLong(Router.pathVariable(exchange, "id")));
     } catch (NumberFormatException e) {
-      return null;
+      return Optional.empty();
     }
   }
 
-  private static RoleTarget roleTargetFromPath(HttpExchange exchange) {
-    String path = exchange.getRequestURI().getPath();
-    String prefix = "/api/users/";
-    if (!path.startsWith(prefix)) return null;
-    String tail = path.substring(prefix.length());
-    String[] parts = tail.split("/");
-    if (parts.length != 3 || !"roles".equals(parts[1])) return null;
+  /** The role named by the {@code {role}} path variable. */
+  private static Optional<AuthorizationRole> roleFromPath(HttpExchange exchange) {
+    String raw = Router.pathVariable(exchange, "role");
+    if (raw == null) return Optional.empty();
     try {
-      return new RoleTarget(Long.parseLong(parts[0]), AuthorizationRole.valueOf(parts[2]));
+      return Optional.of(AuthorizationRole.valueOf(raw));
     } catch (IllegalArgumentException e) {
-      return null;
+      return Optional.empty();
     }
-  }
-
-  private record RoleTarget(Long id, AuthorizationRole role) {
   }
 }

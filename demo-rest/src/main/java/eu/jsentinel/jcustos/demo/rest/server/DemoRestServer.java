@@ -39,6 +39,8 @@ import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
 
 import java.time.Duration;
 import eu.jsentinel.jcustos.logout.SubjectClearingLogoutService;
+import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.bootstrap.BootstrapConfiguration;
 import eu.jsentinel.jcustos.bootstrap.BootstrapMode;
@@ -70,10 +72,14 @@ import eu.jsentinel.jcustos.rest.RestSubjectResolver;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionStore;
+import eu.jsentinel.jcustos.session.InMemorySessionStore;
+import eu.jsentinel.jcustos.session.SessionStore;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.time.Clock;
 import java.util.Optional;
 
 /**
@@ -85,61 +91,108 @@ import java.util.Optional;
  * <p>
  * Bootstrap mode is controlled by system properties — see
  * {@link DemoBootstrapEnvironment}.
+ * <p>
+ * JS-SEC-137 (CWE-1188, CWE-798, CWE-319): the server listens on the loopback interface
+ * only, and it creates no account with a fixed password unless the development switch
+ * {@value DemoUserStore#INSECURE_SEED_ACCOUNTS_PROPERTY} is set (the overloads without a
+ * {@code insecureSeedAccounts} argument read it; tests pass it explicitly). Without the
+ * switch the first administrator comes from the bootstrap flow, and bootstrap mode
+ * {@code DISABLED} - which has no other source of an administrator - refuses to start.
+ * <p>
+ * JS-SEC-131 (CWE-613): the bootstrap publishes an in-memory {@link SessionStore}; every
+ * login is recorded there under its session reference, and a record set to
+ * {@code REVOKED} ends the session on its next request.
  */
 public final class DemoRestServer {
+
+  /** Demo subjects are keyed on their user name - the key the version store is bumped on. */
+  private static final SubjectIdResolver<DemoUser> DEMO_SUBJECT_IDS =
+      user -> SubjectId.of(user.username());
 
   private final HttpServer httpServer;
   private final int port;
   private final RestSubjectResolver subjectResolver;
-
-  private DemoRestServer(HttpServer httpServer, int port) {
-    this(httpServer, port, null);
-  }
+  private final SessionStore sessionStore;
 
   private DemoRestServer(HttpServer httpServer, int port,
-                         RestSubjectResolver subjectResolver) {
+                         RestSubjectResolver subjectResolver, SessionStore sessionStore) {
     this.httpServer = httpServer;
     this.port = port;
     this.subjectResolver = subjectResolver;
+    this.sessionStore = sessionStore;
   }
 
   public static DemoRestServer start(int port) throws IOException {
-    return start(port, DemoBootstrapEnvironment.fromEnvironment(),
-        new InMemoryLoginAttemptPolicy(),
-        new InMemoryLoginAttemptPolicy(
-            LoginAttemptConfiguration.strictBootstrap(),
-            java.time.Clock.systemUTC(),
-            null));
+    return start(port, DemoBootstrapEnvironment.fromEnvironment());
   }
 
   public static DemoRestServer start(int port, BootstrapConfiguration bootstrapConfig) throws IOException {
-    return start(port, bootstrapConfig,
-        new InMemoryLoginAttemptPolicy(),
-        new InMemoryLoginAttemptPolicy(
-            LoginAttemptConfiguration.strictBootstrap(),
-            java.time.Clock.systemUTC(),
-            null));
+    return start(port, bootstrapConfig, DemoUserStore.insecureSeedAccountsRequested());
+  }
+
+  /**
+   * @param insecureSeedAccounts {@code true} creates the fixed-password demo accounts
+   *                             (development and tests only, JS-SEC-137)
+   */
+  public static DemoRestServer start(int port,
+                                     BootstrapConfiguration bootstrapConfig,
+                                     boolean insecureSeedAccounts) throws IOException {
+    return start(port, bootstrapConfig, new InMemoryLoginAttemptPolicy(),
+        defaultBootstrapAttemptPolicy(), insecureSeedAccounts);
   }
 
   public static DemoRestServer start(int port,
                                      BootstrapConfiguration bootstrapConfig,
                                      LoginAttemptPolicy loginAttemptPolicy) throws IOException {
-    return start(port, bootstrapConfig, loginAttemptPolicy,
-        new InMemoryLoginAttemptPolicy(
-            LoginAttemptConfiguration.strictBootstrap(),
-            java.time.Clock.systemUTC(),
-            null));
+    return start(port, bootstrapConfig, loginAttemptPolicy, defaultBootstrapAttemptPolicy(),
+        DemoUserStore.insecureSeedAccountsRequested());
   }
 
   public static DemoRestServer start(int port,
                                      BootstrapConfiguration bootstrapConfig,
                                      LoginAttemptPolicy loginAttemptPolicy,
                                      LoginAttemptPolicy bootstrapAttemptPolicy) throws IOException {
+    return start(port, bootstrapConfig, loginAttemptPolicy, bootstrapAttemptPolicy,
+        DemoUserStore.insecureSeedAccountsRequested());
+  }
+
+  /**
+   * Full wiring.
+   *
+   * @param insecureSeedAccounts {@code true} creates the fixed-password demo accounts
+   *                             {@code editor}, {@code viewer} and - in bootstrap mode
+   *                             {@code DISABLED} - {@code admin} (development and tests
+   *                             only, JS-SEC-137)
+   * @throws IllegalStateException when bootstrap mode {@code DISABLED} is requested
+   *                               without the seed accounts: nothing could create an
+   *                               administrator
+   */
+  public static DemoRestServer start(int port,
+                                     BootstrapConfiguration bootstrapConfig,
+                                     LoginAttemptPolicy loginAttemptPolicy,
+                                     LoginAttemptPolicy bootstrapAttemptPolicy,
+                                     boolean insecureSeedAccounts) throws IOException {
     boolean bootstrapMode = bootstrapConfig.mode() != BootstrapMode.DISABLED;
+    if (!bootstrapMode && !insecureSeedAccounts) {
+      // JS-SEC-137 (CWE-798): DISABLED used to create admin/admin silently.
+      throw new IllegalStateException("Bootstrap mode DISABLED leaves the demo without an "
+          + "administrator. Use bootstrap mode TRANSIENT_CONSOLE or PERSISTENT_FILE "
+          + "(security.bootstrap.mode / SECURITY_BOOTSTRAP_MODE) to create the first "
+          + "administrator, or - for a throw-away local instance only - set -D"
+          + DemoUserStore.INSECURE_SEED_ACCOUNTS_PROPERTY + "=true.");
+    }
+    DemoUserStore.InsecureSeed seed = !insecureSeedAccounts
+        ? DemoUserStore.InsecureSeed.NONE
+        : bootstrapMode
+            ? DemoUserStore.InsecureSeed.DEMO_ACCOUNTS
+            : DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR;
     PasswordHashingService hashingService =
         PasswordHashingServices.defaults();
-    DemoUserStore users = new DemoUserStore(hashingService, bootstrapMode);
-    DemoTokenStore tokens = new DemoTokenStore();
+    DemoUserStore users = new DemoUserStore(hashingService, seed);
+    // JS-SEC-131: the store the REST filters consult on every request; the token store
+    // records each login in it under the session reference.
+    SessionStore sessionStore = new InMemorySessionStore();
+    DemoTokenStore tokens = new DemoTokenStore(Clock.systemUTC(), sessionStore);
     DemoDocumentStore documents = new DemoDocumentStore();
     DemoRolePermissionMapping mapping = new DemoRolePermissionMapping();
     // V00.70 Phase-7b API keys — the resolver checks X-Api-Key
@@ -208,12 +261,27 @@ public final class DemoRestServer {
     // leave those references pointing at the previous instance. Demos
     // that have full control over construction order — like demo-vaadin
     // and demo-standalone — can use .audit(...) freely.
+    // Logout fans out to the token store: a session named by its reference is revoked
+    // there. Registered through the bootstrap so install() knows a LogoutService exists
+    // (logout/missing-service, JS-SEC-124).
+    SubjectClearingLogoutService<DemoUser> logoutService = new SubjectClearingLogoutService<>(
+        NoopSubjectStore.INSTANCE, DemoUser.class, tokens, null);
+    logoutService.addListener((subjectId, sessionId, scope) -> {
+      if (sessionId != null) {
+        tokens.revokeSession(sessionId);
+      }
+    });
+
     JCustosRuntime runtime =
         RestSecurity.bootstrap()
             .mode(JCustosBootstrapMode.DEVELOPMENT)
             .subjectResolver(resolver)
             .credentials(c -> c.hashing(hashingService))
-            .sessions(s -> s.securityVersion(versionStore))
+            .sessions(s -> s
+                .securityVersion(versionStore)
+                .subjectIdResolver(DEMO_SUBJECT_IDS)
+                .storeBacked(sessionStore))
+            .logout(logoutService)
             .policies(p -> p
                 .registry(policyRegistry)
                 .resourceRegistry(resourceRegistry)
@@ -226,15 +294,6 @@ public final class DemoRestServer {
         versionStore, JCustosServiceResolver.securityAuditService());
     RestJCustosVersionFilter versionFilter = new RestJCustosVersionFilter(
         resolver, versionEnforcer);
-
-    SubjectClearingLogoutService<DemoUser> logoutService = new SubjectClearingLogoutService<>(
-        NoopSubjectStore.INSTANCE, DemoUser.class, tokens, null);
-    logoutService.addListener((subjectId, sessionId, scope) -> {
-      if (sessionId != null) {
-        tokens.revoke(sessionId);
-      }
-    });
-    JCustosServiceResolver.setLogoutService(logoutService);
 
     DemoAdministratorAccountStore adminStore = new DemoAdministratorAccountStore(users);
     BootstrapStateService stateService = new BootstrapStateService(adminStore, bootstrapConfig.mode());
@@ -251,10 +310,19 @@ public final class DemoRestServer {
 
     DemoHttpRouter router = new DemoHttpRouter(
         handlers, bootstrapHandlers, resolver, versionFilter);
-    HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+    // JS-SEC-137 (CWE-319, CWE-1188): plain HTTP, so loopback only.
+    HttpServer server = HttpServer.create(
+        new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);
     server.createContext(DemoEndpoints.API_PREFIX, router);
     server.start();
-    return new DemoRestServer(server, server.getAddress().getPort(), resolver);
+    return new DemoRestServer(server, server.getAddress().getPort(), resolver, sessionStore);
+  }
+
+  private static LoginAttemptPolicy defaultBootstrapAttemptPolicy() {
+    return new InMemoryLoginAttemptPolicy(
+        LoginAttemptConfiguration.strictBootstrap(),
+        Clock.systemUTC(),
+        null);
   }
 
   private static BootstrapTokenStore bootstrapTokenStore(BootstrapConfiguration cfg) {
@@ -277,6 +345,16 @@ public final class DemoRestServer {
 
   public int port() {
     return port;
+  }
+
+  /** @return the address the server is bound to - the loopback interface (JS-SEC-137) */
+  public InetSocketAddress address() {
+    return httpServer.getAddress();
+  }
+
+  /** @return the session store the REST filters consult (JS-SEC-131); test seam */
+  public SessionStore sessionStore() {
+    return sessionStore;
   }
 
   public void stop() {
@@ -307,9 +385,17 @@ public final class DemoRestServer {
     // JCustosRuntime diagnostic banner now lives inside start(...) —
     // every demo entry point (main, tests) sees the same wiring.
     DemoRestServer server = start(port);
-    System.out.println("Demo REST server running on http://localhost:" + server.port());
-    System.out.println("Default demo users: editor/editor, viewer/viewer "
-        + "(admin/admin only when bootstrap is disabled).");
+    System.out.println("Demo REST server running on http://"
+        + server.address().getAddress().getHostAddress() + ":" + server.port()
+        + " (loopback only).");
+    if (DemoUserStore.insecureSeedAccountsRequested()) {
+      System.out.println("INSECURE development switch " + DemoUserStore.INSECURE_SEED_ACCOUNTS_PROPERTY
+          + " is on: demo accounts editor, viewer (and admin when bootstrap is disabled) "
+          + "have fixed, publicly known passwords.");
+    } else {
+      System.out.println("No demo accounts: create the first administrator through the "
+          + "bootstrap flow (POST " + DemoEndpoints.BOOTSTRAP_ADMIN + ").");
+    }
     System.out.println("Press Ctrl+C to stop.");
     Runtime.getRuntime().addShutdownHook(new Thread(server::stop));
   }

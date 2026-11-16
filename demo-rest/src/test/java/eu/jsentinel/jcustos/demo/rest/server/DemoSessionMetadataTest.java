@@ -136,7 +136,8 @@ class DemoSessionMetadataTest {
   // ── Helpers ───────────────────────────────────────────────────
 
   private static DemoUser aUser() {
-    DemoUserStore users = new DemoUserStore(PasswordHashingServices.defaults(), false);
+    DemoUserStore users = new DemoUserStore(PasswordHashingServices.defaults(),
+        DemoUserStore.InsecureSeed.DEMO_ACCOUNTS_AND_ADMINISTRATOR);
     return users.authenticate("admin", "admin").orElseThrow();
   }
 

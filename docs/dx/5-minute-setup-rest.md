@@ -3,8 +3,10 @@
 V00.73 fluent bootstrap for the REST adapter. The V00.72 carve-out is
 gone: `.audit(...)`, `.policies(...)`, `.roles(...)` and
 `.credentials(...)` are real. `.sessions(...)` on REST consumes
-`SessionPolicy` / `JCustosVersionStore` / `SubjectIdResolver` only;
-`.storeBacked(...)` records the INFO code `rest/session-store-unused`.
+`SessionPolicy` / `JCustosVersionStore` / `SubjectIdResolver`, and
+since 00.84.00 `.storeBacked(...)` as well: the store is handed to the
+REST filters, which refuse a session whose record was revoked
+(JS-SEC-131, see "Session store and revocation" below).
 
 ```xml
 <dependency>
@@ -64,6 +66,39 @@ System.out.println(runtime.log());
 
 Handlers stay as before — the resolver and decision mapper auto-defaults
 to `HttpStatusDecisionMapper` and a generic-strings error body strategy.
+Every 401 of the three REST filters is rendered through that mapper,
+with a `WWW-Authenticate: Bearer` challenge (`SessionStale` for a
+drifted session) and an audit event (JS-SEC-086). A 401 your own
+handler writes — a failed login, say — should go through
+`RestDecisionContext.mapper().orElseGet(HttpStatusDecisionMapper::new)`
+too, so it carries the same challenge and body.
+
+## Adapter checklist (00.84.00)
+
+- **Every header line.** Build `RestRequest.headers()` with
+  `RestHeaderLines.joined(lines)`, override `headerValues(name)` with
+  `RestHeaderLines.values(lines, name)`, and call
+  `RestHeaderLines.rejectDuplicates(lines, response)` before any filter
+  runs: a repeated `Authorization`, `X-Api-Key` or `Cookie` is a `400`
+  (JS-SEC-113).
+- **Handler class.** Call
+  `authorizeAndHandle(request, response, handler, method, handlerClass)`;
+  the overloads without the handler class cannot see the restriction of
+  a class whose method is inherited (JS-SEC-114).
+- **Session reference.** Name a session by `SessionRef.of(token)` in
+  audit events, session records and admin views — never by the token
+  (JS-SEC-117).
+- **Login protocol.** Every allowed `beforeAttempt` is followed by
+  exactly one of `confirmSuccess`, `recordFailure` or `abandonAttempt`;
+  a verification the KDF limiter shed (`CredentialVerificationUnavailableException`)
+  is answered with 503 or 429 and counts nothing (JS-SEC-123, -126).
+  Login throttling is on by default (JS-SEC-124).
+- **Deny-by-default.** `.denyByDefault(true)` and `@PublicRoute` on the
+  public handlers; `STRICT` requires it, and a `LogoutService`
+  (`.logout(...)`).
+
+`demo-jcustos-rest` (and the `jcustos-rest` skill) shows all of it on a
+JDK `HttpServer`.
 
 ## Optional sub-builders
 
@@ -73,7 +108,20 @@ to `HttpStatusDecisionMapper` and a generic-strings error body strategy.
 | `.policies(...)` | Full — registers policies and resource resolvers into `PolicyRegistry` |
 | `.roles(...)` | `.hierarchy(...)` only (V00.73 deliberately keeps `RolePermissionMapping` out) |
 | `.credentials(...)` | `.passwordHasher(...)` wires the legacy `PasswordHasher` slot; `.hashing(...)`, `.modern()` and `.pbkdf2Defaults()` wire the V00.71 pipeline into `JCustosServiceResolver.credentialHashingService()` (00.84.00, JS-SEC-073). `.pepper(...)`, `.credentialStore(...)`, `.passwordChange(...)` and `.passwordReset(...)` are recorded only and reported as `dx/credential-<entry>-recorded-not-wired` (WARNING; STRICT → ERROR) — compose the pepper into `.hashing(PasswordHashingServices.defaults(policy, limiter, pepper))` and hand the rest to your own wiring. `.modern()` requires `jCustos-crypto-bc` |
-| `.sessions(...)` | `SessionPolicy` / `JCustosVersionStore` / `SubjectIdResolver` only. `.storeBacked(...)` records `rest/session-store-unused` INFO — REST has no concept of a session store |
+| `.sessions(...)` | `SessionPolicy` / `JCustosVersionStore` / `SubjectIdResolver`; `.storeBacked(...)` publishes the store to `RestSessionRevocation` (00.84.00, JS-SEC-131) |
+
+## Session store and revocation (00.84.00)
+
+With `.sessions(s -> s.storeBacked(store))` and a resolver that
+implements `RestSubjectResolver.resolveSessionId`, the authentication
+and authorisation filters look up the session record before the
+handler runs. A record with the status `REVOKED`, or one that was seen
+on an earlier request and is gone, ends the session: 401 through the
+decision mapper and a `SessionInvalidated` audit event with the reason
+`Revoked`. Save the record at login under a non-secret key —
+`SessionId.of(SessionRef.of(token))` — never under the token itself.
+Several nodes revoke by status, or switch on
+`RestSessionRevocation.requireRecord(true)`.
 
 ## STRICT mode
 

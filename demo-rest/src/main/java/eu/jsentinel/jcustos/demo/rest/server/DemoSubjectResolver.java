@@ -30,6 +30,7 @@ import eu.jsentinel.jcustos.rest.RestHeaders;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestJCustosVersionContext;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
+import eu.jsentinel.jcustos.session.SessionId;
 import eu.jsentinel.jcustos.session.SessionMetadata;
 
 import java.util.Optional;
@@ -47,6 +48,12 @@ import java.util.Set;
  * sees the actual idle gap. After exposing the metadata the resolver
  * bumps {@code lastActivityAt} to "now" so the next request observes the
  * updated value.
+ * <p>
+ * JS-SEC-131 (CWE-613) and JS-SEC-117 (CWE-522): {@link #resolveSessionId(RestRequest)}
+ * names the session of a bearer token by its {@linkplain DemoTokenStore#sessionReference
+ * session reference} - the key {@link DemoTokenStore} records the session under - so the
+ * REST filters refuse a token whose record was revoked. The version context carries the
+ * same reference, never the token.
  */
 public final class DemoSubjectResolver implements RestSubjectResolver {
 
@@ -111,7 +118,13 @@ public final class DemoSubjectResolver implements RestSubjectResolver {
             SubjectId.of(metadata.user().username()),
             TenantId.DEFAULT,
             metadata.snapshot(),
-            s)));
+            DemoTokenStore.sessionReference(s))));
+  }
+
+  @Override
+  public Optional<SessionId> resolveSessionId(RestRequest request) {
+    return extractToken(request)
+        .map(token -> SessionId.of(DemoTokenStore.sessionReference(token)));
   }
 
   @Override

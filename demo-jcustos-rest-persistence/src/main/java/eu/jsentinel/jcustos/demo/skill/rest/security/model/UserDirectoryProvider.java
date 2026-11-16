@@ -1,6 +1,5 @@
 package eu.jsentinel.jcustos.demo.skill.rest.security.model;
 
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.demo.skill.rest.security.bootstrap.JCustosStorageProvider;
 
 import java.util.Objects;
@@ -72,8 +71,7 @@ public final class UserDirectoryProvider {
         new EclipseStoreUserDirectoryPersistence(JCustosStorageProvider.app());
     // No shutdown hook here — JCustosStorageProvider owns the
     // single shutdown hook that closes the pair.
-    return new PersistentUserDirectory(
-        persistence,
-        JCustosServiceResolver.passwordHashingService());
+    // Hashes through the pipeline the bootstrap configured (JS-SEC-134).
+    return new PersistentUserDirectory(persistence);
   }
 }

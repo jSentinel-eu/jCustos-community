@@ -1,122 +1,320 @@
 package {{BASE_PACKAGE}};
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
+import com.svenruppert.dependencies.core.net.HttpStatus;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
+import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
-import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
+import eu.jsentinel.jcustos.rest.HttpStatusDecisionMapper;
+import eu.jsentinel.jcustos.rest.RestAuthorizationFilter;
+import eu.jsentinel.jcustos.rest.RestDecisionContext;
+import eu.jsentinel.jcustos.rest.RestHeaderLines;
+import eu.jsentinel.jcustos.rest.RestJCustosVersionFilter;
 import eu.jsentinel.jcustos.rest.RestRequest;
+import eu.jsentinel.jcustos.rest.RestResponse;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
+import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
- * Composite {@link HttpHandler} that dispatches requests to method
- * handlers based on (HTTP method, path-prefix), performs the
- * {@code @RequiresPermission}-equivalent check via the resolved
- * {@link JCustosSubject}, and writes the JSON response.
+ * Composite {@link HttpHandler} that dispatches requests to handler
+ * methods and lets the jCustos REST filters decide who may call them.
  *
- * <p>Demo-level routing — no path parameter capture beyond the last
- * segment, no content-negotiation. Production swaps for any
- * Jersey/Spring/Vert.x router.
+ * <p>Per request, in this order:
+ * <ol>
+ *   <li>A request that repeats {@code Authorization}, {@code X-Api-Key}
+ *       or {@code Cookie} is refused with {@code 400} before anything
+ *       else runs (JS-SEC-113). Every other header reaches the library
+ *       with all of its lines ({@link RestHeaderLines}).</li>
+ *   <li>The route is chosen by HTTP method and path pattern
+ *       ({@code /api/users/{id}/roles/{role}}); the most specific
+ *       pattern wins, a path with extra segments matches nothing.</li>
+ *   <li>For a route that is not {@link PublicRoute @PublicRoute}, the
+ *       {@link RestJCustosVersionFilter} refuses a session whose
+ *       security version drifted (only when a version store is
+ *       registered).</li>
+ *   <li>{@link RestAuthorizationFilter} evaluates the restriction
+ *       annotation of the handler method <em>as it runs on the handler
+ *       class</em> (JS-SEC-114), refuses revoked sessions (JS-SEC-131)
+ *       and expired ones, audits the decision and renders every refusal
+ *       through the published decision mapper (JS-SEC-086, a
+ *       {@code WWW-Authenticate: Bearer} challenge on every 401).</li>
+ * </ol>
+ *
+ * <p>Handlers are {@code public static} methods with the signature
+ * {@code (HttpExchange, JCustosSubject)}; their restriction is an
+ * annotation on the method ({@code @RequiresPermission},
+ * {@code @PublicRoute}, …). Route keys must be unique:
+ * {@link Builder#build()} fails at start-up on a duplicate.
+ *
+ * <p>Demo-level routing — production swaps for any
+ * Jersey/Spring/Vert.x router and keeps the filters.
  */
-public final class Router implements HttpHandler {
+public final class Router implements HttpHandler, HasLogger {
+
+  /** Exchange attribute holding the {@link RestRequest} built for the exchange. */
+  public static final String REST_REQUEST_ATTRIBUTE = "jcustos.restRequest";
+
+  /** Exchange attribute holding the path variables of the matched route. */
+  public static final String PATH_VARIABLES_ATTRIBUTE = "jcustos.pathVariables";
 
   private final RestSubjectResolver resolver;
   private final List<Route> routes;
+  private final RestAuthorizationFilter authorization;
+  private final RestJCustosVersionFilter versionFilter;
 
   public Router(RestSubjectResolver resolver, List<Route> routes) {
-    this.resolver = resolver;
+    this.resolver = Objects.requireNonNull(resolver, "resolver");
     this.routes = List.copyOf(routes);
+    this.authorization = new RestAuthorizationFilter(resolver);
+    // Drift detection is active when a JCustosVersionStore is registered (hardening layer).
+    this.versionFilter = JCustosServiceResolver.findJCustosVersionStore()
+        .map(store -> new RestJCustosVersionFilter(resolver,
+            new JCustosVersionEnforcer(store, JCustosServiceResolver.securityAuditService())))
+        .orElse(null);
   }
 
   @Override
   public void handle(HttpExchange exchange) throws IOException {
     try {
-      String method = exchange.getRequestMethod();
-      String path = exchange.getRequestURI().getPath();
-      Route match = routes.stream()
-          .filter(r -> r.matches(method, path))
-          .findFirst()
-          .orElse(null);
-      if (match == null) {
-        respond(exchange, 404, "Not Found");
+      BufferedResponse response = new BufferedResponse();
+      Map<String, List<String>> headerLines = exchange.getRequestHeaders();
+      // JS-SEC-113: two lines of a credential header are never legitimate.
+      if (RestHeaderLines.rejectDuplicates(headerLines, response)) {
+        response.writeTo(exchange);
         return;
       }
-      RestRequest req = restRequestFrom(exchange);
-      Optional<JCustosSubject> subject = resolver.resolveSubject(req);
-      if (match.requiredPermission != null) {
-        if (subject.isEmpty()) {
-          respond(exchange, 401, "Unauthorized");
-          return;
-        }
-        if (!subject.get().permissions().contains(new PermissionName(match.requiredPermission))) {
-          respond(exchange, 403, "Forbidden");
-          return;
-        }
+      String path = exchange.getRequestURI().getPath();
+      Optional<Match> match = match(exchange.getRequestMethod(), path);
+      if (match.isEmpty()) {
+        respond(exchange, HttpStatus.NOT_FOUND.code(), HttpStatus.NOT_FOUND.reason());
+        return;
       }
-      match.handler.handle(exchange, subject.orElse(null));
+      Route route = match.get().route();
+      RestRequest request = restRequestFrom(exchange, headerLines);
+      exchange.setAttribute(REST_REQUEST_ATTRIBUTE, request);
+      exchange.setAttribute(PATH_VARIABLES_ATTRIBUTE, match.get().variables());
+
+      if (versionFilter != null && !route.isPublic() && !versionFilter.allow(request, response)) {
+        response.writeTo(exchange);
+        return;
+      }
+      boolean[] invoked = {false};
+      authorization.authorizeAndHandle(request, response, (req, resp) -> {
+        invoked[0] = true;
+        route.invoke(exchange, resolver.resolveSubject(req).orElse(null));
+      }, route.method(), route.handlerClass());
+      if (!invoked[0]) {
+        response.writeTo(exchange);
+      }
     } catch (RuntimeException failure) {
-      respond(exchange, 500, "Internal Server Error");
+      logger().warn("Request failed: {}", failure.getClass().getName());
+      respond(exchange, HttpStatus.INTERNAL_SERVER_ERROR.code(),
+          HttpStatus.INTERNAL_SERVER_ERROR.reason());
+    } finally {
+      exchange.close();
     }
+  }
+
+  private Optional<Match> match(String method, String path) {
+    Match best = null;
+    for (Route route : routes) {
+      if (!route.httpMethod().equalsIgnoreCase(method)) {
+        continue;
+      }
+      Map<String, String> variables = route.pattern().match(path);
+      if (variables != null && (best == null || route.pattern().moreSpecificThan(best.route().pattern()))) {
+        best = new Match(route, variables);
+      }
+    }
+    return Optional.ofNullable(best);
+  }
+
+  /** Path variables of the matched route, e.g. {@code id} for {@code /api/users/{id}}. */
+  public static String pathVariable(HttpExchange exchange, String name) {
+    Object variables = exchange.getAttribute(PATH_VARIABLES_ATTRIBUTE);
+    return variables instanceof Map<?, ?> map ? (String) map.get(name) : null;
+  }
+
+  /** The {@link RestRequest} the router built for this exchange. */
+  public static RestRequest restRequest(HttpExchange exchange) {
+    return (RestRequest) exchange.getAttribute(REST_REQUEST_ATTRIBUTE);
   }
 
   // ── Builder ────────────────────────────────────────────────────
 
-  /** Convenience accumulator for {@link Route} entries. */
+  /** Accumulates {@link Route} entries; {@link #build()} refuses duplicate keys. */
   public static final class Builder {
-    private final List<Route> routes = new java.util.ArrayList<>();
+    private final List<Route> routes = new ArrayList<>();
 
-    public Builder add(String method, String pathPrefix, String requiredPermission, RouteHandler handler) {
-      routes.add(new Route(method, pathPrefix, requiredPermission, handler));
+    /**
+     * Adds a route served by the {@code public static} method
+     * {@code methodName(HttpExchange, JCustosSubject)} of
+     * {@code handlerClass}. The method's annotation is its restriction.
+     */
+    public Builder add(String httpMethod, String pathPattern, Class<?> handlerClass, String methodName) {
+      routes.add(Route.of(httpMethod, pathPattern, handlerClass, methodName));
       return this;
     }
 
-    public Builder addPublic(String method, String pathPrefix, RouteHandler handler) {
-      return add(method, pathPrefix, null, handler);
-    }
-
+    /**
+     * @throws IllegalStateException when two routes share HTTP method and
+     *                               path pattern (variable names do not count)
+     */
     public List<Route> build() {
+      Set<String> keys = new HashSet<>();
+      for (Route route : routes) {
+        String key = route.httpMethod().toUpperCase(Locale.ROOT) + " " + route.pattern().key();
+        if (!keys.add(key)) {
+          throw new IllegalStateException("Duplicate route: " + key);
+        }
+      }
       return List.copyOf(routes);
     }
   }
 
-  /** Handler signature with the resolved subject (or null for public routes). */
-  @FunctionalInterface
-  public interface RouteHandler {
-    void handle(HttpExchange exchange, JCustosSubject subject) throws IOException;
-  }
+  /** Route: HTTP method + path pattern + the handler method that carries the restriction. */
+  public record Route(String httpMethod, PathPattern pattern, Class<?> handlerClass, Method method) {
 
-  /** Route record — method + path prefix + optional permission requirement. */
-  public record Route(String method, String pathPrefix, String requiredPermission, RouteHandler handler) {
+    static Route of(String httpMethod, String pathPattern, Class<?> handlerClass, String methodName) {
+      Method method;
+      try {
+        method = handlerClass.getMethod(methodName, HttpExchange.class, JCustosSubject.class);
+      } catch (NoSuchMethodException e) {
+        throw new IllegalStateException("No handler method " + handlerClass.getName() + "#"
+            + methodName + "(HttpExchange, JCustosSubject)", e);
+      }
+      if (!Modifier.isStatic(method.getModifiers())) {
+        throw new IllegalStateException("Handler method must be static: " + method);
+      }
+      return new Route(httpMethod, PathPattern.parse(pathPattern), handlerClass, method);
+    }
 
-    boolean matches(String reqMethod, String reqPath) {
-      return method.equalsIgnoreCase(reqMethod)
-          && (reqPath.equals(pathPrefix)
-              || reqPath.startsWith(pathPrefix + "/")
-              || reqPath.startsWith(pathPrefix + "?"));
+    boolean isPublic() {
+      return method.isAnnotationPresent(PublicRoute.class)
+          || handlerClass.isAnnotationPresent(PublicRoute.class);
+    }
+
+    void invoke(HttpExchange exchange, JCustosSubject subject) {
+      try {
+        method.invoke(null, exchange, subject);
+      } catch (IllegalAccessException e) {
+        throw new IllegalStateException(e);
+      } catch (InvocationTargetException e) {
+        Throwable cause = e.getCause();
+        if (cause instanceof IOException io) {
+          throw new UncheckedIOException(io);
+        }
+        if (cause instanceof RuntimeException runtime) {
+          throw runtime;
+        }
+        if (cause instanceof Error error) {
+          throw error;
+        }
+        throw new IllegalStateException(cause);
+      }
     }
   }
 
-  // ── HttpExchange ↔ RestRequest bridge ──────────────────────────
+  /** Path pattern of literal segments and {@code {name}} variables. */
+  public record PathPattern(List<String> segments) {
 
-  private static RestRequest restRequestFrom(HttpExchange exchange) {
+    static PathPattern parse(String pattern) {
+      if (pattern == null || !pattern.startsWith("/")) {
+        throw new IllegalArgumentException("Path pattern must start with '/': " + pattern);
+      }
+      return new PathPattern(List.of(pattern.substring(1).split("/", -1)));
+    }
+
+    /** Route key: variables are anonymous, so {@code {id}} and {@code {userId}} collide. */
+    String key() {
+      return "/" + String.join("/", segments.stream()
+          .map(s -> isVariable(s) ? "{}" : s).toList());
+    }
+
+    /** @return the path variables, or {@code null} when the path does not match */
+    Map<String, String> match(String path) {
+      if (path == null || !path.startsWith("/")) {
+        return null;
+      }
+      String[] parts = path.substring(1).split("/", -1);
+      if (parts.length != segments.size()) {
+        return null;
+      }
+      Map<String, String> variables = new LinkedHashMap<>();
+      for (int i = 0; i < parts.length; i++) {
+        String segment = segments.get(i);
+        if (isVariable(segment)) {
+          if (parts[i].isEmpty()) {
+            return null;
+          }
+          variables.put(segment.substring(1, segment.length() - 1), parts[i]);
+        } else if (!segment.equals(parts[i])) {
+          return null;
+        }
+      }
+      return variables;
+    }
+
+    /** Left to right, the first literal segment opposite a variable wins. */
+    boolean moreSpecificThan(PathPattern other) {
+      for (int i = 0; i < segments.size() && i < other.segments.size(); i++) {
+        boolean mine = isVariable(segments.get(i));
+        boolean theirs = isVariable(other.segments.get(i));
+        if (mine != theirs) {
+          return !mine;
+        }
+      }
+      return false;
+    }
+
+    private static boolean isVariable(String segment) {
+      return segment.length() > 2 && segment.startsWith("{") && segment.endsWith("}");
+    }
+  }
+
+  private record Match(Route route, Map<String, String> variables) {
+  }
+
+  // ── HttpExchange ↔ RestRequest / RestResponse bridge ───────────
+
+  private static RestRequest restRequestFrom(HttpExchange exchange, Map<String, List<String>> headerLines) {
     URI uri = exchange.getRequestURI();
-    Map<String, String> headers = new HashMap<>();
-    exchange.getRequestHeaders().forEach((k, v) -> {
-      if (!v.isEmpty()) headers.put(k, v.get(0));
-    });
+    // JS-SEC-113: list headers are joined in wire order, never reduced to their first line.
+    Map<String, String> headers = RestHeaderLines.joined(headerLines);
     Map<String, String> query = parseQuery(uri.getQuery());
     String method = exchange.getRequestMethod();
     String path = uri.getPath();
+    var remote = exchange.getRemoteAddress();
+    String remoteAddress = remote == null || remote.getAddress() == null
+        ? null : remote.getAddress().getHostAddress();
     return new RestRequest() {
+      /** JS-SEC-061: expose the connection peer; the ClientAddressResolver decides the client. */
+      @Override
+      public String remoteAddress() {
+        return remoteAddress;
+      }
+
       @Override
       public String method() {
         return method;
@@ -130,6 +328,12 @@ public final class Router implements HttpHandler {
       @Override
       public Map<String, String> headers() {
         return headers;
+      }
+
+      /** JS-SEC-113: every line of the header, in wire order. */
+      @Override
+      public List<String> headerValues(String name) {
+        return RestHeaderLines.values(headerLines, name);
       }
 
       @Override
@@ -153,20 +357,66 @@ public final class Router implements HttpHandler {
     return out;
   }
 
+  /** Collects a refusal the filters render, then writes it to the exchange. */
+  private static final class BufferedResponse implements RestResponse {
+    private int status = HttpStatus.OK.code();
+    private String body = "";
+    private final Map<String, String> headers = new LinkedHashMap<>();
+
+    @Override
+    public void status(int statusCode) {
+      this.status = statusCode;
+    }
+
+    @Override
+    public void body(String body) {
+      this.body = body == null ? "" : body;
+    }
+
+    @Override
+    public void header(String name, String value) {
+      if (name != null && value != null) {
+        headers.put(name, value);
+      }
+    }
+
+    void writeTo(HttpExchange exchange) throws IOException {
+      headers.forEach((name, value) -> exchange.getResponseHeaders().set(name, value));
+      if (body.startsWith("{")) {
+        respondJson(exchange, status, body);
+      } else {
+        respond(exchange, status, body);
+      }
+    }
+  }
+
+  /**
+   * Answers with a refusal rendered by the decision mapper the bootstrap
+   * published (JS-SEC-086): status, {@code WWW-Authenticate} challenge and
+   * the configured error body — the same rendering the filters use.
+   */
+  public static void refuse(HttpExchange exchange, AuthorizationDecision decision) throws IOException {
+    BufferedResponse response = new BufferedResponse();
+    RestDecisionContext.mapper().orElseGet(HttpStatusDecisionMapper::new).apply(decision, response);
+    response.writeTo(exchange);
+  }
+
   /** Writes a plain-text body with the given status. */
   public static void respond(HttpExchange exchange, int status, String body) throws IOException {
     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-    exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
-    exchange.sendResponseHeaders(status, bytes.length);
-    try (OutputStream os = exchange.getResponseBody()) {
-      os.write(bytes);
+    exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+    exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
+    if (bytes.length > 0) {
+      try (OutputStream os = exchange.getResponseBody()) {
+        os.write(bytes);
+      }
     }
   }
 
   /** Writes a JSON body with the given status. */
   public static void respondJson(HttpExchange exchange, int status, String json) throws IOException {
     byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-    exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
+    exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
     exchange.sendResponseHeaders(status, bytes.length);
     try (OutputStream os = exchange.getResponseBody()) {
       os.write(bytes);

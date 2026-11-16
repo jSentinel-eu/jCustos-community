@@ -1,52 +1,63 @@
 package eu.jsentinel.jcustos.demo.skill.rest.security.bootstrap;
 
+import eu.jsentinel.jcustos.demo.skill.rest.security.storage.AppStoragePaths;
 import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosStorage;
-
-import java.nio.file.Path;
+import eu.jsentinel.jcustos.persistence.eclipsestore.JCustosStorageFactory;
+import eu.jsentinel.jcustos.persistence.eclipsestore.JCustosStoragePair;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 
 /**
- * Lazy singleton holder for {@link EclipseStoreJCustosStorage}.
+ * Lazy singleton holder for the {@link JCustosStoragePair} that
+ * carries both the jCustos framework storage and the application's
+ * Eclipse-Store manager under one parent directory.
  *
- * <p>The first call to {@link #storage()} opens (or creates) the
- * Eclipse-Store layer at {@code ./data/jcustos-rest-persistence} and registers a
- * shutdown hook so the storage is closed cleanly on JVM exit.
+ * <p>The first call to {@link #pair()} opens (or creates) the pair at
+ * {@link AppStoragePaths#baseDir()} via
+ * {@link JCustosStorageFactory#openAt(java.nio.file.Path)} and
+ * registers one JVM shutdown hook. The pair's two-phase
+ * {@code close()} closes the app storage first and the framework
+ * storage second (V00.74.20+).
  *
- * <p>Concurrency: a {@code synchronized} double-checked-locking
- * pattern protects the initial open. After that, callers receive a
- * cached reference and {@link EclipseStoreJCustosStorage}'s own
- * locking handles parallel reads/writes.
- *
- * <p>Tests can swap the storage via {@link #setStorage(EclipseStoreJCustosStorage)}
- * before any consumer initialises.
+ * <p>Tests can install a custom pair via
+ * {@link #setPair(JCustosStoragePair)} before any consumer
+ * initialises.
  */
 public final class JCustosStorageProvider {
 
-  public static final Path DEFAULT_STORAGE_DIR = Path.of("./data/jcustos-rest-persistence");
-
-  private static volatile EclipseStoreJCustosStorage current;
+  private static volatile JCustosStoragePair current;
 
   private JCustosStorageProvider() {
   }
 
-  public static EclipseStoreJCustosStorage storage() {
-    EclipseStoreJCustosStorage local = current;
+  public static JCustosStoragePair pair() {
+    JCustosStoragePair local = current;
     if (local != null) return local;
     synchronized (JCustosStorageProvider.class) {
       if (current == null) {
-        current = EclipseStoreJCustosStorage.openAt(DEFAULT_STORAGE_DIR);
+        current = JCustosStorageFactory.openAt(AppStoragePaths.baseDir());
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-          EclipseStoreJCustosStorage live = current;
+          JCustosStoragePair live = current;
           if (live != null) {
             live.close();
           }
-        }, "jcustos-storage-shutdown"));
+        }, "jcustos-storage-pair-shutdown"));
       }
       return current;
     }
   }
 
-  /** Test seam — install a custom storage instance. */
-  public static synchronized void setStorage(EclipseStoreJCustosStorage replacement) {
+  /** Convenience accessor for the framework storage. */
+  public static EclipseStoreJCustosStorage framework() {
+    return pair().framework();
+  }
+
+  /** Convenience accessor for the application storage manager. */
+  public static EmbeddedStorageManager app() {
+    return pair().app();
+  }
+
+  /** Test seam — install a custom pair before any production use. */
+  public static synchronized void setPair(JCustosStoragePair replacement) {
     current = replacement;
   }
 }

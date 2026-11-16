@@ -65,7 +65,8 @@ class DemoBruteForceTest {
     InMemoryLoginAttemptPolicy policy = new InMemoryLoginAttemptPolicy(
         tightConfig, Clock.systemUTC(), null);
 
-    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), policy);
+    server = DemoRestServer.start(0, BootstrapConfiguration.disabled(), policy,
+        new InMemoryLoginAttemptPolicy(), true);
   }
 
   @AfterEach

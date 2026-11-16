@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.demo.standalone;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.AccessDeniedException;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.dx.diagnostics.JCustosDiagnostics;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
@@ -66,6 +67,9 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DemoApp {
 
+  /** Bootstrap mode of this CLI. */
+  public static final JCustosBootstrapMode MODE = JCustosBootstrapMode.DEVELOPMENT;
+
   private final BufferedReader in;
   private final java.io.PrintStream out;
   private final StandaloneLoginFlow<Credentials, User> loginFlow;
@@ -102,8 +106,12 @@ public final class DemoApp {
     // in-memory RingBuffer + a LoggingAuditSink so the CLI demo's
     // diagnose command can show audit events end-to-end without any
     // additional wiring on the consumer side.
+    if (UserDirectory.insecureSeedAccountsRequested() && MODE != JCustosBootstrapMode.DEVELOPMENT) {
+      throw new IllegalStateException(UserDirectory.INSECURE_SEED_ACCOUNTS_PROPERTY
+          + " is a development switch and is refused in " + MODE + " mode");
+    }
     JCustosRuntime runtime = StandaloneSecurity.bootstrap()
-        .mode(JCustosBootstrapMode.DEVELOPMENT)
+        .mode(MODE)
         .authentication(authn)
         .authorization(authz)
         .audit(a -> a.ringBuffer(256).logging())
@@ -142,7 +150,12 @@ public final class DemoApp {
 
   void run() throws Exception {
     out.println("=== Library CLI ===");
-    out.println("Seeded users: admin/admin, librarian/librarian, alice/alice");
+    if (UserDirectory.insecureSeedAccountsRequested()) {
+      out.println("Seeded users: admin/admin, librarian/librarian, alice/alice");
+    } else {
+      out.println("No users yet. For a local try-out restart with -D"
+          + UserDirectory.INSECURE_SEED_ACCOUNTS_PROPERTY + "=true (DEVELOPMENT only).");
+    }
     User user = promptLogin();
     if (user == null) {
       out.println("Login failed. Goodbye.");
@@ -162,8 +175,16 @@ public final class DemoApp {
     out.print("Password: "); out.flush();
     String password = in.readLine();
     if (password == null) return null;
-    StandaloneLoginFlow.LoginResult<User> result =
-        loginFlow.login(new Credentials(username, password), username);
+    StandaloneLoginFlow.LoginResult<User> result;
+    try {
+      result = loginFlow.login(new Credentials(username, password), username);
+    } catch (CredentialVerificationUnavailableException shed) {
+      // JS-SEC-126: the check was shed under load - nothing was counted; not a wrong password.
+      out.println("Login temporarily unavailable. Try again later.");
+      return null;
+    }
+    // LockedOut is also the answer when the account was locked while the
+    // password was being checked (JS-SEC-123): no subject is bound then.
     return switch (result) {
       case StandaloneLoginFlow.LoginResult.Success<User> s -> s.subject();
       case StandaloneLoginFlow.LoginResult.Rejected<User> ignored -> null;

@@ -91,8 +91,15 @@ VaadinSecurity.bootstrap()
 ```
 
 `credentialStore(...)` says where the inbound token lives.
-`passThrough()` forwards it unchanged as a `Bearer` header — the right
-default when the downstream service trusts the same issuer.
+`passThrough()` forwards it unchanged as a `Bearer` header — right only
+when the downstream service is part of the token's audience. Since
+00.84.00 pass-through honours a declared audience (JS-SEC-151): for
+`@PropagateToken(audience = ...)` it forwards a token only when the
+token is *known* to be issued for that audience, and logs
+`propagation/audience-mismatch` otherwise; a call without a declared
+audience still forwards and is reported once as
+`propagation/pass-through-without-audience`. For a service outside the
+token's audience use `exchange` (section 7).
 
 Adapter-specific stores ship with each adapter:
 `VaadinSessionTokenCredentialStore` for Vaadin,
@@ -107,9 +114,23 @@ JCustosServiceResolver.tokenCredentialStore()
 
 Clear it on logout with `.clear()`.
 
-## 7. Beyond pass-through
+A `BearerToken` knows nothing about its audience, so pass-through
+forwards it only to calls that declare none. Bind a credential whose
+audience is known instead: `OidcAccessToken.fromValidated(raw, validated)`
+after validating the token with a `JwtValidator`. In a REST service the
+stock `RestTokenCredentialFilter` does that per request — construct it
+as `new RestTokenCredentialFilter(store, validator)`, or with a
+`.jwt(...)` bootstrap the single-argument constructor finds the
+installed validator; without a validator it binds a `BearerToken` of
+unknown audience as before.
 
-Register additional strategies by name and select them per call:
+## 7. Exchange — the regular case for another audience
+
+A downstream service with an audience of its own should receive a token
+issued for it, not the caller's token. That is the `exchange` strategy,
+the regular case for service-to-service calls; pass-through is the
+special case of a downstream service inside the token's audience.
+Register strategies by name and select them per call:
 
 ```java
 .propagation(p -> p

@@ -11,6 +11,16 @@ the V00.71 `RestJCustosVersionFilter` so an admin revoking a role
 forces every open Bearer token for that user to start returning 401
 on the next request — no logout-and-relogin needed.
 
+Argon2id is really used (JS-SEC-134): the user directory and the
+first-admin bootstrap hash through
+`JCustosServiceResolver.credentialHashingService()`, the pipeline that
+`.credentials(c -> c.hashing(BouncyCastleHashingServices.modern()))`
+sets. Older hashes verify and are replaced on the next successful
+login. `PasswordPreflight` also applies to the first administrator,
+through `HardeningBootstrapExtension.initialAdminPasswordPolicy(...)`.
+Tests replace the online check with
+`PasswordPreflight.useOnlineChecker(...)`.
+
 ## Slots
 
 | Slot | Default |
@@ -25,7 +35,7 @@ on the next request — no logout-and-relogin needed.
 | `SubjectIdResolverImpl.java.tmpl` | `security/services/` | shared |
 | `VersionBumper.java.tmpl` | `security/services/` | shared |
 | `PasswordPreflight.java.tmpl` | `security/services/` | shared |
-| `RestServer.java.tmpl` | OVERWRITE | NEW (Argon2id + securityVersion + filter wired) |
+| `HardeningBootstrapExtension.java.tmpl` | `security/bootstrap/` | NEW (Argon2id + securityVersion + preflight for the first admin) |
 | `UsersHandler.java.tmpl` | OVERWRITE | NEW (VersionBumper.bump after role mutations) |
 | `services-JCustosVersionStore.tmpl` | META-INF/services | shared |
 | `services-SubjectIdResolver.tmpl` | META-INF/services | shared |
@@ -44,7 +54,7 @@ User makes any request
 ## Pitfall
 
 The `RestJCustosVersionFilter` reads the snapshot from the token
-metadata. Layer-1's in-memory `TokenStore` records the snapshot at
-login time — that wiring is already in the layer-1 `RestServer`
-output (via `RestSecurity.bootstrap().sessions(...)`). Layer 3 adds
-the per-request check.
+metadata. Layer-1's `TokenStore` records the snapshot at login time
+whenever a `JCustosVersionStore` is registered, and the layer-1
+`Router` runs the filter when one is — layer 3 only registers the
+store (`services-JSentinelVersionStore.tmpl`, `.securityVersion(...)`).
