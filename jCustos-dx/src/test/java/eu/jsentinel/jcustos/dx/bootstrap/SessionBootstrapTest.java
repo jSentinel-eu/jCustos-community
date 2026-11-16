@@ -189,8 +189,8 @@ class SessionBootstrapTest {
   }
 
   @Test
-  @DisplayName("REST .storeBacked(...) records INFO rest/session-store-unused but still wires policy/version")
-  void restStoreBackedUnusedButOthersWired() {
+  @DisplayName("REST .storeBacked(...) lists the store like Vaadin, reports nothing, and wires policy/version")
+  void restStoreBackedIsListedAndOthersWired() {
     SessionStore store = new InMemorySessionStore();
     JCustosVersionStore vstore = new RecordingVersionStore();
     SubjectIdResolver<String> resolver = s -> SubjectId.of(s);
@@ -198,9 +198,14 @@ class SessionBootstrapTest {
         .sessions(s -> s.storeBacked(store).securityVersion(vstore).subjectIdResolver(resolver)
             .timeout(Duration.ofMinutes(10)))
         .install();
-    assertTrue(runtime.warnings().stream()
-        .anyMatch(w -> "rest/session-store-unused".equals(w.code())
-            && w.severity() == Severity.INFO));
+    // JS-SEC-131: REST reads the store since 00.84.00 (the REST bootstrap hands it to
+    // RestSessionRevocation); the base no longer reports rest/session-store-unused.
+    assertTrue(runtime.warnings().stream().noneMatch(w -> w.code().startsWith("rest/")),
+        "no REST finding for a store REST uses, got: " + runtime.warnings());
+    assertTrue(runtime.services().stream().anyMatch(
+            r -> r.spi() == SessionStore.class && r.impl() == InMemorySessionStore.class
+                && "bootstrap-explicit".equals(r.source())),
+        "the store is listed among the registered services, got: " + runtime.services());
     assertTrue(JCustosServiceResolver.findSessionPolicy().isPresent(),
         "REST still wires SessionPolicy/JCustosVersion/SubjectIdResolver");
   }

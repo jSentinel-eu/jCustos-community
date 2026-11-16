@@ -56,10 +56,23 @@ import static java.util.Objects.requireNonNull;
  * and writes unchanged as {@code sessionRef=}, so the log line and the event
  * show the same reference. Stable per session, useless as a credential.
  *
+ * <p>JS-SEC-131 (CWE-613): when a {@code SessionStore} is registered with
+ * {@link RestSessionRevocation}, the filter first refuses a request whose
+ * session record was revoked, exactly as {@link RestAuthenticationFilter} and
+ * {@link RestAuthorizationFilter} do: {@code 401} through the published
+ * mapper, a {@code SessionInvalidated} event with the session reference, and
+ * {@code false} so the handler does not run. A record with the status
+ * {@code EXPIRED} does not end the session, a failing store is logged and the
+ * request proceeds, and the check never writes the store. Until 00.84.00 a
+ * request path that ran only this filter served a revoked session. When the
+ * filter runs in front of one of the other two, a revoked session is refused
+ * here and the store is read once more for a session that is not.
+ *
  * <p>If the {@link RestSubjectResolver} does not surface a
- * {@link RestJCustosVersionContext} (the default), the filter
- * returns {@code true} unconditionally — applications that don't
- * yet track per-session versions opt in by overriding
+ * {@link RestJCustosVersionContext} (the default), the drift check is
+ * skipped and the filter returns {@code true} unless the session was
+ * revoked — applications that don't yet track per-session versions opt in
+ * by overriding
  * {@link RestSubjectResolver#resolveJCustosVersionContext(RestRequest) resolveJCustosVersionContext}.
  */
 @ExperimentalJCustosApi
@@ -90,13 +103,19 @@ public final class RestJCustosVersionFilter {
    *                 {@code null} — the filter passes through to
    *                 {@link JCustosVersionEnforcer#enforce enforce}
    * @return {@code true} when the request passes (caller proceeds);
-   *         {@code false} when the session has drifted (caller
-   *         must skip the handler — the response is already
+   *         {@code false} when the session has drifted or was revoked
+   *         (caller must skip the handler — the response is already
    *         written)
    */
   public boolean allow(RestRequest request, RestResponse response, String route) {
     requireNonNull(request, "request must not be null");
     requireNonNull(response, "response must not be null");
+    // JS-SEC-131 (CWE-613): a revoked session is refused before anything else is looked at,
+    // as in the other two filters. A no-op unless a SessionStore is registered and the resolver
+    // reports a session id; RestSessionRevocation wrote the 401 and the audit event.
+    if (RestSessionRevocation.refuseIfRevoked(resolver, request, response, null, null, null)) {
+      return false;
+    }
     Optional<RestJCustosVersionContext> ctx =
         resolver.resolveJCustosVersionContext(request);
     if (ctx.isEmpty()) {

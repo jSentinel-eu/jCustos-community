@@ -105,6 +105,11 @@ class RestSessionRevocationBootstrapTest {
         "REST reads the store now, got: " + runtime.warnings());
     assertTrue(runtime.services().stream().anyMatch(s -> s.spi() == SessionStore.class),
         "the store is listed among the registered services, got: " + runtime.services());
+    assertEquals(1, runtime.services().stream().filter(s -> s.spi() == SessionStore.class).count(),
+        "listed once, by the shared base: " + runtime.services());
+    assertTrue(runtime.services().stream().anyMatch(s -> s.spi() == RestSessionRevocation.class
+            && "bootstrap-session-revocation".equals(s.source())),
+        "the revocation wiring is listed as in the Vaadin bootstrap, got: " + runtime.services());
   }
 
   @Test

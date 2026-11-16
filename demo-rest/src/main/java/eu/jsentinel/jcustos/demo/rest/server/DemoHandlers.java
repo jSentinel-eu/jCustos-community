@@ -63,7 +63,6 @@ import eu.jsentinel.jcustos.jwt.api.JwtValidator;
 import eu.jsentinel.jcustos.jwt.api.ValidatedJwt;
 import eu.jsentinel.jcustos.rest.BearerTokenExtractor;
 import eu.jsentinel.jcustos.rest.BodyRestRequest;
-import eu.jsentinel.jcustos.rest.HttpStatusDecisionMapper;
 import eu.jsentinel.jcustos.rest.RestClientAddress;
 import eu.jsentinel.jcustos.rest.RestDecisionContext;
 import eu.jsentinel.jcustos.rest.RestHeaders;
@@ -602,8 +601,7 @@ public final class DemoHandlers {
    * {@code WWW-Authenticate} challenge and the configured error body.
    */
   private static void unauthenticated(RestResponse response, String reason) {
-    RestDecisionContext.mapper()
-        .orElseGet(HttpStatusDecisionMapper::new)
+    RestDecisionContext.mapperOrDefault()
         .apply(AuthorizationDecision.unauthenticated(reason), response);
   }
 

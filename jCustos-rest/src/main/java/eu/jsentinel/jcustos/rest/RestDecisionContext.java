@@ -1,4 +1,22 @@
+/**
+ * Copyright © 2017 Sven Ruppert (sven.ruppert@gmail.com)
+ *
+ * Licensed under the EUPL, Version 1.2 or - as soon they will be
+ * approved by the European Commission - subsequent versions of the
+ * EUPL (the "Licence"); You may not use this work except in
+ * compliance with the Licence. You may obtain a copy of the Licence at:
+ *
+ * https://joinup.ec.europa.eu/software/page/eupl
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the Licence is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the Licence for the specific language governing permissions and
+ * limitations under the Licence.
+ */
 package eu.jsentinel.jcustos.rest;
+
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
@@ -62,9 +80,17 @@ public final class RestDecisionContext {
    * and {@link RestJCustosVersionFilter} alike. Read per request, never cached, so a filter
    * built before the bootstrap ran still picks up the configured mapper.
    *
-   * @return never {@code null}
+   * <p>Public since 00.84.00, so that a refusal an application writes itself - a login
+   * handler's 401, an adapter of its own - goes through the same seam instead of repeating
+   * {@code mapper().orElseGet(HttpStatusDecisionMapper::new)}: the configured error-body
+   * strategy and the {@code WWW-Authenticate} challenge then apply there as well.
+   *
+   * @return the published mapper or a fresh {@link HttpStatusDecisionMapper}; never
+   *         {@code null}
+   * @since 00.84.00
    */
-  static RestDecisionMapping mapperOrDefault() {
+  @ExperimentalJCustosApi
+  public static RestDecisionMapping mapperOrDefault() {
     return mapper().orElseGet(HttpStatusDecisionMapper::new);
   }
 

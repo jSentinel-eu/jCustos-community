@@ -44,9 +44,9 @@ class JCustosRuntimePhase1SmokeTest {
         List.of(
             new JCustosBootstrapWarning(Severity.INFO, "audit/missing-service",
                 "no audit service registered", "register one"),
-            new JCustosBootstrapWarning(Severity.WARNING, "rest/session-store-unused",
-                "REST adapter does not consume SessionStore",
-                "drop .sessions(s -> s.storeBacked(...))")),
+            new JCustosBootstrapWarning(Severity.WARNING, "audit/noop-fallback",
+                "no audit service configured; events are dropped",
+                "call .audit(a -> a.logging())")),
         JCustosBootstrapMode.PRODUCTION);
 
     // 1. summary aggregates the same counts.

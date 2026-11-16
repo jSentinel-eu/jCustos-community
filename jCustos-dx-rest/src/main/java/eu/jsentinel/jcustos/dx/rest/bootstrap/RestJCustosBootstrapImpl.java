@@ -10,8 +10,6 @@
  */
 package eu.jsentinel.jcustos.dx.rest.bootstrap;
 
-import eu.jsentinel.jcustos.authentication.AuthenticationService;
-import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.dx.bootstrap.JCustosBootstrapException;
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
@@ -27,6 +25,8 @@ import eu.jsentinel.jcustos.session.SessionStore;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.ServiceConfigurationError;
+import java.util.ServiceLoader;
 import java.util.function.Consumer;
 import eu.jsentinel.jcustos.dx.rest.handlers.RestHandlerDiscovery;
 
@@ -38,9 +38,6 @@ import eu.jsentinel.jcustos.dx.rest.handlers.RestHandlerDiscovery;
 final class RestJCustosBootstrapImpl
     extends AbstractJCustosBootstrap<RestJCustosBootstrap>
     implements RestJCustosBootstrap {
-
-  /** Finding the shared base records for {@code .storeBacked(...)} on a REST bootstrap. */
-  private static final String SESSION_STORE_UNUSED = "rest/session-store-unused";
 
   private RestSubjectResolver subjectResolver;
   private RestHandlerDiscovery handlerDiscovery;
@@ -155,22 +152,63 @@ final class RestJCustosBootstrapImpl
   /**
    * JS-SEC-131 (CWE-613): hands the store configured through
    * {@code .sessions(s -> s.storeBacked(...))} to the REST filters, which refuse a request
-   * whose session record was revoked. Until 00.84.00 REST did not read the store at all
-   * and the shared base reported it as {@code rest/session-store-unused}; that finding is
-   * no longer true and is taken out again. Without a configured store nothing is touched:
-   * an application may have registered its store with {@link RestSessionRevocation}
-   * itself.
+   * whose session record was revoked. The shared base lists the store itself; this adds the
+   * revocation wiring, as the Vaadin bootstrap does. Without a configured store nothing is
+   * touched: an application may have registered its store with
+   * {@link RestSessionRevocation} itself.
    */
-  private void publishSessionStore(List<RegisteredJCustosService> services,
-                                   List<JCustosBootstrapWarning> warnings) {
+  private void publishSessionStore(List<RegisteredJCustosService> services) {
     SessionStore sessionStore = state.sessionState().sessionStore();
     if (sessionStore == null) {
       return;
     }
     RestSessionRevocation.useSessionStore(sessionStore);
-    warnings.removeIf(warning -> SESSION_STORE_UNUSED.equals(warning.code()));
     services.add(new RegisteredJCustosService(
-        SessionStore.class, sessionStore.getClass(), "bootstrap-explicit", false));
+        RestSessionRevocation.class, sessionStore.getClass(),
+        "bootstrap-session-revocation", false));
+  }
+
+  /**
+   * The {@link RestSubjectResolver} registered through {@code META-INF/services}, which the
+   * finding's own hint names as an alternative to {@code .subjectResolver(...)}: exactly one
+   * is recorded, none is {@code missing-rest-subject-resolver}, several are
+   * {@code ambiguous-rest-subject-resolver} (both ERROR). The filters take their resolver
+   * from the application; the bootstrap only records which one is registered.
+   */
+  private static void registeredSubjectResolver(List<RegisteredJCustosService> services,
+                                                List<JCustosBootstrapWarning> warnings) {
+    List<Class<?>> registered = new ArrayList<>();
+    try {
+      for (RestSubjectResolver resolver : ServiceLoader.load(RestSubjectResolver.class)) {
+        registered.add(resolver.getClass());
+      }
+    } catch (ServiceConfigurationError unloadable) {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.ERROR,
+          "missing-rest-subject-resolver",
+          "The registered RestSubjectResolver cannot be loaded: " + unloadable.getMessage(),
+          "Fix the META-INF/services entry, or call .subjectResolver(...)."));
+      return;
+    }
+    if (registered.size() == 1) {
+      services.add(new RegisteredJCustosService(
+          RestSubjectResolver.class, registered.getFirst(), SOURCE_SPI_REGISTERED, false));
+    } else if (registered.isEmpty()) {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.ERROR,
+          "missing-rest-subject-resolver",
+          "No RestSubjectResolver configured for RestSecurity.bootstrap().",
+          "Call .subjectResolver(...) or register an implementation via "
+              + "@JCustosAutoService(RestSubjectResolver.class)."));
+    } else {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.ERROR,
+          "ambiguous-rest-subject-resolver",
+          "Several RestSubjectResolver implementations are registered and none was passed "
+              + "explicitly: " + registered,
+          "Register exactly one via @JCustosAutoService(RestSubjectResolver.class), or call "
+              + ".subjectResolver(...)."));
+    }
   }
 
   @Override
@@ -183,45 +221,16 @@ final class RestJCustosBootstrapImpl
     List<RegisteredJCustosService> services = new ArrayList<>();
     List<JCustosBootstrapWarning> warnings = new ArrayList<>();
 
-    AuthenticationService<?, ?> authn = state.authenticationService();
-    AuthorizationService<?> authz = state.authorizationService();
-
-    if (authn != null) {
-      JCustosServiceResolver.setAuthenticationService(authn);
-      services.add(new RegisteredJCustosService(
-          AuthenticationService.class, authn.getClass(), "bootstrap-explicit", false));
-    } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-authentication-service",
-          "No AuthenticationService configured for RestSecurity.bootstrap().",
-          "Call .authentication(...) or register an implementation via "
-              + "@JCustosAutoService(AuthenticationService.class)."));
-    }
-
-    if (authz != null) {
-      JCustosServiceResolver.setAuthorizationService(authz);
-      services.add(new RegisteredJCustosService(
-          AuthorizationService.class, authz.getClass(), "bootstrap-explicit", false));
-    } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-authorization-service",
-          "No AuthorizationService configured for RestSecurity.bootstrap().",
-          "Call .authorization(...) or register an implementation via "
-              + "@JCustosAutoService(AuthorizationService.class)."));
-    }
+    // The explicit service wins; otherwise the one registered through META-INF/services, as
+    // the resolver finds it at run time. Until 00.84.00 an SPI-registered service was
+    // reported as missing (ERROR) although the hint itself called the registration enough.
+    applyAuthenticationAndAuthorization("RestSecurity.bootstrap()", services, warnings);
 
     if (subjectResolver != null) {
       services.add(new RegisteredJCustosService(
           RestSubjectResolver.class, subjectResolver.getClass(), "bootstrap-explicit", false));
     } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-rest-subject-resolver",
-          "No RestSubjectResolver configured for RestSecurity.bootstrap().",
-          "Call .subjectResolver(...) or register an implementation via "
-              + "@JCustosAutoService(RestSubjectResolver.class)."));
+      registeredSubjectResolver(services, warnings);
     }
 
     // Bodies first: the default mapper renders through them, so the
@@ -260,7 +269,7 @@ final class RestJCustosBootstrapImpl
     // methods.
     applyCommonConfiguration(AdapterKind.REST, services, warnings);
 
-    publishSessionStore(services, warnings);
+    publishSessionStore(services);
 
     // V00.74 (A2.2): publish CORS configuration when configured.
     if (corsConfiguration != null) {

@@ -382,6 +382,101 @@ class RestSessionRevocationTest {
         "the documented limit: the session pushed out of the memory reads as never recorded");
   }
 
+  // ── the version filter (JS-SEC-131 follow-up) ──
+
+  @Test
+  @DisplayName("version filter: a REVOKED record ends the session on a path that runs only this filter - 401 with challenge, false, one SessionInvalidated")
+  void versionFilter_revokedRecord_isRefused() {
+    RestSessionRevocation.useSessionStore(store);
+    store.save(record(SESSION, SessionStatus.ACTIVE));
+    assertTrue(throughVersionFilter(TOKEN).handlerRan, "the session works while its record is ACTIVE");
+    assertTrue(audit.events().isEmpty(), "no event for a session that passes: " + audit.events());
+
+    store.save(record(SESSION, SessionStatus.REVOKED));
+    Outcome outcome = throughVersionFilter(TOKEN);
+
+    assertFalse(outcome.handlerRan, "allow(...) must answer false for a revoked session");
+    assertEquals(HttpStatus.UNAUTHORIZED.code(), outcome.response.status);
+    assertEquals(HttpStatusDecisionMapper.BEARER_CHALLENGE,
+        outcome.response.headers.get(RestHeaders.WWW_AUTHENTICATE),
+        "a revocation is not a drift: the mapper's challenge, not SessionStale");
+    assertEquals(1, audit.events().size(), "audited once: " + audit.events());
+    SessionInvalidated event = audit.single(SessionInvalidated.class);
+    assertEquals("alice", event.subjectId());
+    assertEquals(RestSessionRevocation.REASON_REVOKED, event.reason());
+    assertEquals(SessionRef.of(TOKEN), event.sessionId());
+  }
+
+  @Test
+  @DisplayName("version filter: a record that was seen and is gone ends the session as well")
+  void versionFilter_seenAndGone_isRefused() {
+    RestSessionRevocation.useSessionStore(store);
+    store.save(record(SESSION, SessionStatus.ACTIVE));
+    assertTrue(throughVersionFilter(TOKEN).handlerRan);
+
+    store.delete(SESSION);
+
+    assertFalse(throughVersionFilter(TOKEN).handlerRan);
+    assertEquals(1, audit.all(SessionInvalidated.class).size());
+  }
+
+  @Test
+  @DisplayName("version filter: EXPIRED does not end a session, a store failure is logged and the request proceeds")
+  void versionFilter_expiredAndStoreFailure_pass() {
+    RestSessionRevocation.useSessionStore(store);
+    store.save(record(SESSION, SessionStatus.EXPIRED));
+    assertTrue(throughVersionFilter(TOKEN).handlerRan, "EXPIRED is derived from the lifetime policy");
+
+    RestSessionRevocation.useSessionStore(new CountingStore(store) {
+      @Override public Optional<SessionRecord> findById(SessionId sessionId) {
+        throw new IllegalStateException("store unreachable");
+      }
+    });
+    assertTrue(throughVersionFilter(TOKEN).handlerRan, "an unreachable store must not refuse every request");
+    assertTrue(audit.all(SessionInvalidated.class).isEmpty());
+  }
+
+  @Test
+  @DisplayName("version filter: the check reads once per request and never writes the store")
+  void versionFilter_neverWrites() {
+    store.save(record(SESSION, SessionStatus.ACTIVE));
+    CountingStore counting = new CountingStore(store);
+    RestSessionRevocation.useSessionStore(counting);
+
+    throughVersionFilter(TOKEN);
+    store.save(record(SESSION, SessionStatus.REVOKED));
+    throughVersionFilter(TOKEN);
+
+    assertEquals(2, counting.reads.get(), "one lookup per request");
+    assertEquals(0, counting.writes.get(), "no save, delete or rekey from the request path");
+  }
+
+  @Test
+  @DisplayName("version filter: a drift is still refused with the SessionStale challenge when the record is ACTIVE")
+  void versionFilter_driftStillChecked() {
+    RestSessionRevocation.useSessionStore(store);
+    store.save(record(SESSION, SessionStatus.ACTIVE));
+    eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore versions =
+        new eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore();
+    versions.increment(new eu.jsentinel.jcustos.session.JCustosVersionKey(
+        TenantId.DEFAULT, new SubjectId("alice")));
+    RestSubjectResolver drifting = new TokenResolver() {
+      @Override public Optional<RestJCustosVersionContext> resolveJCustosVersionContext(RestRequest request) {
+        return Optional.of(new RestJCustosVersionContext(
+            new SubjectId("alice"), TenantId.DEFAULT, JCustosVersion.INITIAL, TOKEN));
+      }
+    };
+    Outcome outcome = new Outcome();
+    outcome.handlerRan = new RestJCustosVersionFilter(drifting,
+        new eu.jsentinel.jcustos.session.JCustosVersionEnforcer(versions, audit))
+        .allow(request(TOKEN), outcome.response);
+
+    assertFalse(outcome.handlerRan);
+    assertEquals(RestJCustosVersionFilter.SESSION_STALE_CHALLENGE,
+        outcome.response.headers.get(RestHeaders.WWW_AUTHENTICATE));
+    assertTrue(audit.all(SessionInvalidated.class).isEmpty());
+  }
+
   // ── helpers ──
 
   private Outcome throughAuthentication(String token) {
@@ -396,6 +491,16 @@ class RestSessionRevocationTest {
     Method secured = Handlers.class.getDeclaredMethod("delete");
     new RestAuthorizationFilter(resolver).authorizeAndHandle(
         request(token), outcome.response, (rq, rs) -> outcome.handlerRan = true, secured, Handlers.class);
+    return outcome;
+  }
+
+  /** The version filter; {@code handlerRan} holds what {@code allow(...)} answered. */
+  private Outcome throughVersionFilter(String token) {
+    Outcome outcome = new Outcome();
+    outcome.handlerRan = new RestJCustosVersionFilter(resolver,
+        new eu.jsentinel.jcustos.session.JCustosVersionEnforcer(
+            new eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore(), audit))
+        .allow(request(token), outcome.response);
     return outcome;
   }
 
@@ -418,7 +523,7 @@ class RestSessionRevocationTest {
    * The resolver of an application with bearer tokens: every token authenticates alice,
    * the session record lives under the reference of the token, the session is young.
    */
-  private static final class TokenResolver implements RestSubjectResolver {
+  private static class TokenResolver implements RestSubjectResolver {
     private final AtomicInteger sessionIdLookups = new AtomicInteger();
     private final BearerTokenExtractor extractor = new BearerTokenExtractor();
 

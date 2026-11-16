@@ -1801,6 +1801,39 @@ flow publishes `LoginFailed` only for a login the policy refuses after the check
 `LoginAttemptPolicy` of your own publishes `LoginFailed` in `recordFailure`, or rejected logins
 behind it go unaudited; `NoopLoginAttemptPolicy` now publishes `LoginFailed` too.
 
+## The REST version filter refuses revoked sessions; `.storeBacked(...)` on a REST bootstrap is listed, not reported (addition to SA31, JS-SEC-131, CWE-613)
+
+`RestJCustosVersionFilter` did not run the revocation check, so a request path that used only this
+filter served a revoked session. It now runs `RestSessionRevocation` before the drift check, with
+the decisions of the other two filters: `401` through the published mapper with the `Bearer`
+challenge, one `SessionInvalidated` with the session reference, and the handler does not run;
+`EXPIRED` does not end a session, a failing store is logged and the request proceeds, and the store
+is never written. The shared bootstrap base no longer emits `rest/session-store-unused`; it lists
+the store as a `SessionStore` service, and the REST bootstrap adds the revocation wiring as
+`bootstrap-session-revocation`, as the Vaadin bootstrap does. **Consumers:** in front of one of the
+other filters the store is read twice for a session that is not revoked.
+
+## REST and standalone bootstraps accept services registered through `META-INF/services` (addition to SA24, DX)
+
+`RestSecurity.bootstrap().install()` and `StandaloneSecurity.bootstrap().install()` read only
+`.authentication(...)` and `.authorization(...)` and reported `missing-authentication-service` /
+`missing-authorization-service` as ERROR although the service was registered through
+`META-INF/services` — a `STRICT` bootstrap refused to start. Both now fall back to the registered
+service as `JCustosServiceResolver` resolves it at run time and list it with the source
+`spi-registered`; several registered implementations are the ERROR
+`ambiguous-authentication-service` / `ambiguous-authorization-service`. The REST bootstrap does the
+same for the `RestSubjectResolver` (`ambiguous-rest-subject-resolver`). **Consumers:** applications
+that register their services with `@JCustosAutoService` no longer need the explicit calls.
+
+## `RestDecisionContext.mapperOrDefault()` is public (addition to ER19, JS-SEC-086, CWE-778)
+
+The seam the REST filters render a refusal through was package-private, and applications, the demos
+and the enterprise bridge repeated
+`RestDecisionContext.mapper().orElseGet(HttpStatusDecisionMapper::new)`. `mapperOrDefault()` is
+public now, and the in-repo REST demos and the skill template use it. **Consumers:** a refusal
+written by a handler of your own goes through `RestDecisionContext.mapperOrDefault().apply(decision,
+response)`.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

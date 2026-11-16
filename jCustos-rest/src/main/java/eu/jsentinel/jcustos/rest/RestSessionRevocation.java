@@ -45,10 +45,10 @@ import static java.util.Objects.requireNonNull;
  * <p>Until 00.84.00 nothing on the REST request path read the {@link SessionStore}: a
  * session whose record an administrator had set to {@link SessionStatus#REVOKED}, or
  * removed, kept being served until its token expired. With a store registered through
- * {@link #useSessionStore(SessionStore)}, {@link RestAuthenticationFilter} and
- * {@link RestAuthorizationFilter} look up the record of the request's session before the
- * handler runs; request paths that use neither filter call
- * {@link #allow(RestSubjectResolver, RestRequest, RestResponse)} themselves.
+ * {@link #useSessionStore(SessionStore)}, {@link RestAuthenticationFilter},
+ * {@link RestAuthorizationFilter} and {@link RestJCustosVersionFilter} look up the record
+ * of the request's session before the handler runs; request paths that use none of the
+ * three call {@link #allow(RestSubjectResolver, RestRequest, RestResponse)} themselves.
  *
  * <p><strong>Opt-in, in two steps.</strong> The check needs the store and the key of the
  * request's record: {@link RestSubjectResolver#resolveSessionId(RestRequest)}. Without a
@@ -181,8 +181,9 @@ public final class RestSessionRevocation {
   }
 
   /**
-   * Runs the revocation check for request paths that use neither
-   * {@link RestAuthenticationFilter} nor {@link RestAuthorizationFilter}. Returns
+   * Runs the revocation check for request paths that use none of
+   * {@link RestAuthenticationFilter}, {@link RestAuthorizationFilter} and
+   * {@link RestJCustosVersionFilter}. Returns
    * {@code true} when the request may proceed. Returns {@code false} when its session was
    * revoked; the response is then written and the audit event published, and the caller
    * must not invoke the handler.

@@ -56,7 +56,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Skeleton implementation of {@link CommonJCustosBootstrap} shared by
@@ -621,6 +623,86 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    * authn/authz wiring so the audit service is in place before any
    * other dependent setup.
    */
+  /** Registration source of a service the bootstrap found through {@code META-INF/services}. */
+  protected static final String SOURCE_SPI_REGISTERED = "spi-registered";
+
+  /**
+   * Wires the {@link AuthenticationService} and the {@link AuthorizationService}: the one
+   * passed to {@code .authentication(...)} / {@code .authorization(...)}, otherwise the one
+   * registered through {@code META-INF/services} - {@code @JCustosAutoService} writes that
+   * entry - as {@link JCustosServiceResolver} resolves it at run time.
+   *
+   * <p>Until 00.84.00 the REST and standalone bootstraps read the explicit calls only and
+   * reported {@code missing-authentication-service} / {@code missing-authorization-service}
+   * as an ERROR although the service was registered and their own hint called that
+   * registration sufficient; a {@code STRICT} bootstrap therefore refused to start. The
+   * findings now mean what they say: no service at all. Several registered implementations
+   * are reported as {@code ambiguous-authentication-service} /
+   * {@code ambiguous-authorization-service} (ERROR), the resolver refuses to pick one.
+   *
+   * @param bootstrapName the entry point named in the findings, e.g.
+   *                      {@code RestSecurity.bootstrap()}
+   * @param services      registered services, appended to
+   * @param warnings      findings, appended to
+   * @since 00.84.00
+   */
+  protected final void applyAuthenticationAndAuthorization(String bootstrapName,
+                                                           List<RegisteredJCustosService> services,
+                                                           List<JCustosBootstrapWarning> warnings) {
+    AuthenticationService<?, ?> authn = state.authenticationService();
+    if (authn != null) {
+      JCustosServiceResolver.setAuthenticationService(authn);
+      services.add(new RegisteredJCustosService(
+          AuthenticationService.class, authn.getClass(), "bootstrap-explicit", false));
+    } else {
+      registeredService(AuthenticationService.class, "authentication", bootstrapName,
+          JCustosServiceResolver::findAuthenticationService, services, warnings);
+    }
+
+    AuthorizationService<?> authz = state.authorizationService();
+    if (authz != null) {
+      JCustosServiceResolver.setAuthorizationService(authz);
+      services.add(new RegisteredJCustosService(
+          AuthorizationService.class, authz.getClass(), "bootstrap-explicit", false));
+    } else {
+      registeredService(AuthorizationService.class, "authorization", bootstrapName,
+          JCustosServiceResolver::findAuthorizationService, services, warnings);
+    }
+  }
+
+  private static void registeredService(Class<?> spi,
+                                        String concern,
+                                        String bootstrapName,
+                                        Supplier<? extends Optional<?>> lookup,
+                                        List<RegisteredJCustosService> services,
+                                        List<JCustosBootstrapWarning> warnings) {
+    String name = spi.getSimpleName();
+    Optional<?> registered;
+    try {
+      registered = lookup.get();
+    } catch (IllegalStateException severalImplementations) {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.ERROR,
+          "ambiguous-" + concern + "-service",
+          "Several " + name + " implementations are registered for " + bootstrapName
+              + " and none was passed explicitly: " + severalImplementations.getMessage(),
+          "Register exactly one via @JCustosAutoService(" + name + ".class), or call ."
+              + concern + "(...)."));
+      return;
+    }
+    if (registered.isPresent()) {
+      services.add(new RegisteredJCustosService(
+          spi, registered.get().getClass(), SOURCE_SPI_REGISTERED, false));
+      return;
+    }
+    warnings.add(new JCustosBootstrapWarning(
+        Severity.ERROR,
+        "missing-" + concern + "-service",
+        "No " + name + " configured for " + bootstrapName + ".",
+        "Call ." + concern + "(...) or register an implementation via "
+            + "@JCustosAutoService(" + name + ".class)."));
+  }
+
   /**
    * JS-SEC-085 (CWE-1188): publishes {@code .denyByDefault(...)} to the resolver and
    * reports allow-by-omission. No builder offered the switch before, yet the resolver's
@@ -805,10 +887,10 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    *   <li>{@link AdapterKind#STANDALONE} — any selection produces
    *       {@code standalone/sessions-not-applicable} (INFO) and the
    *       resolver is not touched.</li>
-   *   <li>{@link AdapterKind#REST} — every selection except
-   *       {@code storeBacked} is consumed; {@code storeBacked}
-   *       produces {@code rest/session-store-unused} (INFO).</li>
-   *   <li>{@link AdapterKind#VAADIN} — full consumption.</li>
+   *   <li>{@link AdapterKind#REST} and {@link AdapterKind#VAADIN} — full
+   *       consumption; the store of {@code storeBacked} is listed here and
+   *       wired by the adapter's bootstrap (REST: the revocation check of the
+   *       filters, JS-SEC-131; Vaadin: session management and revocation).</li>
    * </ul>
    */
   protected final void applySessionConfiguration(AdapterKind adapter,
@@ -921,19 +1003,14 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
           "bootstrap-explicit", false));
     }
 
-    // SessionStore — adapter-specific consumption
+    // SessionStore — recorded here, wired by the adapter: Vaadin hands it to the session
+    // management route and the revocation check, REST to RestSessionRevocation (JS-SEC-131).
+    // Until 00.84.00 REST did not read the store and was told so with the INFO
+    // rest/session-store-unused, which its own bootstrap then had to filter out again.
     if (session.sessionStore() != null) {
-      if (adapter == AdapterKind.REST) {
-        warnings.add(new JCustosBootstrapWarning(
-            Severity.INFO,
-            "rest/session-store-unused",
-            ".storeBacked(...) was configured on RestSecurity.bootstrap(); REST consumes Policy/Version/Resolver but not SessionStore.",
-            "Drop the .storeBacked(...) call or move it to the Vaadin adapter."));
-      } else {
-        services.add(new RegisteredJCustosService(
-            SessionStore.class, session.sessionStore().getClass(),
-            "bootstrap-explicit", false));
-      }
+      services.add(new RegisteredJCustosService(
+          SessionStore.class, session.sessionStore().getClass(),
+          "bootstrap-explicit", false));
     }
   }
 

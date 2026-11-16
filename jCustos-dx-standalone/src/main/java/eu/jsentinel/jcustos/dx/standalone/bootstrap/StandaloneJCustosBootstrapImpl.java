@@ -10,9 +10,6 @@
  */
 package eu.jsentinel.jcustos.dx.standalone.bootstrap;
 
-import eu.jsentinel.jcustos.authentication.AuthenticationService;
-import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
@@ -22,7 +19,6 @@ import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
-import eu.jsentinel.jcustos.dx.runtime.Severity;
 import eu.jsentinel.jcustos.standalone.ThreadLocalSubjectStore;
 
 import java.util.ArrayList;
@@ -96,32 +92,9 @@ final class StandaloneJCustosBootstrapImpl
     List<RegisteredJCustosService> services = new ArrayList<>();
     List<JCustosBootstrapWarning> warnings = new ArrayList<>();
 
-    AuthenticationService<?, ?> authn = state.authenticationService();
-    AuthorizationService<?> authz = state.authorizationService();
-
-    if (authn != null) {
-      JCustosServiceResolver.setAuthenticationService(authn);
-      services.add(new RegisteredJCustosService(
-          AuthenticationService.class, authn.getClass(), "bootstrap-explicit", false));
-    } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-authentication-service",
-          "No AuthenticationService configured for StandaloneSecurity.bootstrap().",
-          "Call .authentication(...) or register via @JCustosAutoService."));
-    }
-
-    if (authz != null) {
-      JCustosServiceResolver.setAuthorizationService(authz);
-      services.add(new RegisteredJCustosService(
-          AuthorizationService.class, authz.getClass(), "bootstrap-explicit", false));
-    } else {
-      warnings.add(new JCustosBootstrapWarning(
-          Severity.ERROR,
-          "missing-authorization-service",
-          "No AuthorizationService configured for StandaloneSecurity.bootstrap().",
-          "Call .authorization(...) or register via @JCustosAutoService."));
-    }
+    // The explicit service wins; otherwise the one registered through META-INF/services, as
+    // the resolver finds it at run time (StandaloneLoginFlow's default constructor does).
+    applyAuthenticationAndAuthorization("StandaloneSecurity.bootstrap()", services, warnings);
 
     SubjectStore effectiveSubjectStore = subjectStore;
     boolean subjectStoreDefaulted = false;

@@ -6,7 +6,6 @@ import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
-import eu.jsentinel.jcustos.rest.HttpStatusDecisionMapper;
 import eu.jsentinel.jcustos.rest.RestAuthorizationFilter;
 import eu.jsentinel.jcustos.rest.RestDecisionContext;
 import eu.jsentinel.jcustos.rest.RestHeaderLines;
@@ -397,7 +396,7 @@ public final class Router implements HttpHandler, HasLogger {
    */
   public static void refuse(HttpExchange exchange, AuthorizationDecision decision) throws IOException {
     BufferedResponse response = new BufferedResponse();
-    RestDecisionContext.mapper().orElseGet(HttpStatusDecisionMapper::new).apply(decision, response);
+    RestDecisionContext.mapperOrDefault().apply(decision, response);
     response.writeTo(exchange);
   }
 
