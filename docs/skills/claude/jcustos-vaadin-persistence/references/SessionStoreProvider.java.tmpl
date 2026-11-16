@@ -4,13 +4,16 @@ import eu.jsentinel.jcustos.session.SessionStore;
 import {{BASE_PACKAGE}}.security.bootstrap.JCustosStorageProvider;
 
 /**
- * Replacement for the {@code vaadin-jsentinel} provider — now
+ * Replacement for the {@code vaadin-jcustos} provider — now
  * delegates to the Eclipse-Store-backed
  * {@link eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosStorage}
  * via {@link JCustosStorageProvider}.
  *
  * <p>Session records survive JVM restarts as long as the
- * {@code {{STORAGE_DIR}}} directory survives.
+ * {@code {{STORAGE_DIR}}} directory survives. They are
+ * kept under the reference of the session id, never under the session
+ * cookie itself ({@link SessionReferenceStore}, JS-SEC-117): the store
+ * files and their backups hold nothing that opens a session.
  */
 public final class SessionStoreProvider {
 
@@ -18,6 +21,6 @@ public final class SessionStoreProvider {
   }
 
   public static SessionStore sessionStore() {
-    return JCustosStorageProvider.storage().sessionStore();
+    return new SessionReferenceStore(JCustosStorageProvider.framework().sessionStore());
   }
 }

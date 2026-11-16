@@ -34,6 +34,7 @@ import com.vaadin.flow.component.textfield.TextField;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
 import java.util.Arrays;
 
@@ -42,6 +43,7 @@ import java.util.Arrays;
  * via {@link BackendClientProvider} — the REST backend stays
  * authoritative.
  */
+@PublicRoute
 @Route(SetupView.NAV)
 public class SetupView extends Composite<Div> implements BeforeEnterObserver {
 

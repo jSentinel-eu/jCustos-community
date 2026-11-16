@@ -80,7 +80,7 @@ elsewhere; the RP must terminate that user's sessions. Three pieces:
    the user's next Vaadin request fails → re-auth). Cleaned on session destroy.
 2. **`BackChannelLogoutHandler implements RequestHandler`** — intercepts
    `POST {{BACKCHANNEL_PATH}}`, reads the `logout_token` form param, runs
-   `BackChannelLogoutReceiver(new DefaultLogoutTokenValidator(logoutJwtValidator, jtiStore), registry).receive(token)`,
+   `BackChannelLogoutReceiver(new DefaultLogoutTokenValidator(logoutJwtValidator, ISSUER, CLIENT_ID, jtiStore), registry).receive(token)`,
    writes `200` for `Accepted`, `400` for `Rejected` (§2.7). It dereferences **no** URL
    from the token (no SSRF).
 3. **`BackChannelLogoutInitListener implements VaadinServiceInitListener`** — registers
@@ -89,7 +89,13 @@ elsewhere; the RP must terminate that user's sessions. Three pieces:
 
 `OidcCallbackView` is replaced to **register the session at login**: after binding the
 subject, capture `VaadinSession.getCurrent().getSession()` (the `WrappedSession`) and the
-ID-token `sid` claim into the registry.
+ID-token `sid` claim into the registry. The callback still extends
+`AbstractOAuth2CallbackView`, which rotates the session id after `onTokens(...)`; the
+rotation keeps the `WrappedSession` object, so the registered handle stays valid.
+
+The validator checks `iss`, `aud`, `exp`/`iat` and the replay window itself (JS-SEC-087) and
+needs the expected issuer and client id in its constructor; the constructors without them
+are deprecated and reject every token - back-channel logout then stops working.
 
 Security properties: the `logout_token` is fully validated (signature via JWKS, `iss`,
 `aud`, the `events` back-channel-logout member, `sub`/`sid`, **`nonce` must be absent**,
@@ -107,6 +113,14 @@ HttpRequest req = HttpRequest.newBuilder(resourceUri)
     .header("DPoP", proof)
     .GET().build();
 ```
+
+On the resource-server side (a server you control) the proof is validated against the
+key the token is bound to: `DpopValidationRequest.boundTo(proof, method, uri, accessToken,
+expectedJkt)`, where `expectedJkt` is the access token's `cnf.jkt` (JS-SEC-148). A proof
+signed with any other key fails with `KeyBindingMismatch` before its `jti` is recorded.
+The four-argument `boundTo(...)` without the thumbprint is deprecated and fails closed —
+before 00.84.00 it checked `ath` only, so a thief of the token could sign a proof with a
+key of his own. Proofs above 100 kB and `jti` values above 128 characters are rejected.
 
 > The access token must itself be DPoP-bound (`cnf.jkt`) by the OP — which requires
 > sending a DPoP proof to the **token endpoint**. The stable `HttpTokenEndpointClient` /

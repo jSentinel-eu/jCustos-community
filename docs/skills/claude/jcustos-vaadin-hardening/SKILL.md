@@ -1,6 +1,6 @@
 ---
 name: jcustos-vaadin-hardening
-description: Layer-3 follow-up to `jcustos-vaadin` (and optionally `jcustos-vaadin-persistence`) — wires the V00.71 production-hardening features: modern password hashing via Argon2id (`BouncyCastleHashingServices.modern()` from `jCustos-crypto-bc`), optional HIBP password-leak check (`HaveIBeenPwnedCompromisedPasswordChecker` from `jCustos-credentials-hibp`), and Phase-4c JCustos-version drift detection (`JCustosVersionStore` + `JCustosVersionEnforcerListener`) so revoking a role mid-session forces the affected user back to the login view on the next navigation. Prerequisite: a project that already ran `jcustos-vaadin`. Use PROACTIVELY when the user mentions Argon2id, modern crypto, bcrypt, scrypt, BouncyCastle hashing, password upgrade, compromised password, HIBP, k-anonymity, "production crypto", "swap PBKDF2 for Argon2id", drift detection, `JCustosVersion`, session invalidation on role change, "revoke session immediately", `JCustosVersionEnforcer`, `JCustosVersionEnforcerListener`, "kick user out on role revoke", "stale subject", compliance hardening, "production-ready jCustos", "V00.71 features". File-level signals: an existing `JCustosBootstrapInitListener.java` with `.credentials(c -> c.hashing(PasswordHashingServices.defaults()))` (PBKDF2 default that this skill replaces); an `AdminRolesView` that mutates roles but doesn't bump version (this skill adds the call); absence of `JCustosVersionInitListener` / `META-INF/services/eu.jsentinel.jcustos.session.JCustosVersionStore`. Adds 2 dependencies (`jCustos-crypto-bc`, `jCustos-credentials-hibp`), 4 new templates (`PasswordPreflight`, `VersionBumper`, `JCustosVersionInitListener`, `SubjectIdResolverImpl`), 1 replacement template (`AdminRolesView` calls `VersionBumper.bump(user)` after every role mutation). The bootstrap chain is extended via the layer-1 `BootstrapExtension` SPI — no overwrite of `JCustosBootstrapInitListener.java`. Order with `jcustos-vaadin-persistence` is irrelevant, 2 new META-INF/services entries (`JCustosVersionStore`, `SubjectIdResolver`). Does NOT cover token-based first-admin bootstrap or storage persistence — those are the layer-2 `jcustos-vaadin-persistence` skill; does NOT cover API keys / refresh tokens / rate limiting (shipped as the V00.70 account-lifecycle / token / rate-limit services) or OAuth2 / OIDC federation (the released V00.76–V00.79 identity stack: `jCustos-jwt` / `-oauth2` / `-identity-oidc`, vendor profiles, DPoP, mTLS) — both out of this hashing + drift hardening skill's scope.
+description: Layer-3 follow-up to `jcustos-vaadin` (and optionally `jcustos-vaadin-persistence`) — wires the V00.71 production-hardening features: modern password hashing via Argon2id (`BouncyCastleHashingServices.modern()` from `jCustos-crypto-bc`), optional HIBP password-leak check (`HaveIBeenPwnedCompromisedPasswordChecker` from `jCustos-credentials-hibp`), and Phase-4c JCustos-version drift detection (`JCustosVersionStore` + `JCustosVersionEnforcerListener`) so revoking a role mid-session forces the affected user back to the login view on the next navigation. Prerequisite: a project that already ran `jcustos-vaadin`. Use PROACTIVELY when the user mentions Argon2id, modern crypto, bcrypt, scrypt, BouncyCastle hashing, password upgrade, compromised password, HIBP, k-anonymity, "production crypto", "swap PBKDF2 for Argon2id", drift detection, `JCustosVersion`, session invalidation on role change, "revoke session immediately", `JCustosVersionEnforcer`, `JCustosVersionEnforcerListener`, "kick user out on role revoke", "stale subject", compliance hardening, "production-ready jCustos", "V00.71 features". File-level signals: an existing `JCustosBootstrapInitListener.java` with `.credentials(c -> c.hashing(PasswordHashingServices.defaults()))` (PBKDF2 default that this skill replaces); an `AdminRolesView` that mutates roles but doesn't bump version (this skill adds the call); absence of `JCustosVersionInitListener` / `META-INF/services/eu.jsentinel.jcustos.session.JCustosVersionStore`. Adds 2 dependencies (`jCustos-crypto-bc`, `jCustos-credentials-hibp`), 5 new templates (`PasswordPreflight`, `PreflightPasswordPolicy`, `VersionBumper`, `JCustosVersionInitListener`, `SubjectIdResolverImpl`), 1 replacement template (`AdminRolesView` calls `VersionBumper.bump(user)` after every role mutation). The bootstrap chain is extended via the layer-1 `BootstrapExtension` SPI — no overwrite of `JCustosBootstrapInitListener.java`. Order with `jcustos-vaadin-persistence` is irrelevant, 3 new META-INF/services entries (`JCustosVersionStore`, `SubjectIdResolver`, `PasswordPolicy`). Does NOT cover token-based first-admin bootstrap or storage persistence — those are the layer-2 `jcustos-vaadin-persistence` skill; does NOT cover API keys / refresh tokens / rate limiting (shipped as the V00.70 account-lifecycle / token / rate-limit services) or OAuth2 / OIDC federation (the released V00.76–V00.79 identity stack: `jCustos-jwt` / `-oauth2` / `-identity-oidc`, vendor profiles, DPoP, mTLS) — both out of this hashing + drift hardening skill's scope.
 ---
 
 # jCustos hardening — layer 3
@@ -20,6 +20,31 @@ defaults" to "V00.71 production hardening" in three concerns:
    role, the affected user's next navigation reroutes to
    `{{SUBJECT_PREFIX}}LoginView`. No more "this user keeps using a
    role we just revoked until they log out."
+4. **PRODUCTION profile** — render the layer-1
+   `JCustosBootstrapInitListener` with `{{BOOTSTRAP_PROFILE}}` =
+   `productionDefaults` (JS-SEC-137). Together with the layer-1
+   `denyByDefault(true)` and `.logout(...)` the bootstrap then reports
+   no error; anything missing later surfaces as an error instead of
+   being suppressed.
+
+**The hashing service is the one the directory uses.** The layer-1 and
+layer-2 user directories and the first-administrator setup hash and
+verify through `ConfiguredHashingService`, which resolves
+`JCustosServiceResolver.credentialHashingService()` on every call — the
+service `contributeCredentials(c -> c.hashing(BouncyCastleHashingServices.modern()))`
+configures. New hashes are therefore Argon2id, older envelopes are
+upgraded on the next successful login, and the administrator the setup
+creates can log in (JS-SEC-134). A directory built on the legacy slot
+`JCustosServiceResolver.passwordHashingService()` never sees
+`.hashing(...)`: it keeps writing PBKDF2 and cannot read the setup's
+envelope.
+
+**The first administrator passes the preflight.** `PreflightPasswordPolicy`
+(minimum length, local blocklist, HIBP) is registered in
+`META-INF/services/eu.jsentinel.jcustos.bootstrap.PasswordPolicy`; the
+persistence layer's `BootstrapWiring` applies it to the setup, so
+`password` or `12345678` are refused for the most privileged account,
+not only in the role administration.
 
 ## How to use this skill
 
@@ -27,11 +52,11 @@ defaults" to "V00.71 production hardening" in three concerns:
    (`JCustosBootstrapInitListener.java`, `AdminRolesView.java`
    exist).
 2. **Apply the POM patch** — adds 2 dependencies.
-3. **Add 4 new templates** under their target paths.
+3. **Add 5 new templates** under their target paths.
 4. **Replace 1 existing template** (only `AdminRolesView` now — bootstrap goes through the additive Extension SPI) — `JCustosBootstrapInitListener`
    gets new bootstrap calls, `AdminRolesView` calls the bumper.
-5. **Add 2 META-INF/services entries** — `JCustosVersionStore` and
-   `SubjectIdResolver`.
+5. **Add 3 META-INF/services entries** — `JCustosVersionStore`,
+   `SubjectIdResolver` and `PasswordPolicy`.
 6. **Verify**: compile, run, log in as admin, revoke a role on
    another logged-in user → that user's next click reroutes to
    `/login`.
@@ -53,8 +78,10 @@ inherited from the previous skill output.
 | `security/bootstrap/HardeningBootstrapExtension.java` (NEW) | implements `BootstrapExtension` SPI from layer 1; `contributeCredentials(c)` calls `c.hashing(BouncyCastleHashingServices.modern())`; `contributeSessions(s)` wires `securityVersion` + `subjectIdResolver` via `JCustosServiceResolver.find...`. Picked up by `BootstrapBuilder.apply(...)` at runtime — **no overwrite of the layer-1 listener.** |
 | `security/services/SubjectIdResolverImpl.java` | **NEW** — implements `SubjectIdResolver<{{SUBJECT_TYPE}}>`; returns `SubjectId.of(user.id().toString())` |
 | `security/services/VersionBumper.java` | **NEW** — `VersionBumper.bump(user)` increments the per-subject version on role change |
-| `security/services/PasswordPreflight.java` | **NEW** — local blocklist + (optional) HIBP check; called from `SetupView` / role-add dialog |
-| `security/bootstrap/JCustosVersionInitListener.java` | **NEW** — `VaadinServiceInitListener` registering `JCustosVersionEnforcerListener` on every UI |
+| `security/services/PasswordPreflight.java` | **NEW** — local blocklist + (optional) HIBP check; called from the role-add dialog and, through `PreflightPasswordPolicy`, from the first-administrator setup. `-Djcustos.demo.hibpEndpoint=<url>` points the range query at a mirror (HTTPS, or HTTP on loopback) |
+| `security/services/PreflightPasswordPolicy.java` | **NEW** — `PasswordPolicy` for the first-administrator setup: minimum length + `PasswordPreflight` |
+| `META-INF/services/eu.jsentinel.jcustos.bootstrap.PasswordPolicy` | **NEW** — points at `PreflightPasswordPolicy` |
+| `security/bootstrap/JCustosVersionInitListener.java` | **NEW** — `VaadinServiceInitListener` that calls `JCustosVersionEnforcerListener.register(event)`: navigation listener on every UI, UIDL request handler and request interceptor for WebSocket-only push messages (JS-SEC-155). Do not register the handler and the navigation listener by hand — push messages bypass them |
 | `views/admin/AdminRolesView.java` | `assignRole / revokeRole / deleteUser` now call `VersionBumper.bump(user)` after the mutation |
 | `META-INF/services/eu.jsentinel.jcustos.session.JCustosVersionStore` | **NEW** — `eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore` |
 | `META-INF/services/eu.jsentinel.jcustos.authorization.api.SubjectIdResolver` | **NEW** — points at `SubjectIdResolverImpl` |
@@ -84,7 +111,9 @@ inherited from the previous skill output.
 | `SubjectIdResolverImpl.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/SubjectIdResolverImpl.java` |
 | `VersionBumper.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/VersionBumper.java` |
 | `PasswordPreflight.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/PasswordPreflight.java` |
-| `JCustosVersionInitListener.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/JCustosVersionInitListener.java` |
+| `PreflightPasswordPolicy.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/PreflightPasswordPolicy.java` |
+| `services-PasswordPolicy.tmpl` | `src/main/resources/META-INF/services/eu.jsentinel.jcustos.bootstrap.PasswordPolicy` |
+| `JSentinelVersionInitListener.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/JCustosVersionInitListener.java` |
 | `HardeningBootstrapExtension.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/HardeningBootstrapExtension.java` |
 | `services-BootstrapExtension.tmpl` | **APPEND** lines to `src/main/resources/META-INF/services/{{BASE_PACKAGE}}.security.bootstrap.BootstrapExtension` (deduplicated union with existing content) |
 | `AdminRolesView.java.tmpl` | OVERWRITE existing |
@@ -129,8 +158,12 @@ session captures fresh snapshot — they see the updated role set.
    wired through `PasswordPreflight`. **Expected:** rejection
    message "this password is on a known-bad list".
 9. Hash inspection: look at the rendered admin user's password hash
-   on disk (persistence skill) or in memory. **Expected:** envelope
-   starts with `$pwh$v=1$argon2id$…`, not `pbkdf2`.
+   on disk (persistence skill) or in memory. **Expected:** the envelope
+   carries `alg=Argon2id` (`$pwh$v=1$ct=PASSWORD$alg=Argon2id$…`), not
+   PBKDF2.
+10. First administrator (with the persistence skill): set up with
+    `password123` → refused; set up with a strong password → you can log
+    in with it.
 
 ## Pitfalls
 

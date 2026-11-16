@@ -7,9 +7,9 @@ import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
 import {{BASE_PACKAGE}}.security.oidc.OidcClients;
-import {{BASE_PACKAGE}}.security.oidc.OidcNonceStore;
 
 import java.security.SecureRandom;
 import java.util.Base64;
@@ -19,10 +19,12 @@ import java.util.Set;
 
 /**
  * Starts OIDC federated login: generates a nonce, asks the authorization-code flow for
- * the redirect to the IdP (PKCE verifier + state are stored in the Vaadin-session
- * {@code StateStore}), keeps the nonce keyed by the state, then redirects the browser.
+ * the redirect to the IdP (PKCE verifier, state and nonce are stored in the Vaadin-session
+ * {@code StateStore}; the callback receives the nonce back in {@code CallbackResult.nonce()}),
+ * then redirects the browser. {@code @PublicRoute}: the bootstrap runs with deny-by-default.
  * Replaces the local username/password {@code MyLoginView}.
  */
+@PublicRoute
 @Route("login")
 public class OidcLoginView extends Div implements BeforeEnterObserver {
 
@@ -33,7 +35,6 @@ public class OidcLoginView extends Div implements BeforeEnterObserver {
     String nonce = randomUrlSafe();
     AuthorizationRequest request = OidcClients.get().flow().startRequest(
         new StartRequestParams(Set.of(), Map.of(), Optional.of(nonce), Optional.empty()));
-    OidcNonceStore.put(request.stateKey(), nonce);
     UI.getCurrent().getPage().setLocation(request.redirectTo().toString());
   }
 

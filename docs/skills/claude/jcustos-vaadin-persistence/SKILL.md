@@ -21,7 +21,12 @@ This skill ships a `PersistenceBootstrapExtension implements
 BootstrapExtension`:
 
 - `contributeAudit(a)`: `a.storeBacked(storage.auditEventStore()).logging()`
-- `contributeSessions(s)`: `s.storeBacked(storage.sessionStore())`
+- `contributeSessions(s)`: `s.storeBacked(SessionStoreProvider.sessionStore())` —
+  the Eclipse-Store session store wrapped in the layer-1
+  `SessionReferenceStore`, so records are kept under `SessionRef`, never
+  under the session cookie (JS-SEC-117). The bootstrap registers it for
+  the per-request revocation check: Revoke ends the session on its next
+  request (JS-SEC-131).
 - `order()`: `10` (after layer 1, before hardening)
 
 Plus a static initialiser that opens the Eclipse-Store backend and
@@ -31,8 +36,7 @@ on stdout / token file on first start.
 ## Slots
 
 Inherited from layer 1: `{{BASE_PACKAGE}}`, `{{SUBJECT_TYPE}}`,
-`{{SUBJECT_PREFIX}}`, `{{BOOTSTRAP_PROFILE}}`, `{{LOGIN_ROUTE}}`,
-`{{STEP_UP_ROUTE}}`.
+`{{SUBJECT_PREFIX}}`, `{{BOOTSTRAP_PROFILE}}`, `{{LOGIN_ROUTE}}`.
 
 New for this skill:
 
@@ -112,6 +116,19 @@ the same file.
    `bootstrapService.createInitialAdmin(...)` succeeds → admin lives
    in Eclipse-Store from now on.
 
+The setup hashes the password with `ConfiguredHashingService` — the
+service the bootstrap configured, the same one `PersistentUserDirectory`
+verifies with (JS-SEC-134). Hashing it with any other service writes an
+envelope the directory cannot verify, and the administrator cannot log
+in. The password must pass the `PasswordPolicy` a layer registers in
+`META-INF/services/eu.jsentinel.jcustos.bootstrap.PasswordPolicy` (the
+hardening layer registers its preflight), otherwise 8 characters.
+`BootstrapWiring` reads mode, token file and validity through
+`BootstrapConfigurationLoader` (`security.bootstrap.mode`,
+`security.bootstrap.token.file`, `security.bootstrap.token.ttl`).
+`SetupView` and the login view carry `@PublicRoute` (the bootstrap runs
+with deny-by-default) and live outside any layout.
+
 ## Verification
 
 ```bash
@@ -135,8 +152,11 @@ WAR, with the servlet user owning it.
 ### Token file readability
 
 `{{BOOTSTRAP_TOKEN_FILE}}` is a plaintext file containing a
-one-time admin grant. Restrict its permissions to the server user
-(`chmod 600` on Unix). The skill does NOT chmod for you.
+one-time admin grant. The store writes it owner-only and, on POSIX,
+adopts an existing file only when it belongs to the process user, has
+no group or other access and holds a token in the generator's format
+(JS-SEC-130); a hand-written or widely readable file is replaced by a
+fresh token.
 
 ### Concurrent storage instances
 

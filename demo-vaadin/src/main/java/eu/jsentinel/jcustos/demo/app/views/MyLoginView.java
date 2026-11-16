@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.demo.app.views;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
@@ -35,8 +36,7 @@ import com.vaadin.flow.component.select.Select;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
-import com.vaadin.flow.server.VaadinSession;
-import com.vaadin.flow.server.WrappedSession;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.demo.app.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
@@ -51,6 +51,7 @@ import java.time.Instant;
 
 import static eu.jsentinel.jcustos.demo.app.views.MyLoginView.NAV;
 
+@PublicRoute
 @Route(NAV)
 public class MyLoginView
     extends LoginView
@@ -189,31 +190,30 @@ public class MyLoginView
    */
   @Override
   protected void onSessionRotated(String previousSessionId, String currentSessionId) {
-    SubjectStores.subjectStore().currentSubject(MyUser.class).ifPresent(MyLoginView::recordSession);
+    SubjectStores.subjectStore().currentSubject(MyUser.class)
+        .ifPresent(user -> recordSession(user, currentSessionId));
   }
 
   /**
    * Persists a {@link SessionRecord} for {@code user} into the demo's
    * {@link DemoSessionStoreProvider#sessionStore() SessionStore} so the
    * Phase-8a {@code SessionManagementView} renders a real inventory
-   * row. Best-effort: missing Vaadin session, missing session id, or
-   * any other failure is swallowed — recording sessions for the
-   * admin UI must never block the login flow.
+   * row. The record is keyed by the reference of the session id, never by
+   * the id itself: the id is the session cookie, and whoever reads the
+   * inventory must not be able to take the session over (JS-SEC-117,
+   * CWE-522). The store keys every lookup the same way, so the
+   * per-request revocation check, which knows only the live id, finds the
+   * record. Best-effort: any failure is swallowed — recording sessions for
+   * the admin UI must never block the login flow.
    */
-  private static void recordSession(MyUser user) {
+  private static void recordSession(MyUser user, String sessionId) {
+    if (sessionId == null || sessionId.isBlank()) {
+      return;
+    }
     try {
-      VaadinSession vaadin = VaadinSession.getCurrent();
-      if (vaadin == null) {
-        return;
-      }
-      WrappedSession wrapped = vaadin.getSession();
-      String sessionId = wrapped == null ? null : wrapped.getId();
-      if (sessionId == null) {
-        return;
-      }
       Instant now = Instant.now(Clock.systemUTC());
       DemoSessionStoreProvider.sessionStore().save(new SessionRecord(
-          SessionId.of(sessionId),
+          SessionId.of(SessionRef.of(sessionId)),
           SubjectId.of(user.id().toString()),
           TenantId.DEFAULT,
           now,

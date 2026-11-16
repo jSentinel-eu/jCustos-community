@@ -1,79 +1,74 @@
 package {{BASE_PACKAGE}}.views;
 
 import com.svenruppert.functional.result.Result;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
-import eu.jsentinel.jcustos.authorization.vaadin.VaadinSessionSubjectStore;
-import eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow.CallbackParams;
-import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
-import eu.jsentinel.jcustos.oauth2.api.TokenResponse;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow;
+import eu.jsentinel.jcustos.oauth2.api.CallbackResult;
+import eu.jsentinel.jcustos.oauth2.vaadin.AbstractOAuth2CallbackView;
 import eu.jsentinel.jcustos.oidc.api.IdTokenExpectations;
 import eu.jsentinel.jcustos.oidc.api.ValidatedIdToken;
-import com.vaadin.flow.component.html.Div;
-import com.vaadin.flow.router.BeforeEnterEvent;
-import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.server.VaadinSession;
 
 import {{BASE_PACKAGE}}.security.oidc.OidcClients;
-import {{BASE_PACKAGE}}.security.oidc.OidcNonceStore;
 
-import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 /**
- * OIDC redirect target. Exchanges the authorization code for tokens, validates the ID
- * token (signature / iss / aud / nonce / exp), maps the validated claims to a
- * {@link JCustosSubject} via the vendor profile, binds it into the Vaadin session, and
- * forwards to the dashboard. Any failure reroutes to {@code /login} (never a 500).
+ * OIDC redirect target. The framework's {@link AbstractOAuth2CallbackView} reads
+ * {@code code}, {@code state}, {@code error} and the {@code iss} parameter (RFC 9207), refuses
+ * a response that names several issuers, and exchanges the code through the flow, which
+ * compares {@code iss} with the expected issuer before it consumes the state or contacts the
+ * token endpoint (JS-SEC-150). {@link #onTokens(CallbackResult)} validates the ID token
+ * (signature, iss, aud, nonce, exp), maps the claims to a {@link JCustosSubject} and binds it.
+ * The base view then rotates the HTTP session id - the login never stays on the session id
+ * the browser arrived with (JS-SEC-146, CWE-384) - and forwards to the dashboard. If the id
+ * cannot be rotated, the login is undone and the view forwards to {@link #errorTarget()}.
  *
- * <p>The {@code redirect_uri} registered at the IdP MUST be {@code .../oauth2/callback}.
+ * <p>The {@code redirect_uri} registered at the IdP MUST be {@code .../oauth2/callback}, and
+ * every IdP gets a redirect URI of its own.
  */
+@PublicRoute
 @Route("oauth2/callback")
-public class OidcCallbackView extends Div implements BeforeEnterObserver {
+public class OidcCallbackView extends AbstractOAuth2CallbackView {
+
+  /** Session attribute holding the raw ID token for the logout's {@code id_token_hint}. */
+  public static final String ID_TOKEN_ATTRIBUTE = "oidc.id_token";
 
   @Override
-  public void beforeEnter(BeforeEnterEvent event) {
-    Map<String, List<String>> qp = event.getLocation().getQueryParameters().getParameters();
-    Optional<String> code = first(qp, "code");
-    Optional<String> error = first(qp, "error");
-    String state = first(qp, "state").orElse("");
-    if (error.isPresent()) {
-      event.forwardTo("login");
-      return;
-    }
-
-    OidcClients clients = OidcClients.get();
-
-    Result<TokenResponse, OAuth2Error> tokenResult = clients.flow().handleCallback(
-        new CallbackParams(code, state, error, first(qp, "error_description")));
-    if (tokenResult.isFailure()) {
-      event.forwardTo("login");
-      return;
-    }
-    TokenResponse tokens = tokenResult.getOrThrow();
-
-    String nonce = OidcNonceStore.consume(state);
-    Result<ValidatedIdToken, ?> idTokenResult = clients.idTokenValidator().validate(
-        tokens.idToken().orElseThrow(),
-        IdTokenExpectations.of(OidcClients.ISSUER, OidcClients.CLIENT_ID, Optional.ofNullable(nonce)));
-    if (idTokenResult.isFailure()) {
-      event.forwardTo("login");
-      return;
-    }
-    ValidatedIdToken idToken = idTokenResult.getOrThrow();
-
-    JCustosSubject subject = clients.claimsMapper().map(idToken, Optional.empty());
-    new VaadinSessionSubjectStore().setCurrentSubject(subject, JCustosSubject.class);
-
-    // Keep the raw ID token so the logout view can pass it as id_token_hint (RP-logout).
-    tokens.idToken().ifPresent(t -> VaadinSession.getCurrent().setAttribute("oidc.id_token", t));
-
-    event.forwardTo("dashboard");
+  protected AuthorizationCodeFlow flow() {
+    return OidcClients.get().flow();
   }
 
-  private static Optional<String> first(Map<String, List<String>> qp, String key) {
-    List<String> values = qp.get(key);
-    return (values == null || values.isEmpty()) ? Optional.empty() : Optional.of(values.get(0));
+  @Override
+  protected void onTokens(CallbackResult result) {
+    OidcClients clients = OidcClients.get();
+    Optional<String> rawIdToken = result.tokens().idToken();
+    if (rawIdToken.isEmpty()) {
+      return; // no subject bound: the dashboard denies and sends the user to the login
+    }
+    // The flow kept the nonce of startRequest(...) with the state (JS-SEC-059).
+    Result<ValidatedIdToken, ?> idToken = clients.idTokenValidator().validate(
+        rawIdToken.get(),
+        IdTokenExpectations.of(OidcClients.ISSUER, OidcClients.CLIENT_ID, result.nonce()));
+    if (idToken.isFailure()) {
+      return; // no subject bound
+    }
+    JCustosSubject subject = clients.claimsMapper().map(idToken.getOrThrow(), Optional.empty());
+    SubjectStores.subjectStore().setCurrentSubject(subject, JCustosSubject.class);
+    // Keep the raw ID token so the logout view can pass it as id_token_hint (RP-logout).
+    VaadinSession.getCurrent().setAttribute(ID_TOKEN_ATTRIBUTE, rawIdToken.get());
+  }
+
+  @Override
+  protected String successTarget() {
+    return "dashboard";
+  }
+
+  @Override
+  protected String errorTarget() {
+    return "login";
   }
 }

@@ -6,12 +6,16 @@ import eu.jsentinel.jcustos.audit.RoleAssigned;
 import eu.jsentinel.jcustos.audit.RoleRevoked;
 import eu.jsentinel.jcustos.audit.UserCreated;
 import eu.jsentinel.jcustos.audit.UserDeleted;
-import eu.jsentinel.jcustos.authentication.PasswordHasher;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.password.RehashDecision;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.roles.AuthorizationRole;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -38,18 +42,27 @@ import java.util.stream.Stream;
  * nor {@link StoredUser} needs to implement
  * {@link java.io.Serializable}; record-header changes evolve via
  * Eclipse-Store's type-mapping.
+ *
+ * <p>Passwords are hashed and verified through the credential pipeline the
+ * bootstrap configured - in production {@link ConfiguredHashingService},
+ * the same service the first-administrator setup hashes with, so the
+ * administrator it creates can log in and the profile a hardening layer
+ * selects (Argon2id) is the one in use (JS-SEC-134). An unknown user name
+ * costs the same key derivation as a known one, and a verification the KDF
+ * limiter shed is reported as "try again later", never as a wrong password
+ * (JS-SEC-126).
  */
 public final class PersistentUserDirectory implements UserDirectory, HasLogger {
 
   private final UserDirectoryPersistence persistence;
-  private final PasswordHasher hasher;
+  private final PasswordHashingService hashing;
   private final Map<String, StoredUser> byUsername = new ConcurrentHashMap<>();
   private final Map<Long, User> byId = new ConcurrentHashMap<>();
 
   public PersistentUserDirectory(UserDirectoryPersistence persistence,
-                                 PasswordHasher hasher) {
+                                 PasswordHashingService hashing) {
     this.persistence = Objects.requireNonNull(persistence, "persistence");
-    this.hasher = Objects.requireNonNull(hasher, "hasher");
+    this.hashing = Objects.requireNonNull(hashing, "hashing");
     Map<String, StoredUser> snapshot = persistence.load();
     snapshot.forEach((username, stored) -> {
       byUsername.put(username, stored);
@@ -67,21 +80,50 @@ public final class PersistentUserDirectory implements UserDirectory, HasLogger {
         || credentials.password() == null) {
       return Optional.empty();
     }
-    StoredUser stored = byUsername.get(credentials.username());
-    if (stored == null) return Optional.empty();
     char[] raw = credentials.password().toCharArray();
-    if (!hasher.verify(raw, stored.passwordHash())) return Optional.empty();
-    if (hasher.needsRehash(stored.passwordHash())) {
-      try {
-        String fresh = hasher.hash(raw);
-        byUsername.put(credentials.username(), new StoredUser(stored.user(), fresh));
-        save();
-      } catch (RuntimeException ignored) {
-        // login already succeeded against the existing hash;
-        // failure to upgrade is not a security failure
+    try {
+      StoredUser stored = byUsername.get(credentials.username());
+      if (stored == null) {
+        // Same derivation cost as a known name - no user enumeration by timing.
+        CredentialVerificationUnavailableException.throwIfUnavailable(
+            hashing.verifyAgainstNothing(raw));
+        return Optional.empty();
       }
+      CredentialVerificationResult result = hashing.verify(raw, stored.passwordHash());
+      CredentialVerificationUnavailableException.throwIfUnavailable(result);
+      if (!(result instanceof CredentialVerificationResult.Verified)) {
+        return Optional.empty();
+      }
+      rehashIfOutdated(credentials.username(), stored, raw);
+      return Optional.of(stored.user());
+    } finally {
+      Arrays.fill(raw, '\0');
     }
-    return Optional.of(stored.user());
+  }
+
+  /**
+   * Upgrades a hash the configured policy calls outdated - a PBKDF2 hash
+   * under the Argon2id profile, a bcrypt hash without the terminator
+   * (JS-SEC-133). The login has already succeeded against the stored hash,
+   * so a failure keeps the old hash. A legacy password the preferred
+   * algorithm cannot take - with a bcrypt policy
+   * {@code BcryptInputTooLongException} for exactly 72 bytes or
+   * {@code BcryptNulCharacterException} for U+0000 - ends up here as well:
+   * the user has to choose a new password.
+   */
+  private synchronized void rehashIfOutdated(String username, StoredUser stored, char[] raw) {
+    if (!(hashing.needsRehash(stored.passwordHash()) instanceof RehashDecision.Required)) {
+      return;
+    }
+    try {
+      String fresh = hashing.hash(raw).encodedHash();
+      byUsername.put(username, new StoredUser(stored.user(), fresh));
+      save();
+    } catch (RuntimeException rehashFailure) {
+      logger().warn("The password hash of user id {} could not be upgraded ({}); "
+          + "the user has to choose a new password.",
+          stored.user().id(), rehashFailure.getClass().getSimpleName());
+    }
   }
 
   @Override
@@ -105,7 +147,13 @@ public final class PersistentUserDirectory implements UserDirectory, HasLogger {
     Objects.requireNonNull(username);
     Objects.requireNonNull(plaintextPassword);
     Objects.requireNonNull(user);
-    String hash = hasher.hash(plaintextPassword.toCharArray());
+    char[] raw = plaintextPassword.toCharArray();
+    String hash;
+    try {
+      hash = hashing.hash(raw).encodedHash();
+    } finally {
+      Arrays.fill(raw, '\0');
+    }
     byUsername.put(username, new StoredUser(user, hash));
     byId.put(user.id(), user);
     save();
@@ -165,8 +213,8 @@ public final class PersistentUserDirectory implements UserDirectory, HasLogger {
   }
 
   @Override
-  public PasswordHasher passwordHasher() {
-    return hasher;
+  public PasswordHashingService hashingService() {
+    return hashing;
   }
 
   // ── Internal ───────────────────────────────────────────────────

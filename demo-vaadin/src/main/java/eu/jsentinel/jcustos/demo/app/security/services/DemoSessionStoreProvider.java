@@ -30,10 +30,16 @@ import eu.jsentinel.jcustos.session.SessionStore;
  * the lifetime of the JVM and are never persisted). A production
  * deployment would wire a persistent {@code SessionStore} (e.g. the
  * Eclipse-Store reference implementation).
+ * <p>
+ * The records are kept under the reference of the session id, never
+ * under the session cookie itself ({@link SessionReferenceStore},
+ * JS-SEC-117). {@code BootstrapServiceInitListener} registers this
+ * store for the per-request revocation check (JS-SEC-131).
  */
 public final class DemoSessionStoreProvider {
 
-  private static final SessionStore INSTANCE = new InMemorySessionStore();
+  private static final SessionStore INSTANCE =
+      new SessionReferenceStore(new InMemorySessionStore());
 
   private DemoSessionStoreProvider() {
   }

@@ -44,6 +44,7 @@ import com.vaadin.flow.component.textfield.TextField;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
 import java.util.List;
 import java.util.Set;
@@ -55,6 +56,7 @@ import java.util.Set;
  * navigates to the login view; subsequent attempts to open {@code /setup}
  * are redirected to {@code /login}.
  */
+@PublicRoute
 @Route(SetupView.NAV)
 public class SetupView extends Composite<Div> implements BeforeEnterObserver {
 

@@ -90,7 +90,11 @@ public final class DemoPolicyInitListener implements VaadinServiceInitListener, 
         .authentication(authn)
         .authorization(authz)
         .loginRoute("login")
+        // StepUpChallengeView is registered under this route (JS-SEC-152).
         .stepUpRoute("step-up")
+        // JS-SEC-085 (CWE-1188): a route without a security annotation is denied
+        // unless it is @PublicRoute (MyLoginView, SetupView, StepUpChallengeView).
+        .denyByDefault(true)
         .policies(p -> p
             .resourceResolver(new DemoDocumentResolver())
             .register(Policy.named(POLICY_EDITOR_OR_ADMIN)

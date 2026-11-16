@@ -1,7 +1,6 @@
 package {{BASE_PACKAGE}}.security.model;
 
 import {{BASE_PACKAGE}}.security.bootstrap.JCustosStorageProvider;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 
 import java.util.Objects;
 
@@ -73,8 +72,8 @@ public final class UserDirectoryProvider {
     // No shutdown hook here — JCustosStorageProvider owns the
     // single shutdown hook that closes the JCustosStoragePair, and
     // the pair's two-phase close() handles the app manager.
-    return new PersistentUserDirectory(
-        persistence,
-        JCustosServiceResolver.passwordHashingService());
+    // JS-SEC-134: hash and verify with the service the bootstrap configured,
+    // resolved per call - the same one the first-administrator setup uses.
+    return new PersistentUserDirectory(persistence, ConfiguredHashingService.INSTANCE);
   }
 }

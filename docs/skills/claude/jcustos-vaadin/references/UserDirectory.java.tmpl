@@ -1,6 +1,6 @@
 package {{BASE_PACKAGE}}.security.model;
 
-import eu.jsentinel.jcustos.authentication.PasswordHasher;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import {{BASE_PACKAGE}}.security.roles.AuthorizationRole;
 
 import java.util.Optional;
@@ -13,6 +13,14 @@ import java.util.stream.Stream;
  */
 public interface UserDirectory {
 
+  /**
+   * Looks the user up and verifies the password.
+   *
+   * @return the user when the password matches, otherwise empty
+   * @throws eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException
+   *     when the password could not be checked (the KDF limiter shed the
+   *     verification, JS-SEC-126) - "try again later", not "wrong password"
+   */
   Optional<{{SUBJECT_TYPE}}> findByCredentials(Credentials credentials);
 
   default boolean checkCredentials(Credentials credentials) {
@@ -41,5 +49,11 @@ public interface UserDirectory {
 
   void revokeRole(Long id, AuthorizationRole role);
 
-  PasswordHasher passwordHasher();
+  /**
+   * The credential pipeline this directory hashes and verifies with - the
+   * service the bootstrap configured with {@code .credentials(c -> c.hashing(...))}
+   * (JS-SEC-134). The first-administrator setup hashes with the same service,
+   * so the administrator it creates can log in.
+   */
+  PasswordHashingService hashingService();
 }

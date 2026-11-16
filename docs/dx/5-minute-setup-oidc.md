@@ -25,6 +25,25 @@ Discovery (`.well-known/openid-configuration`), JWKS rotation, ID-token validati
 (signature, `iss`, `aud`, `exp`, `nonce`, `at_hash`), and the authorization-code +
 PKCE flow are wired for you.
 
+### Callback and logout views (00.84.00)
+
+- **Callback:** extend `AbstractOAuth2CallbackView` (`jCustos-oauth2-vaadin`). It passes the
+  `iss` parameter of the response to the flow and refuses a response that names several
+  issuers (RFC 9207, JS-SEC-150), and after your `onTokens(...)` it rotates the session id
+  through `LoginSessionRotation.afterLogin(...)` — failing closed when the id cannot be
+  rotated (JS-SEC-146, CWE-384). A callback that does not extend the base view must call
+  `LoginSessionRotation.afterLogin()` itself and pass `iss` into `CallbackParams`.
+- **Issuer binding for hand-built flows:**
+  `config.withExpectedIssuer(metadata.issuer(), metadata.authorizationResponseIssParameterSupported())`
+  on the `OAuth2ClientConfig`; one redirect URI per IdP.
+- **Logout:** extend `AbstractOidcLogoutView`; it ends the local session in every case and
+  redirects to the provider (JS-SEC-147). Navigating to the route alone logs nobody out —
+  link to it with `AbstractOidcLogoutView.logoutLocation(MyLogoutView.class)`, which carries
+  a single-use token bound to the session. No `onBeforeLogout()` override is needed to clear
+  the subject.
+- **Deny-by-default:** login, callback and logout views carry `@PublicRoute` and live
+  outside any restricted router layout (JS-SEC-154).
+
 ## 2. Vendor profiles (one line per IdP)
 
 A `VendorProfile` bundles the IdP-specific claim mappers (roles, groups, tenant)
@@ -62,8 +81,12 @@ DpopProofValidator dpop = new NimbusDpopProofValidator(Set.of("RS256", "ES256"),
 // outbound: new DpopProofGenerator().generate(signingJwk, "POST", uri, Optional.of(accessToken));
 ```
 
-`ValidatedDpopProof.confirms(accessTokenCnfJkt)` binds the proof to the token's
-`cnf.jkt`.
+A resource server validates a proof against the key the access token is bound to:
+`DpopValidationRequest.boundTo(proof, method, uri, accessToken, expectedJkt)` with the
+token's `cnf.jkt` as `expectedJkt` (JS-SEC-148). A proof signed with another key fails with
+`KeyBindingMismatch` before its `jti` is recorded; the four-argument `boundTo(...)` is
+deprecated and fails closed. Proofs above 100 kB (`JoseLimits`) and `jti` values above 128
+characters are rejected; `InMemoryJtiStore` keeps the SHA-256 of a `jti`, never the value.
 
 ### Replay stores (RFC 9449 §11 / OIDC BCL)
 
@@ -76,7 +99,9 @@ DpopProofValidator dpop = new NimbusDpopProofValidator(Set.of("RS256", "ES256"),
 ```java
 SessionRegistry sessions = new InMemorySessionRegistry();
 var receiver = new BackChannelLogoutReceiver(
-    new DefaultLogoutTokenValidator(jwtValidator, jtis), sessions);   // behind backchannel_logout_uri
+    new DefaultLogoutTokenValidator(jwtValidator, ISSUER, CLIENT_ID, jtis), sessions);   // behind backchannel_logout_uri
+// the validator checks iss, aud, exp/iat and the replay window itself (JS-SEC-087);
+// the constructors without ISSUER and CLIENT_ID are deprecated and reject every token
 // receiver.receive(logoutToken) → Accepted(200) / Rejected(400); never dereferences a token URL (no SSRF)
 ```
 

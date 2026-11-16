@@ -1,24 +1,42 @@
 package {{BASE_PACKAGE}}.security.bootstrap;
 
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import {{BASE_PACKAGE}}.security.services.SessionStoreProvider;
 import eu.jsentinel.jcustos.dx.bootstrap.AuditBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.CredentialBootstrap;
+import eu.jsentinel.jcustos.dx.bootstrap.SessionBootstrap;
 
 /**
- * Layer-1 defaults: in-memory ring buffer for audit, PBKDF2 for
- * password hashing. Registered via
+ * Layer-1 defaults: in-memory ring buffer for audit, the session store of
+ * {@link SessionStoreProvider}, PBKDF2 for password hashing. Registered via
  * {@code META-INF/services/{{BASE_PACKAGE}}.security.bootstrap.BootstrapExtension}.
  *
  * <p>{@code order() == 0} so this runs before any persistence /
  * hardening extension — those layers override the defaults by
  * stacking their own {@code .storeBacked(...)} / {@code .hashing(...)}
  * calls on the same sub-builder.
+ *
+ * <p>The hashing service configured here is the one the user directory
+ * hashes and verifies with: the directory resolves
+ * {@code JCustosServiceResolver.credentialHashingService()} on every call,
+ * so whatever the last layer passed to {@code .hashing(...)} is in effect
+ * (JS-SEC-134).
  */
 public final class DefaultBootstrapExtension implements BootstrapExtension {
 
   @Override
   public void contributeAudit(AuditBootstrap a) {
     a.ringBuffer(256).logging();
+  }
+
+  /**
+   * JS-SEC-131 (CWE-613): the bootstrap registers the session store for the
+   * per-request revocation check, so "Revoke" in the session administration
+   * ends the session on its next request.
+   */
+  @Override
+  public void contributeSessions(SessionBootstrap s) {
+    s.storeBacked(SessionStoreProvider.sessionStore());
   }
 
   @Override

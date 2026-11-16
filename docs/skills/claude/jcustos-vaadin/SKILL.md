@@ -1,6 +1,6 @@
 ---
 name: jcustos-vaadin
-description: Battle-tested integration of jCustos (V00.73+) into a Vaadin Flow application. Wires the full security stack — V00.73 fluent `VaadinSecurity.bootstrap()` + `@JCustosAutoService`-registered `AuthenticationService` / `AuthorizationService` + pre-seeded in-memory admin + regular user + `LoginView` extending `eu.jsentinel.jcustos.authorization.LoginView` + `LoginListener` + AppLayout `MainLayout` shell hosting both **public** and **private** routes: a `PublicHomeView` at `/` reachable without login + a `DashboardView` at `/dashboard` (`@VisibleFor(USER)`) after login + the admin views as further children via `@Route(layout = MainLayout.class)`. Drawer uses a plain `RouterLink` for public entries and `SecuredUi.link().hideWhenDenied()` for private ones — anonymous visitors see only "Home", logged-in users see Dashboard + permission-granted admin areas. Navbar carries a dynamic Sign in / Sign out button rebuilt via `BeforeEnterObserver`. Admin views: audit (`SecurityAuditService.query` over a ring-buffer / store-backed sink, filterable by type / subject / from-to DateTimePicker) + sessions (`SessionManagementView` over an `InMemorySessionStore`) + role management (`@RequiresPermission("admin:roles")`). Includes `HomeButton` helper that conditionally renders a back-to-`/` button only when a view is standalone (`@Route(layout = UI.class)`). Use PROACTIVELY when the project shows Vaadin Flow signals (`vaadin-core`, `@Route`, `VerticalLayout`, `AppLayout`, `Composite`) AND the user mentions jCustos, integrate jCustos, jCustos einbauen, secure my Vaadin app, Vaadin Security, security-for-flow, add login + roles, wire authentication, `VaadinSecurity.bootstrap`, `@SecureRoute`, `SecuredUi`, `JCustosServiceResolver`, `JCustosSubject`, audit view, session inventory, admin roles UI. Also applies when the user asks to "bootstrap jCustos in a fresh Vaadin app", "seed admin + regular user", "add Audit + Session admin views", "give me a complete jCustos integration", or wants the full V00.73 fluent surface (`audit / sessions / policies / roles / credentials` sub-builders) rather than the legacy hand-written `META-INF/services` recipe. Provides the 5-step recipe (POM patch → typed slot extraction → source generation → bootstrap-init listener registration → verify with `mvn compile` + dev-run), 17 ready-to-render `.java.tmpl` templates with placeholder substitution, the discipline of "Authn + Authz via `@JCustosAutoService`, LoginListener + AccessEvaluator + VaadinServiceInitListener via `META-INF/services`", and the pitfall catalog (annotation processor path order, `optimizeBundle=false`, subject type leakage, audit sink failure swallowing). Does NOT cover token-based first-admin bootstrap (`BootstrapWiring` / `SetupView`), credential persistence (use `jCustos-persistence-eclipsestore`), or REST/Standalone integration (separate skills).
+description: Battle-tested integration of jCustos (V00.73+) into a Vaadin Flow application. Wires the full security stack — V00.73 fluent `VaadinSecurity.bootstrap()` + `@JCustosAutoService`-registered `AuthenticationService` / `AuthorizationService` + in-memory admin + regular user (created only behind the explicit development switch `-Djcustos.demo.insecureDemoAccounts=true`) + `LoginView` extending `eu.jsentinel.jcustos.authorization.LoginView` + `LoginListener` + AppLayout `MainLayout` shell hosting both **public** and **private** routes: a `PublicHomeView` at `/` reachable without login + a `DashboardView` at `/dashboard` (`@VisibleFor(USER)`) after login + the admin views as further children via `@Route(layout = MainLayout.class)`. Drawer uses a plain `RouterLink` for public entries and `SecuredUi.link().hideWhenDenied()` for private ones — anonymous visitors see only "Home", logged-in users see Dashboard + permission-granted admin areas. Navbar carries a dynamic Sign in / Sign out button rebuilt via `BeforeEnterObserver`. Admin views: audit (`SecurityAuditService.query` over a ring-buffer / store-backed sink, filterable by type / subject / from-to DateTimePicker) + sessions (`SessionManagementView` over an `InMemorySessionStore`) + role management (`@RequiresPermission("admin:roles")`). Includes `HomeButton` helper that conditionally renders a back-to-`/` button only when a view is standalone (`@Route(layout = UI.class)`). Use PROACTIVELY when the project shows Vaadin Flow signals (`vaadin-core`, `@Route`, `VerticalLayout`, `AppLayout`, `Composite`) AND the user mentions jCustos, integrate jCustos, jCustos einbauen, secure my Vaadin app, Vaadin Security, security-for-flow, add login + roles, wire authentication, `VaadinSecurity.bootstrap`, `@SecureRoute`, `SecuredUi`, `JCustosServiceResolver`, `JCustosSubject`, audit view, session inventory, admin roles UI. Also applies when the user asks to "bootstrap jCustos in a fresh Vaadin app", "seed admin + regular user", "add Audit + Session admin views", "give me a complete jCustos integration", or wants the full V00.73 fluent surface (`audit / sessions / policies / roles / credentials` sub-builders) rather than the legacy hand-written `META-INF/services` recipe. Provides the 5-step recipe (POM patch → typed slot extraction → source generation → bootstrap-init listener registration → verify with `mvn compile` + dev-run), 17 ready-to-render `.java.tmpl` templates with placeholder substitution, the discipline of "Authn + Authz via `@JCustosAutoService`, LoginListener + AccessEvaluator + VaadinServiceInitListener via `META-INF/services`", and the pitfall catalog (annotation processor path order, `optimizeBundle=false`, subject type leakage, audit sink failure swallowing). Does NOT cover token-based first-admin bootstrap (`BootstrapWiring` / `SetupView`), credential persistence (use `jCustos-persistence-eclipsestore`), or REST/Standalone integration (separate skills).
 ---
 
 # jCustos ↦ Vaadin Flow — full integration
@@ -9,13 +9,24 @@ This skill drops the complete jCustos security stack into a Vaadin
 Flow application. The end state is a working app with:
 
 - a `LoginView` (extending the framework's pre-built form)
-- a pre-seeded in-memory user directory with **one admin** and **one
-  regular user** (`admin / admin`, `user / user`)
+- an in-memory user directory that hashes and verifies through the
+  credential pipeline the bootstrap configures. The demo accounts
+  **one admin** and **one regular user** (`admin / admin`, `user / user`)
+  exist only when the JVM runs with
+  `-Djcustos.demo.insecureDemoAccounts=true` (JS-SEC-137) — off by default
 - role + permission catalog (`ADMIN`, `USER` × `audit:read`,
   `admin:sessions`, `admin:roles`, `app:view`)
 - a fluent `VaadinSecurity.bootstrap()` chain run once at Vaadin
-  service init (V00.73 surface — `audit / credentials / policies`
-  sub-builders)
+  service init (V00.73 surface — `audit / sessions / credentials`
+  sub-builders) that fails closed: `denyByDefault(true)` (public views
+  carry `@PublicRoute`), a registered `LogoutService`, no step-up route
+  without a step-up view, and the session store registered for the
+  per-request revocation check
+- login throttling by the library `LoginView` (five failures lock the
+  account); the authentication service does **not** call the
+  `LoginAttemptPolicy` itself (JS-SEC-124)
+- an application-specific, `HttpOnly`, `Secure`, `SameSite=Lax` session
+  cookie (`src/main/webapp/WEB-INF/web.xml`)
 - an AppLayout `MainLayout` shell (drawer, navbar, logout via
   `VaadinLogoutService`) hosting both a **public** `PublicHomeView`
   at `/` (no auth required) and a **private** `DashboardView` at
@@ -28,7 +39,10 @@ Flow application. The end state is a working app with:
   that queries `JCustosServiceResolver.securityAuditService()` and
   renders the ring buffer as a grid
 - an `/admin/sessions` view extending the framework's
-  `SessionManagementView` over an `InMemorySessionStore`
+  `SessionManagementView` over an `InMemorySessionStore` wrapped in
+  `SessionReferenceStore`: rows carry the session reference
+  (`SessionRef`, `sref-…`), never the session cookie (JS-SEC-117), and
+  Revoke ends the session on its next request (JS-SEC-131)
 - an `/admin/roles` view for assigning / revoking roles (admin-only)
 
 Validated against the `demo-vaadin` reference module in this repo. The
@@ -49,7 +63,9 @@ skill emits the same shape, parameterised on the target app's package
 4. **Apply the POM patch** — merge the deps + annotationProcessorPaths
    stanzas into the Vaadin module's `pom.xml` (do NOT overwrite the
    whole file).
-5. **Register the SPI files** under `src/main/resources/META-INF/services/`.
+5. **Register the SPI files** under `src/main/webapp/WEB-INF/web.xml           ← session cookie {{SESSION_COOKIE_NAME}}, HttpOnly, Secure, SameSite=Lax
+
+src/main/resources/META-INF/services/`.
 6. **Verify** with `./mvnw -pl <module> -am compile` and (if Jetty is
    wired) `./mvnw -pl <module> jetty:run`. Open `http://localhost:8080/login`.
 
@@ -68,7 +84,8 @@ src/main/java/<base>/
 │   │   ├── <Subject>.java                ← record (id, name, Set<AuthorizationRole>)
 │   │   ├── Credentials.java              ← record (username, password)
 │   │   ├── UserDirectory.java            ← interface
-│   │   ├── InMemoryUserDirectory.java    ← pre-seeded admin + user
+│   │   ├── InMemoryUserDirectory.java    ← demo accounts only behind -Djcustos.demo.insecureDemoAccounts=true
+│   │   ├── ConfiguredHashingService.java ← delegates to the hashing service the bootstrap configured
 │   │   └── UserDirectoryProvider.java    ← static holder
 │   ├── roles/
 │   │   ├── AuthorizationRole.java        ← enum ADMIN, USER
@@ -79,14 +96,15 @@ src/main/java/<base>/
 │   ├── services/
 │   │   ├── My<...>AuthenticationService.java ← @JCustosAutoService
 │   │   ├── My<...>AuthorizationService.java  ← @JCustosAutoService
+│   │   ├── SessionReferenceStore.java    ← keys every record by SessionRef, never by the session id
 │   │   └── SessionStoreProvider.java
 │   └── bootstrap/
 │       └── JCustosBootstrapInitListener.java ← VaadinServiceInitListener
 └── views/
     ├── MainLayout.java                   ← AppLayout shell — no @Route. Drawer + dynamic Sign in/out
-    ├── PublicHomeView.java               ← @Route("",            layout=MainLayout.class) — no auth, public landing
+    ├── PublicHomeView.java               ← @Route("",            layout=MainLayout.class) + @PublicRoute — no auth, public landing
     ├── DashboardView.java                ← @Route("dashboard",   layout=MainLayout.class) + @VisibleFor(USER)
-    ├── MyLoginView.java                  ← @Route("login")        (standalone — login page bypasses layout)
+    ├── MyLoginView.java                  ← @Route("login") + @PublicRoute (standalone — never inside a restricted layout)
     ├── HomeButton.java                   ← Optional<Button> helper — only when @Route(layout=UI.class)
     └── admin/                            ← admin-only views, all embedded in MainLayout
         ├── AuditView.java                ← @Route("audit",         layout=MainLayout.class) + @RequiresPermission("audit:read")
@@ -139,21 +157,22 @@ re-appears automatically — no template re-edit.
 
 ### Public vs. private routes
 
-Routes generated by the skill fall into three buckets — the
-visibility rule is "no restriction annotation ⇒ public":
+Routes generated by the skill fall into three buckets. The bootstrap
+runs with `denyByDefault(true)` (JS-SEC-085): a route without a
+security annotation is **denied** unless it carries `@PublicRoute`:
 
 | Bucket | Annotations | Reachable by | Drawer entry |
 |---|---|---|---|
-| **Public** | `@Route(value="", layout=MainLayout.class)` (no `@VisibleFor` / `@RequiresPermission`) | anyone, signed in or not | plain `RouterLink` → always shown |
+| **Public** | `@Route(value="", layout=MainLayout.class)` + `@PublicRoute` | anyone, signed in or not | plain `RouterLink` → always shown |
 | **Authenticated-only** | `@Route(...) + @VisibleFor(USER)` — e.g. `DashboardView` | every logged-in subject | `SecuredUi.link().requiresPermission("app:view").hideWhenDenied()` → hidden for anonymous |
 | **Permission-protected** | `@Route(...) + @RequiresPermission("...")` — e.g. `AuditView` | subjects holding the permission | `SecuredUi.link().requiresPermission("...").hideWhenDenied()` → hidden until granted |
 
-The `LoginListener` does the gatekeeping: if a navigation target
-carries no `@JCustosAnnotation`-meta-annotated restriction, the
-scanner returns empty, the listener marks it unrestricted and
-authentication is skipped. That is what makes `PublicHomeView`
-reachable without login — there's nothing for the listener to
-check.
+`@PublicRoute` is what makes `PublicHomeView` and `MyLoginView`
+reachable without login; a view somebody forgot to annotate is denied
+instead of silently public. A public view, the login view and a step-up
+view must not live inside a restricted layout — a restriction on a
+router layout applies to every view rendered in it (JS-SEC-154).
+`MainLayout` therefore carries no restriction.
 
 The **navbar's Sign in / Sign out button** is dynamic — `MainLayout`
 implements `BeforeEnterObserver` and rebuilds the button on every
@@ -163,8 +182,8 @@ visitors see a primary "Sign in" CTA; logged-in users see a tertiary
 "Sign out".
 
 To add a new public area, drop a view at
-`@Route(value="...", layout=MainLayout.class)` with no security
-annotation and a plain `RouterLink` in the drawer. To add a new
+`@Route(value="...", layout=MainLayout.class)` with `@PublicRoute`
+and a plain `RouterLink` in the drawer. To add a new
 private area, add `@RequiresPermission("x")` (or `@VisibleFor`) and
 use `SecuredUi.link().requiresPermission("x").hideWhenDenied()` —
 the drawer entry materialises only for subjects that hold the
@@ -184,8 +203,9 @@ than one slot is genuinely missing.
 | **Base package** | `com.acme.bookstore` | Look at existing `@Route` classes' package; ask if none. |
 | **Subject type name** | `User`, `Account`, `Identity`, `MyUser` | `User` |
 | **Subject prefix for service classes** | `My`, `App`, `Bookstore`, `<empty>` | `My` (matches the demo) — yields `MyAuthenticationService`, `MyLoginView` |
-| **Admin credentials** | `admin / admin`, `root / changeit` | `admin / admin` |
-| **Regular user credentials** | `user / user`, `alice / wonderland` | `user / user` |
+| **Admin credentials** | `admin / admin`, `root / changeit` | `admin / admin` (demo accounts, created only with `-Djcustos.demo.insecureDemoAccounts=true`) |
+| **Regular user credentials** | `user / user`, `alice / wonderland` | `user / user` (same switch) |
+| **Session cookie name** | `BOOKSTORE_SESSION` | `<APP NAME IN CAPITALS>_SESSION` — never `JSESSIONID` |
 | **Bootstrap profile** | `developmentDefaults`, `productionDefaults`, `strictDefaults` | `developmentDefaults` |
 | **App title** | "Bookstore Admin" | "<app name from pom.xml> Security" |
 
@@ -214,7 +234,13 @@ these substitutions (case-sensitive), then write to the target path.
 | `{{BOOTSTRAP_PROFILE}}` | `developmentDefaults` / `productionDefaults` / `strictDefaults` |
 | `{{APP_TITLE}}` | `Bookstore Admin` |
 | `{{LOGIN_ROUTE}}` | always `login` |
-| `{{STEP_UP_ROUTE}}` | always `step-up` |
+| `{{SESSION_COOKIE_NAME}}` | `BOOKSTORE_SESSION` |
+
+There is no step-up route slot: the skill wires no step-up policy and no
+step-up view, and a step-up route configured without a view is an error
+in PRODUCTION and STRICT (JS-SEC-152). Add `.stepUpRoute(...)` together
+with a registered view (`@Route`, `@PublicRoute`, outside restricted
+layouts) when a policy starts to require step-up.
 
 Template-to-target file mapping (apply after substitution):
 
@@ -227,6 +253,7 @@ Template-to-target file mapping (apply after substitution):
 | `UserDirectory.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/model/UserDirectory.java` |
 | `InMemoryUserDirectory.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/model/InMemoryUserDirectory.java` |
 | `UserDirectoryProvider.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/model/UserDirectoryProvider.java` |
+| `ConfiguredHashingService.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/model/ConfiguredHashingService.java` |
 | `AuthorizationRole.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/roles/AuthorizationRole.java` |
 | `VisibleFor.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/roles/VisibleFor.java` |
 | `RoleAccessEvaluator.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/roles/RoleAccessEvaluator.java` |
@@ -234,6 +261,7 @@ Template-to-target file mapping (apply after substitution):
 | `AuthenticationService.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/{{SUBJECT_PREFIX}}AuthenticationService.java` |
 | `AuthorizationService.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/{{SUBJECT_PREFIX}}AuthorizationService.java` |
 | `SessionStoreProvider.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/SessionStoreProvider.java` |
+| `SessionReferenceStore.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/services/SessionReferenceStore.java` |
 | `BootstrapExtension.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/BootstrapExtension.java` |
 | `BootstrapBuilder.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/BootstrapBuilder.java` |
 | `DefaultBootstrapExtension.java.tmpl` | `src/main/java/{{BASE_PATH}}/security/bootstrap/DefaultBootstrapExtension.java` |
@@ -251,6 +279,7 @@ Template-to-target file mapping (apply after substitution):
 | `services-LoginListener.tmpl` | `src/main/resources/META-INF/services/eu.jsentinel.jcustos.authorization.LoginListener` |
 | `services-AccessEvaluator.tmpl` | `src/main/resources/META-INF/services/eu.jsentinel.jcustos.authorization.api.AccessEvaluator` |
 | `services-VaadinServiceInitListener.tmpl` | `src/main/resources/META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener` |
+| `web.xml.tmpl` | `src/main/webapp/WEB-INF/web.xml` (merge the `<session-config>` if the file exists) |
 
 ---
 
@@ -335,8 +364,8 @@ entries (don't replace existing ones):
 
 ## Bootstrap profile choice
 
-`developmentDefaults` (the skill default) prints a verbose
-startup banner via `JCustosRuntime.log()` to stdout, wires an
+`developmentDefaults` (the skill default) logs a verbose
+startup banner via `JCustosRuntime.log()`, wires an
 in-memory audit ring buffer (256 events), and tolerates missing
 critical SPIs with WARNing-level diagnostics. The right default while
 the integration is being verified.
@@ -370,8 +399,10 @@ After rendering + writing every template:
    find target/classes/META-INF/services -type f -exec grep -l '{{SUBJECT_PREFIX}}AuthenticationService' {} +
    find target/classes/META-INF/services -type f -exec grep -l '{{SUBJECT_PREFIX}}AuthorizationService' {} +
    ```
-4. Start the dev server (`jetty:run` or whatever the module uses) and
-   open `http://localhost:8080/login`.
+4. Start the dev server with the demo accounts switched on
+   (`./mvnw -pl <module> jetty:run -Djcustos.demo.insecureDemoAccounts=true`)
+   and open `http://localhost:8080/login`. Without the switch no account
+   exists.
 5. Log in with the admin credentials — should land at `/` with the
    role badges showing `ADMIN, USER`.
 6. Confirm `/audit`, `/admin/sessions`, `/admin/roles` are reachable.
@@ -379,7 +410,7 @@ After rendering + writing every template:
    `/admin/roles` must reroute (per the framework's denied-decision
    mapper).
 
-The bootstrap banner (a multi-line `JCustosRuntime.log()` printout)
+The bootstrap banner (a multi-line `JCustosRuntime.log()` log entry)
 appears on the first request handled by Vaadin — that's the signal
 the fluent chain actually installed.
 
@@ -431,17 +462,52 @@ Tabs-based drawer instead, swap `SecuredUi.link(...)` for tabs
 with `SecuredUi.menuItem(...)` — the visibility discipline is the
 same.
 
-### Pre-seeded passwords visible in source
+### Demo accounts with known passwords
 
-The skill seeds `admin / admin` and `user / user` as **plain
-constants in `InMemoryUserDirectory`** — the constructor hashes them
-through `JCustosServiceResolver.passwordHashingService()` before
-storing. The strings appear in the source file, which is acceptable
-for a demo / first integration but is a hard "DO NOT SHIP" for
-production. Real deployments wire the V00.72
-`InitialAdminBootstrapService` + `BootstrapWiring` (token flow) — see
-`demo-vaadin`'s `SetupView` for the full pattern. The skill leaves a
-`TODO` comment in the directory file pointing at that.
+`InMemoryUserDirectory` creates `admin / admin` and `user / user` only
+when the JVM runs with `-Djcustos.demo.insecureDemoAccounts=true`, and
+logs a warning when it does (JS-SEC-137, CWE-798). Without the switch
+the directory starts empty. Never set the switch outside a local
+development machine. Real deployments wire the
+`InitialAdminBootstrapService` + `BootstrapWiring` token flow — the
+`jcustos-vaadin-persistence` layer.
+
+### One hashing service for everything
+
+The directory hashes and verifies through `ConfiguredHashingService`,
+which delegates on every call to
+`JCustosServiceResolver.credentialHashingService()` — the service the
+bootstrap configured with `.credentials(c -> c.hashing(...))`. Do not
+hand the directory `JCustosServiceResolver.passwordHashingService()`
+(the legacy PBKDF2 slot): `.hashing(...)` never reaches it, so a
+hardening layer's Argon2id would stay unused and an administrator
+created by the token setup could not log in (JS-SEC-134). An unknown
+user name runs `verifyAgainstNothing(...)`, so the response time does
+not reveal which names exist; a verification the KDF limiter shed
+throws `CredentialVerificationUnavailableException`, which the
+`LoginView` answers as "try again later" without counting a failure
+(JS-SEC-126).
+
+### Login throttling lives in the `LoginView`
+
+The library `LoginView` runs the `LoginAttemptPolicy` protocol around
+`checkCredentials()` (JS-SEC-124): five failures lock the account. The
+authentication service must not call the policy itself — every attempt
+would be counted twice.
+
+### Session inventory: references, and Revoke that ends the session
+
+The login view records the session in `onSessionRotated(...)` (after
+the id rotation) under `SessionRef.of(sessionId)`, and
+`SessionStoreProvider` wraps the store in `SessionReferenceStore`, so
+neither the store nor the `/admin/sessions` grid ever holds the session
+cookie (JS-SEC-117). `DefaultBootstrapExtension` registers the store
+with `.sessions(s -> s.storeBacked(...))`; the bootstrap hands it to
+`VaadinSessionRevocation`, and Revoke — which marks the record
+`REVOKED` — ends the session on its next request (JS-SEC-131).
+`VaadinSessionRevocation.terminate(...)` matches live session ids only,
+so a reference-keyed inventory ends sessions on their next request, not
+at the click.
 
 ### `<jcustos.version>` property
 
@@ -457,10 +523,10 @@ project is the security-for-flow reactor itself, swap to
 
 - **Token-based first-admin bootstrap** (`BootstrapWiring`,
   `SetupView`, `InitialAdminBootstrapService`,
-  `BootstrapTokenStore`). The skill pre-seeds the admin in plaintext
-  for fast onboarding. Migrate to the token flow before any
-  multi-tenant or multi-user deployment — see
-  `demo-vaadin/src/main/java/.../security/bootstrap/BootstrapWiring.java`.
+  `BootstrapTokenStore`). The skill creates demo accounts with known
+  passwords only behind the development switch
+  `-Djcustos.demo.insecureDemoAccounts=true`. Use the token flow of the
+  `jcustos-vaadin-persistence` layer before any deployment.
 - **Persistence** (`jCustos-persistence-eclipsestore`,
   `StoreBackedJCustosAuditService`, `EclipseStoreSessionStore`).
   The skill uses in-memory stores. Swap the providers in

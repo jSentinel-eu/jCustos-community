@@ -101,13 +101,12 @@ Every file in `references/` ends with `.tmpl`. Substitute then write.
 |---|---|---|
 | `pom-snippet.xml.tmpl` | merge into `pom.xml` | merge |
 | `OidcClients.java.tmpl` | `…/security/oidc/OidcClients.java` (lazy singletons: discovery → metadata, flow, id-token validator, claims mapper, userinfo) | new |
-| `OidcNonceStore.java.tmpl` | `…/security/oidc/OidcNonceStore.java` (nonce kept by stateKey in the Vaadin session) | new |
 | `OidcBootstrapExtension.java.tmpl` | `…/security/bootstrap/OidcBootstrapExtension.java` (`wantsOidc()=true` + `contributeOidc(o)`) | new |
 | `BootstrapExtension.java.tmpl` | `…/security/bootstrap/BootstrapExtension.java` — **replacement**: add `default void contributeOidc(OidcBootstrap o) {}` + `default boolean wantsOidc() { return false; }` to the SPI the `jcustos-vaadin` skill generated | replace |
 | `BootstrapBuilder.java.tmpl` | `…/security/bootstrap/BootstrapBuilder.java` — **replacement**: conditionally chain `.oidc(o -> extensions.forEach(e -> e.contributeOidc(o)))` only when `extensions.stream().anyMatch(BootstrapExtension::wantsOidc)` (calling `.oidc(noop)` would fail STRICT for a missing issuer) | replace |
-| `OidcLoginView.java.tmpl` | `…/views/OidcLoginView.java` (`@Route("login")` — starts the flow + redirects) | new (replaces `MyLoginView`) |
-| `OidcCallbackView.java.tmpl` | `…/views/OidcCallbackView.java` (`@Route("oauth2/callback")` — runs steps 2–6) | new |
-| `OidcLogoutView.java.tmpl` | `…/views/OidcLogoutView.java` (`@Route("logout")` extends `AbstractOidcLogoutView`) | new |
+| `OidcLoginView.java.tmpl` | `…/views/OidcLoginView.java` (`@Route("login")` + `@PublicRoute` — starts the flow + redirects) | new (replaces `MyLoginView`) |
+| `OidcCallbackView.java.tmpl` | `…/views/OidcCallbackView.java` (`@Route("oauth2/callback")` + `@PublicRoute`, extends `AbstractOAuth2CallbackView` — passes `iss`, rotates the session id) | new |
+| `OidcLogoutView.java.tmpl` | `…/views/OidcLogoutView.java` (`@Route("logout")` + `@PublicRoute`, extends `AbstractOidcLogoutView`) | new |
 | `services-BootstrapExtension.tmpl` | append `{{BASE_PACKAGE}}.security.bootstrap.OidcBootstrapExtension` to the existing `…bootstrap.BootstrapExtension` services file (append-safe) | append |
 
 **Bootstrap mechanism (precise):** `JCustosBootstrapInitListener.java` is **not**
@@ -138,7 +137,11 @@ No new annotation-processor paths (the AutoService processor from `jcustos-vaadi
 1. **Wiring (`OidcClients`)** — built once, lazily, from the issuer:
    - `OidcProviderMetadata md = new HttpOidcDiscoveryClient(http).discover(URI.create(ISSUER)).getOrThrow();`
    - `var tokenClient = new HttpTokenEndpointClient(md.tokenEndpoint(), clientAuth, http);`
-   - `var flow = new HttpAuthorizationCodeFlow(new OAuth2ClientConfig(CLIENT_ID, clientAuth, md.authorizationEndpoint(), md.tokenEndpoint(), REDIRECT_URI, Set.of(SCOPES), /*pkce*/true, /*rotate*/false), tokenClient, new VaadinSessionStateStore());`
+   - `var config = new OAuth2ClientConfig(clientAuth, Optional.of(md.authorizationEndpoint()), md.tokenEndpoint(), …, Optional.of(URI.create(REDIRECT_URI)), Set.of(SCOPES), /*pkce*/true, /*rotate*/false, Duration.ofMinutes(5)).withExpectedIssuer(md.issuer(), md.authorizationResponseIssParameterSupported());`
+     — binds the authorisation response to its issuer (RFC 9207, JS-SEC-150): a response that
+     names another issuer, or none when the issuer announces `iss`, is refused before the
+     state is consumed or the token endpoint is called. One redirect URI per IdP.
+   - `var flow = new HttpAuthorizationCodeFlow(config, tokenClient, new VaadinSessionStateStore());`
    - `var jwt = new NimbusJwtValidator(AlgorithmProfile.STRICT_MODERN.toAllowList(), new HttpJwksClient(md.jwksUri()), ClaimExpectations…(ISSUER, CLIENT_ID), Instant::now);`
    - `var idTokenValidator = new DefaultIdTokenValidator(jwt);`
    - `var claimsMapper = {{VENDOR_PROFILE}}.INSTANCE.subjectMapper().orElse(new DefaultClaimsToSubjectMapper(... vendor roles/permissions/tenant mappers ...));`
@@ -146,18 +149,30 @@ No new annotation-processor paths (the AutoService processor from `jcustos-vaadi
 2. **Login (`OidcLoginView` @Route("login"))**:
    - `String nonce = randomUrlSafe();`
    - `var req = flow.startRequest(new StartRequestParams(Set.of(), Map.of(), Optional.of(nonce), resumeTarget));`
-   - `OidcNonceStore.put(req.stateKey(), nonce);`  ← **thread the nonce** (see pitfall)
+   - the flow keeps the nonce with the state; the callback gets it back as `CallbackResult.nonce()`
    - `UI.getCurrent().getPage().setLocation(req.redirectTo().toString());`
-3. **Callback (`OidcCallbackView` @Route("oauth2/callback"))** in `beforeEnter`:
-   - read `code` / `state` / `error` from `event.getLocation().getQueryParameters()`
-   - `var tokens = flow.handleCallback(new CallbackParams(code, state, error, errDesc)).getOrThrow();`  (401-equivalent → reroute to error/login on failure)
-   - `String nonce = OidcNonceStore.consume(state);`
-   - `var idt = idTokenValidator.validate(tokens.idToken().orElseThrow(), IdTokenExpectations.of(ISSUER, CLIENT_ID, Optional.ofNullable(nonce))).getOrThrow();`
-   - optional UserInfo: `userInfoClient.fetch(tokens.accessToken()).toOptional()`
-   - `JCustosSubject subject = claimsMapper.map(idt, userInfo);`
-   - `new VaadinSessionSubjectStore().setCurrentSubject(subject, JCustosSubject.class);`
-   - `event.forwardTo("dashboard");`  (or the resumeTarget)
-4. **Logout (`OidcLogoutView` extends `AbstractOidcLogoutView`)**: `endSessionEndpoint()` from `md.endSessionEndpoint().orElseThrow()`; `logoutRequest()` returns `new LogoutRequest(storedIdToken, Optional.of(POST_LOGOUT_URI), Optional.empty())` (`idTokenHint` is non-null — pass `""` if absent); `onBeforeLogout()` calls `deleteCurrentSubject(JCustosSubject.class)`. Stash the raw ID token in the session at callback time so it can serve as `id_token_hint`.
+3. **Callback (`OidcCallbackView` @Route("oauth2/callback"), extends `AbstractOAuth2CallbackView`)**:
+   the base view reads `code` / `state` / `error` / `iss` and refuses a response with
+   several `iss` values; it calls `flow.handleCallback(new CallbackParams(code, state, error, errDesc, iss))`.
+   The view implements `flow()`, `successTarget()` (`"dashboard"`), `errorTarget()` (`"login"`) and
+   `onTokens(CallbackResult result)`:
+   - `var idt = idTokenValidator.validate(result.tokens().idToken().orElseThrow(), IdTokenExpectations.of(ISSUER, CLIENT_ID, result.nonce()));` — on failure bind nothing
+   - optional UserInfo: `userInfoClient.fetch(result.tokens().accessToken()).toOptional()`
+   - `JCustosSubject subject = claimsMapper.map(idt.getOrThrow(), userInfo);`
+   - `SubjectStores.subjectStore().setCurrentSubject(subject, JCustosSubject.class);`
+   - stash the raw ID token in the session for the logout's `id_token_hint`
+
+   After `onTokens` the base view runs `LoginSessionRotation.afterLogin(...)`: the HTTP
+   session id is rotated, the `SessionPolicy` observes the login, the rotation is audited and
+   the security-version snapshot taken (JS-SEC-146, CWE-384). If the id cannot be rotated the
+   login is undone and the view forwards to `errorTarget()`. A callback that does not extend
+   the base view must call `LoginSessionRotation.afterLogin()` itself and pass `iss` into
+   `CallbackParams`.
+4. **Logout (`OidcLogoutView` extends `AbstractOidcLogoutView`)**: `endSessionEndpoint()` from `md.endSessionEndpoint().orElseThrow()`; `logoutRequest()` returns `new LogoutRequest(storedIdToken, Optional.of(POST_LOGOUT_URI), Optional.empty())` (`idTokenHint` is non-null — pass `""` if absent). The base view ends the local session in every case — subject, token credential and snapshot cleared, `LogoutPerformed` audited, Vaadin session closed, HTTP session invalidated — and redirects to the provider (JS-SEC-147); no `onBeforeLogout()` override is needed. Navigating to `/logout` alone logs nobody out: every sign-out link or button uses `AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)`, which carries a single-use token bound to the session; without it the view asks for a confirmation click (CWE-352):
+   ```java
+   Button signOut = new Button("Sign out",
+       click -> UI.getCurrent().navigate(AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)));
+   ```
 
 ## Verification checklist
 
@@ -171,14 +186,16 @@ No new annotation-processor paths (the AutoService processor from `jcustos-vaadi
 
 ## Pitfalls
 
-### Nonce threading (the one non-obvious bit)
-`HttpAuthorizationCodeFlow.handleCallback(...)` **consumes the state single-use** and
-returns only `TokenResponse` — the `nonce` bound at `startRequest` is gone afterwards.
-So the callback can't get it from the flow. The skill keeps its own
-`OidcNonceStore` (a per-session map keyed by `stateKey`/`state`), `put` at login,
-`consume` at callback, and passes it to `IdTokenExpectations.of(...)`. Without this the
-ID-token `nonce` check can't run (replay protection on the ID token is lost). Do not
-skip it.
+### Nonce threading
+`startRequest(...)` stores the nonce with the state; `handleCallback(...)` consumes the
+state single-use and returns it in `CallbackResult.nonce()` (JS-SEC-059). Pass it to
+`IdTokenExpectations.of(ISSUER, CLIENT_ID, result.nonce())` — without it the ID-token
+`nonce` check cannot run. No separate nonce store is needed.
+
+### Public routes outside restricted layouts
+Login, callback and logout carry `@PublicRoute` (the bootstrap runs with deny-by-default)
+and use no router layout: a restriction on a layout applies to every view in it
+(JS-SEC-154).
 
 ### Redirect URI must match exactly
 The IdP compares `redirect_uri` byte-for-byte. `https://app/oauth2/callback` ≠
@@ -205,12 +222,12 @@ mapper unless the user has custom claims, in which case add `.rolesMapper(...)` 
 browser cannot complete in another. That is correct CSRF behaviour.
 
 ## Framework feedback (worth raising, not blocking)
-The Vaadin OIDC RP wiring is currently low-level: the consumer hand-assembles
-discovery + flow + id-token validation + nonce threading + subject binding. A
-framework-side **`OidcLoginFlow` orchestrator** (one call: `handleCallback(code,state)`
-→ validated `JCustosSubject`, nonce handled internally) would shrink this skill's
-callback template from ~40 lines to ~5 and remove the nonce-threading footgun. Until
-then this skill carries that orchestration.
+The Vaadin OIDC RP wiring is still fairly low-level: the consumer hand-assembles
+discovery + flow + id-token validation + subject binding (the callback base view now
+carries the `iss` check and the session rotation, the flow the nonce). A framework-side
+**`OidcLoginFlow` orchestrator** (one call: callback → validated `JCustosSubject`) would
+shrink this skill's callback template further. Until then this skill carries that
+orchestration.
 
 ## What this skill deliberately does NOT cover
 
@@ -218,7 +235,9 @@ then this skill carries that orchestration.
   logout** — the V00.79 deep-hardening surface; a layer-5 `jcustos-vaadin-oidc-hardening`
   skill is the right home.
 - **Runtime multi-IdP switching** — one IdP per build here. For a chooser, register one
-  `.oidc(...)` per IdP and one callback route each.
+  `.oidc(...)` per IdP and one callback route and redirect URI each, every flow with
+  `withExpectedIssuer(...)` of its own issuer (a shared redirect URI lets one IdP's response
+  be replayed against another — mix-up, RFC 9207).
 - **Refresh-token rotation / silent renew** — the ID token establishes the session;
   long-lived sessions + refresh are a separate concern.
 - **Local + federated side by side** — supported (keep `MyAuthenticationService` and add
@@ -229,9 +248,11 @@ then this skill carries that orchestration.
 1. Confirm `jcustos-vaadin` ran (bootstrap SPI + views present).
 2. Extract slots (vendor, issuer, clientId, secret/public, redirect URI). Ask if >1 missing.
 3. Merge `pom-snippet.xml.tmpl` (oidc + oauth2(+vaadin) + jwt + vendor module).
-4. Render `OidcClients`, `OidcNonceStore`, `OidcBootstrapExtension`, `OidcLoginView`,
+4. Render `OidcClients`, `OidcBootstrapExtension`, `OidcLoginView`,
    `OidcCallbackView`, `OidcLogoutView`.
 5. Append the `OidcBootstrapExtension` line to the `BootstrapExtension` services file.
 6. Replace `MyLoginView` with `OidcLoginView` (or add a button) and point the
-   `MainLayout` sign-in action at `/login`; sign-out at `/logout`.
+   `MainLayout` sign-in action at `/login`; the sign-out action navigates to
+   `AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)` — a plain link to `/logout`
+   only shows the confirmation button.
 7. `mvn compile` + dev-run against the IdP; walk the verification checklist.

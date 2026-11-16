@@ -33,7 +33,9 @@ import com.vaadin.flow.component.notification.NotificationVariant;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
+@PublicRoute
 @Route(MyLoginView.NAV)
 public class MyLoginView extends LoginView implements HasLogger, BeforeEnterObserver {
 

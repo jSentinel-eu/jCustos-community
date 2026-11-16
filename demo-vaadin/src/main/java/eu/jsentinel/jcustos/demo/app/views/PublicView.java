@@ -30,7 +30,9 @@ import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
+@PublicRoute
 @Route(PublicView.NAV)
 public class PublicView extends Composite<Div> {
 

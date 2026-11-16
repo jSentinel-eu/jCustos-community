@@ -24,6 +24,7 @@ import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.demo.app.security.services.DemoSessionStoreProvider;
+import eu.jsentinel.jcustos.demo.app.security.services.SessionReferenceStore;
 import eu.jsentinel.jcustos.demo.app.views.AdminSessionsView;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.session.SessionId;
@@ -121,8 +122,9 @@ class AdminSessionsViewBrowserlessTest extends BrowserlessTest {
     navigate(AdminSessionsView.class);
 
     Grid<?> grid = $view(Grid.class).first();
+    // JS-SEC-117: the store keeps the record under the reference of the id
     long visible = DemoSessionStoreProvider.sessionStore().findAll().stream()
-        .filter(r -> r.sessionId().equals(SID))
+        .filter(r -> r.sessionId().equals(SessionReferenceStore.reference(SID)))
         .count();
     assertEquals(1L, visible,
         "the demo store must surface the saved record to the view");

@@ -11,16 +11,20 @@ import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.orderedlayout.FlexComponent;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 import com.vaadin.flow.router.Route;
-import {{BASE_PACKAGE}}.security.model.{{SUBJECT_TYPE}};
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
+import {{BASE_PACKAGE}}.security.model.User;
 
 /**
  * Public landing page — visible to <strong>everyone</strong>,
  * including anonymous visitors.
  *
- * <p>No {@code @VisibleFor} and no {@code @RequiresPermission}: the
- * jCustos scanner finds no restriction annotation, so the
+ * <p>No {@code @VisibleFor} and no {@code @RequiresPermission}, but
+ * {@code @PublicRoute}: the bootstrap runs with
+ * {@code denyByDefault(true)}, which denies every route without a
+ * security annotation unless it is declared public (JS-SEC-085). The
  * {@code LoginListener} lets the navigation through without
- * authentication.
+ * authentication. {@code MainLayout} carries no restriction - a public
+ * view must not live in a restricted layout (JS-SEC-154).
  *
  * <p>This page is the marketing / overview surface — the rest of the
  * app (dashboard, admin views) is reachable only via the drawer
@@ -31,6 +35,7 @@ import {{BASE_PACKAGE}}.security.model.{{SUBJECT_TYPE}};
  * {@link DashboardView}; for anonymous visitors a "Sign in" button
  * leads to {@code {{SUBJECT_PREFIX}}LoginView}.
  */
+@PublicRoute
 @Route(value = PublicHomeView.NAV, layout = MainLayout.class)
 public class PublicHomeView extends Composite<VerticalLayout> {
 

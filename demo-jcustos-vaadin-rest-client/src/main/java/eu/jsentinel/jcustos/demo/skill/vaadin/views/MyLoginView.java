@@ -8,9 +8,11 @@ import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
 
+@PublicRoute
 @Route(MyLoginView.NAV)
 public class MyLoginView extends LoginView implements HasLogger {
   public static final String NAV = "login";

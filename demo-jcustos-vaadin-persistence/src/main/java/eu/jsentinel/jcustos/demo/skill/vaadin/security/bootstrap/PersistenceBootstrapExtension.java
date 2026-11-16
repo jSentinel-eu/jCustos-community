@@ -2,6 +2,7 @@ package eu.jsentinel.jcustos.demo.skill.vaadin.security.bootstrap;
 
 import eu.jsentinel.jcustos.dx.bootstrap.AuditBootstrap;
 import eu.jsentinel.jcustos.dx.bootstrap.SessionBootstrap;
+import eu.jsentinel.jcustos.demo.skill.vaadin.security.services.SessionStoreProvider;
 import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosStorage;
 
 /**
@@ -36,9 +37,16 @@ public final class PersistenceBootstrapExtension implements BootstrapExtension {
     a.storeBacked(STORAGE.auditEventStore()).logging();
   }
 
+  /**
+   * Registers the persistent session store - through
+   * {@link SessionStoreProvider}, so the records are kept under the
+   * reference of the session id (JS-SEC-117). The bootstrap hands the same
+   * store to the per-request revocation check: a record marked
+   * {@code REVOKED} ends its session on the next request (JS-SEC-131).
+   */
   @Override
   public void contributeSessions(SessionBootstrap s) {
-    s.storeBacked(STORAGE.sessionStore());
+    s.storeBacked(SessionStoreProvider.sessionStore());
   }
 
   @Override

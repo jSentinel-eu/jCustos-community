@@ -6,16 +6,16 @@ import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionStore;
 import eu.jsentinel.jcustos.session.vaadin.JCustosVersionEnforcerListener;
 import com.vaadin.flow.server.ServiceInitEvent;
-import com.vaadin.flow.server.UIInitListener;
 import com.vaadin.flow.server.VaadinServiceInitListener;
-import com.vaadin.flow.shared.Registration;
 import eu.jsentinel.jcustos.demo.skill.vaadin.views.MyLoginView;
 
 import java.util.Optional;
 
 /**
- * Registers {@link JCustosVersionEnforcerListener} on every UI so
- * drifted sessions reroute to {@link MyLoginView}.
+ * Registers {@link JCustosVersionEnforcerListener} with
+ * {@link JCustosVersionEnforcerListener#register(ServiceInitEvent)} so
+ * drifted sessions reroute to {@link MyLoginView} - on navigation, on
+ * every UIDL request and on push messages.
  *
  * <p>The listener only fires when the {@code LoginView} captured a
  * {@link eu.jsentinel.jcustos.session.JCustosVersion} snapshot
@@ -47,11 +47,10 @@ public class JCustosVersionInitListener
         storeOpt.get(), JCustosServiceResolver.securityAuditService());
     JCustosVersionEnforcerListener listener =
         new JCustosVersionEnforcerListener(enforcer, MyLoginView.class);
-    // JS-SEC-082: drift is enforced on every UIDL request, not only on navigation.
-    event.addRequestHandler(listener);
-    event.getSource().addUIInitListener((UIInitListener) uiInitEvent -> {
-      Registration reg = uiInitEvent.getUI().addBeforeEnterListener(listener);
-      uiInitEvent.getUI().addDetachListener(detach -> reg.remove());
-    });
+    // JS-SEC-082 / JS-SEC-155: register(...) wires all three entry points - the
+    // navigation listener on every UI, the request handler for UIDL requests and the
+    // request interceptor for messages that arrive over a WebSocket-only push channel.
+    // A handler and a navigation listener registered by hand missed the push messages.
+    listener.register(event);
   }
 }

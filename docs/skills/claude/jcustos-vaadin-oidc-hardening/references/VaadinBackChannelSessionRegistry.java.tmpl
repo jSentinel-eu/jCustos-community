@@ -41,7 +41,7 @@ public final class VaadinBackChannelSessionRegistry implements SessionRegistry {
 
   /** Session-destroy hook: drop the reference to a session that ended on its own. */
   public static void forget(String sessionId) {
-    SESSIONS.remove(sessionId);
+    INSTANCE.unregister(sessionId);
   }
 
   @Override
@@ -63,5 +63,12 @@ public final class VaadinBackChannelSessionRegistry implements SessionRegistry {
       }
     }
     return ids;
+  }
+
+  /** Removes a session that ended on its own from both indexes (bounded registry, JS-SEC-078). */
+  @Override
+  public void unregister(String sessionId) {
+    SESSIONS.remove(sessionId);
+    KEYS.unregister(sessionId);
   }
 }

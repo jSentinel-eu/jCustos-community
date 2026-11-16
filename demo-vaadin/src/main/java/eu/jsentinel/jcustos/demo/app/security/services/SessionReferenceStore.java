@@ -1,0 +1,100 @@
+/**
+ * Copyright © 2017 Sven Ruppert (sven.ruppert@gmail.com)
+ *
+ * Licensed under the EUPL, Version 1.2 or - as soon they will be
+ * approved by the European Commission - subsequent versions of the
+ * EUPL (the "Licence"); You may not use this work except in
+ * compliance with the Licence. You may obtain a copy of the Licence at:
+ *
+ * https://joinup.ec.europa.eu/software/page/eupl
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the Licence is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the Licence for the specific language governing permissions and
+ * limitations under the Licence.
+ */
+package eu.jsentinel.jcustos.demo.app.security.services;
+
+import eu.jsentinel.jcustos.audit.SessionRef;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.session.SessionId;
+import eu.jsentinel.jcustos.session.SessionRecord;
+import eu.jsentinel.jcustos.session.SessionStore;
+
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * {@link SessionStore} that keeps every record under the reference of its session id,
+ * never under the id itself (JS-SEC-117; CWE-522, CWE-312).
+ *
+ * <p>The HTTP session id is the session cookie: whoever reads it from the inventory, the
+ * session-management grid or a backup of the store can take the session over. This store
+ * maps every {@link SessionId} it receives to {@link SessionRef#of(String)} - the marker
+ * {@code sref-} and 16 hex characters of the SHA-256 - before it reaches the delegate.
+ * {@link SessionRef#of(String)} returns a reference unchanged, so the store can be called
+ * with the live id (the login view, the per-request revocation check of
+ * {@code SessionLifetimeListener}) and with a reference (the Revoke button, which only
+ * knows the record it shows) alike, and both reach the same record.
+ *
+ * <p>Register this store, not the delegate, with
+ * {@code .sessions(s -> s.storeBacked(...))}: the bootstrap hands it to
+ * {@code VaadinSessionRevocation}, whose per-request check looks the current session up by
+ * its live id.
+ */
+public final class SessionReferenceStore implements SessionStore {
+
+  private final SessionStore delegate;
+
+  /**
+   * @param delegate the store that holds the records; non-null
+   */
+  public SessionReferenceStore(SessionStore delegate) {
+    this.delegate = Objects.requireNonNull(delegate, "delegate");
+  }
+
+  /**
+   * Reduces a session id to its reference; a reference is returned unchanged.
+   *
+   * @param sessionId a live session id or a reference; non-null
+   * @return the reference as a {@link SessionId}
+   */
+  public static SessionId reference(SessionId sessionId) {
+    Objects.requireNonNull(sessionId, "sessionId");
+    return SessionId.of(SessionRef.of(sessionId.value()));
+  }
+
+  @Override
+  public void save(SessionRecord session) {
+    Objects.requireNonNull(session, "session");
+    delegate.save(session.withSessionId(reference(session.sessionId())));
+  }
+
+  @Override
+  public Optional<SessionRecord> findById(SessionId sessionId) {
+    return delegate.findById(reference(sessionId));
+  }
+
+  @Override
+  public List<SessionRecord> findBySubject(TenantId tenant, SubjectId subjectId) {
+    return delegate.findBySubject(tenant, subjectId);
+  }
+
+  @Override
+  public boolean delete(SessionId sessionId) {
+    return delegate.delete(reference(sessionId));
+  }
+
+  @Override
+  public boolean rekey(SessionId from, SessionId to) {
+    return delegate.rekey(reference(from), reference(to));
+  }
+
+  @Override
+  public List<SessionRecord> findAll() {
+    return delegate.findAll();
+  }
+}

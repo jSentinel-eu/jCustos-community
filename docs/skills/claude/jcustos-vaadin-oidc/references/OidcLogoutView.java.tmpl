@@ -1,7 +1,6 @@
 package {{BASE_PACKAGE}}.views;
 
-import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
-import eu.jsentinel.jcustos.authorization.vaadin.VaadinSessionSubjectStore;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.identity.oidc.vaadin.AbstractOidcLogoutView;
 import eu.jsentinel.jcustos.oidc.api.LogoutRequest;
 import com.vaadin.flow.router.Route;
@@ -13,10 +12,20 @@ import java.net.URI;
 import java.util.Optional;
 
 /**
- * RP-initiated logout (OIDC RP-Initiated Logout 1.0): clears the local session subject,
- * then redirects the browser to the IdP {@code end_session_endpoint} with the stored ID
- * token as {@code id_token_hint} and the post-logout redirect back to the app.
+ * RP-initiated logout (OIDC RP-Initiated Logout 1.0). The framework's
+ * {@link AbstractOidcLogoutView} ends the local session in every case - subject, token
+ * credential and security-version snapshot cleared, {@code LogoutPerformed} audited, Vaadin
+ * session closed, HTTP session invalidated - and sends the browser to the IdP
+ * {@code end_session_endpoint} with the stored ID token as {@code id_token_hint} (JS-SEC-147).
+ * Nothing to tear down here.
+ *
+ * <p>Navigating to the route logs nobody out: the logout runs only with a single-use token
+ * bound to the session. Link to it with
+ * {@code AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)}; without the token the
+ * view asks for a confirmation click (CWE-352). {@code @PublicRoute}: the route must stay
+ * reachable under deny-by-default.
  */
+@PublicRoute
 @Route("logout")
 public class OidcLogoutView extends AbstractOidcLogoutView {
 
@@ -28,17 +37,11 @@ public class OidcLogoutView extends AbstractOidcLogoutView {
 
   @Override
   protected LogoutRequest logoutRequest() {
-    Object stored = VaadinSession.getCurrent().getAttribute("oidc.id_token");
+    Object stored = VaadinSession.getCurrent().getAttribute(OidcCallbackView.ID_TOKEN_ATTRIBUTE);
     String idTokenHint = stored == null ? "" : stored.toString(); // LogoutRequest requires non-null
     return new LogoutRequest(
         idTokenHint,
         Optional.of(URI.create(OidcClients.POST_LOGOUT_URI)),
         Optional.empty());
-  }
-
-  @Override
-  protected void onBeforeLogout() {
-    new VaadinSessionSubjectStore().deleteCurrentSubject(JCustosSubject.class);
-    VaadinSession.getCurrent().setAttribute("oidc.id_token", null);
   }
 }

@@ -1,16 +1,21 @@
 package {{BASE_PACKAGE}}.security.model;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.RoleAssigned;
 import eu.jsentinel.jcustos.audit.RoleRevoked;
 import eu.jsentinel.jcustos.audit.UserCreated;
 import eu.jsentinel.jcustos.audit.UserDeleted;
-import eu.jsentinel.jcustos.authentication.PasswordHasher;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
+import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.password.RehashDecision;
 import {{BASE_PACKAGE}}.security.roles.AuthorizationRole;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.EnumSet;
 
 import java.util.Map;
@@ -20,33 +25,62 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 /**
- * Pre-seeded in-memory {@link UserDirectory}.
+ * In-memory {@link UserDirectory}.
  *
+ * <p><strong>No account exists by default</strong> (JS-SEC-137; CWE-798,
+ * CWE-1188). The well-known demo accounts
  * <ul>
  *   <li>{@code {{ADMIN_USERNAME}} / {{ADMIN_PASSWORD}}} — ADMIN + USER roles</li>
  *   <li>{@code {{USER_USERNAME}} / {{USER_PASSWORD}}} — USER role only</li>
  * </ul>
+ * are created only when the JVM is started with
+ * {@code -D}{@value #INSECURE_DEMO_ACCOUNTS_PROPERTY}{@code =true}, and a
+ * warning is logged when they are. Never set the switch outside a local
+ * development machine; migrate to the token-based
+ * {@code InitialAdminBootstrapService} (the {@code jcustos-vaadin-persistence}
+ * layer) before any deployment.
  *
- * <p>Passwords are hashed at storage time through
- * {@code JCustosServiceResolver.passwordHashingService()} — the
- * plaintext literals are visible in this file but never make it to
- * the store. <strong>Demo-only seeding strategy. Migrate to the
- * V00.72 InitialAdminBootstrapService (token flow) before any
- * deployment.</strong>
+ * <p>Passwords are hashed and verified through the credential pipeline the
+ * bootstrap configured ({@link ConfiguredHashingService}, JS-SEC-134). An
+ * unknown user name costs the same key derivation as a known one, so the
+ * response time does not tell which names exist, and a verification the
+ * KDF limiter shed is reported as "try again later", never as a wrong
+ * password (JS-SEC-126).
  */
 public final class InMemoryUserDirectory implements UserDirectory {
 
-  private final PasswordHasher hasher;
+  /**
+   * System property that seeds the well-known demo accounts. Off unless it
+   * is set to {@code true}.
+   */
+  public static final String INSECURE_DEMO_ACCOUNTS_PROPERTY =
+      "jcustos.demo.insecureDemoAccounts";
+
+  private final PasswordHashingService hashing;
   private final Map<String, StoredUser> byUsername = new ConcurrentHashMap<>();
   private final Map<Long, {{SUBJECT_TYPE}}> byId = new ConcurrentHashMap<>();
 
   public InMemoryUserDirectory() {
-    this(JCustosServiceResolver.passwordHashingService());
+    this(ConfiguredHashingService.INSTANCE,
+        Boolean.getBoolean(INSECURE_DEMO_ACCOUNTS_PROPERTY));
   }
 
-  public InMemoryUserDirectory(PasswordHasher hasher) {
-    this.hasher = Objects.requireNonNull(hasher, "hasher");
-    // NOTE replace with InitialAdminBootstrapService before deploying.
+  /**
+   * @param hashing          the credential pipeline to hash and verify with
+   * @param seedDemoAccounts {@code true} to create the well-known demo
+   *                         accounts; never in a deployment
+   */
+  public InMemoryUserDirectory(PasswordHashingService hashing, boolean seedDemoAccounts) {
+    this.hashing = Objects.requireNonNull(hashing, "hashing");
+    if (!seedDemoAccounts) {
+      HasLogger.staticLogger().warn("InMemoryUserDirectory starts without accounts. "
+          + "Start the JVM with -D{}=true to create the demo accounts on a local "
+          + "development machine.", INSECURE_DEMO_ACCOUNTS_PROPERTY);
+      return;
+    }
+    HasLogger.staticLogger().warn("INSECURE DEMO ACCOUNTS: {}=true creates accounts with "
+        + "publicly known passwords. Never use this switch outside a local development "
+        + "machine.", INSECURE_DEMO_ACCOUNTS_PROPERTY);
     addUser("{{ADMIN_USERNAME}}", "{{ADMIN_PASSWORD}}",
         new {{SUBJECT_TYPE}}(1L, "Administrator",
             EnumSet.of(AuthorizationRole.ADMIN, AuthorizationRole.USER)));
@@ -62,23 +96,47 @@ public final class InMemoryUserDirectory implements UserDirectory {
         || credentials.password() == null) {
       return Optional.empty();
     }
-    StoredUser stored = byUsername.get(credentials.username());
-    if (stored == null) {
-      return Optional.empty();
-    }
     char[] raw = credentials.password().toCharArray();
-    if (!hasher.verify(raw, stored.passwordHash)) {
-      return Optional.empty();
-    }
-    if (hasher.needsRehash(stored.passwordHash)) {
-      try {
-        String freshHash = hasher.hash(raw);
-        byUsername.put(credentials.username(), new StoredUser(stored.user, freshHash));
-      } catch (RuntimeException ignored) {
-        // login already succeeded; failure to upgrade the hash is not a security failure
+    try {
+      StoredUser stored = byUsername.get(credentials.username());
+      if (stored == null) {
+        // Same derivation cost as a known name - no user enumeration by timing.
+        CredentialVerificationUnavailableException.throwIfUnavailable(
+            hashing.verifyAgainstNothing(raw));
+        return Optional.empty();
       }
+      CredentialVerificationResult result = hashing.verify(raw, stored.passwordHash);
+      CredentialVerificationUnavailableException.throwIfUnavailable(result);
+      if (!(result instanceof CredentialVerificationResult.Verified)) {
+        return Optional.empty();
+      }
+      rehashIfOutdated(credentials.username(), stored, raw);
+      return Optional.of(stored.user);
+    } finally {
+      Arrays.fill(raw, '\0');
     }
-    return Optional.of(stored.user);
+  }
+
+  /**
+   * Upgrades a hash the configured policy calls outdated. The login has
+   * already succeeded against the stored hash, so a failure keeps the old
+   * hash. A legacy password the preferred algorithm cannot take - with a
+   * bcrypt policy {@code BcryptInputTooLongException} for exactly 72 bytes or
+   * {@code BcryptNulCharacterException} for U+0000 (JS-SEC-133) - ends up
+   * here as well: the user has to choose a new password.
+   */
+  private void rehashIfOutdated(String username, StoredUser stored, char[] raw) {
+    if (!(hashing.needsRehash(stored.passwordHash) instanceof RehashDecision.Required)) {
+      return;
+    }
+    try {
+      String freshHash = hashing.hash(raw).encodedHash();
+      byUsername.put(username, new StoredUser(stored.user, freshHash));
+    } catch (RuntimeException rehashFailure) {
+      HasLogger.staticLogger().warn("The password hash of user id {} could not be upgraded "
+          + "({}); the user has to choose a new password.",
+          stored.user.id(), rehashFailure.getClass().getSimpleName());
+    }
   }
 
   @Override
@@ -111,7 +169,13 @@ public final class InMemoryUserDirectory implements UserDirectory {
     Objects.requireNonNull(username);
     Objects.requireNonNull(plaintextPassword);
     Objects.requireNonNull(user);
-    String hash = hasher.hash(plaintextPassword.toCharArray());
+    char[] raw = plaintextPassword.toCharArray();
+    String hash;
+    try {
+      hash = hashing.hash(raw).encodedHash();
+    } finally {
+      Arrays.fill(raw, '\0');
+    }
     byUsername.put(username, new StoredUser(user, hash));
     byId.put(user.id(), user);
     audit(new UserCreated(Instant.now(Clock.systemUTC()), username, firstRoleOf(user), null));
@@ -158,8 +222,8 @@ public final class InMemoryUserDirectory implements UserDirectory {
   }
 
   @Override
-  public PasswordHasher passwordHasher() {
-    return hasher;
+  public PasswordHashingService hashingService() {
+    return hashing;
   }
 
   private static EnumSet<AuthorizationRole> roleSetOf({{SUBJECT_TYPE}} user) {

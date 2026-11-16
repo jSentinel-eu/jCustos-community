@@ -1612,6 +1612,51 @@ demos run deny-by-default, and `demo-rest` wires its `LogoutService` through `.l
 of pass-through (SA51). Not covered: the password reset of `demo-rest` is token-only and does not
 show the reset and change seams of SA21/SA28.
 
+## The Vaadin hardening demo and skill hash with Argon2id, and the administrator the setup creates can log in (addition to SA34, JS-SEC-134, CWE-684, CWE-916, CWE-521)
+
+The Vaadin hardening demo configured `BouncyCastleHashingServices.modern()`, but its user directory
+hashed and verified with the legacy `passwordHashingService()`, which `.hashing(...)` never reaches;
+no Argon2id hash was ever written. The first-administrator setup hashed with
+`PasswordHashingServices.defaults()`, writing an envelope the directory's PBKDF2 hasher could not
+read, so the administrator could never log in, and that password was checked only for a minimum
+length of eight. The directories and the setup now share `ConfiguredHashingService`, which resolves
+`credentialHashingService()` on every call: new hashes are Argon2id, older ones are upgraded on the
+next login, and the administrator created through `SetupView` logs in. The setup applies the
+`PasswordPolicy` a layer registers through `ServiceLoader`; the hardening layer registers
+`PreflightPasswordPolicy` (minimum length, local blocklist, HIBP range query). **Consumers:**
+projects generated from the skills replace `UserDirectory.passwordHasher()` with `hashingService()`
+and construct `PersistentUserDirectory` with `ConfiguredHashingService.INSTANCE`.
+
+## The Vaadin demos and skills start fail-closed (addition to SA37, JS-SEC-137, CWE-1188, CWE-798, CWE-1004, CWE-614)
+
+Every Vaadin demo ran without deny-by-default, so an unannotated route was public; the hardening
+demo ran in DEVELOPMENT, where configuration errors are suppressed; the layer-1 skill demo seeded
+`admin/admin` and `user/user`; and no demo configured its session cookie. All Vaadin demos and
+skills now bootstrap with `.denyByDefault(true)` and mark their public views `@PublicRoute`; they
+register a `LogoutService` and configure no step-up route without a step-up view. The hardening demo
+runs `productionDefaults()` without error findings. The layer-1 demo creates its demo accounts only
+with `-Djcustos.demo.insecureDemoAccounts=true` and warns when it does. Each demo's `web.xml` gives
+the session cookie an application-specific name, HttpOnly, Secure and SameSite=Lax. **Consumers:**
+start `demo-jcustos-vaadin` with the switch to get the demo accounts; projects generated from the
+skills need `@PublicRoute` on every view meant to be public. Some browsers do not treat
+`http://localhost` as secure and drop a `Secure` cookie there.
+
+## Vaadin demos and skill templates follow the fixes of this release
+
+The demos record sessions after the id rotation under `SessionRef.of(id)` and key their stores the
+same way (SA17); they register the store for the per-request revocation check, so Revoke ends the
+session on its next request (SA31). The library `LoginView` alone throttles logins; the skill
+template no longer calls the policy (SA24). Step-up routes without a view are gone, and no public,
+login, setup or step-up view sits in a restricted layout (SA52, SA54). The drift listener is wired
+with `register(event)` and covers push messages (SA55). STRICT and PRODUCTION find a logout service
+and a resolvable login route (SA24, SA52). `SecuredUi` uses were checked, which fixed a layout link
+without a target in the REST-client skill demo (SA53, SA35). Rehash failures keep the old hash and
+ask for a new password (SA33). In the OIDC skills the callback extends `AbstractOAuth2CallbackView`
+and so passes `iss` and rotates the session id (SA46, SA50), the client configuration binds the
+expected issuer (SA50), sign-out goes through `AbstractOidcLogoutView.logoutLocation(...)` (SA47),
+the logout-token validator receives issuer and client id (ER20), DPoP validation names the expected
+key thumbprint (SA48), and the OIDC templates compile again against this release.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

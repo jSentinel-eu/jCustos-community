@@ -8,9 +8,12 @@ import com.vaadin.flow.server.VaadinServiceInitListener;
 /**
  * Registers the {@link BackChannelLogoutHandler} on every Vaadin service. The logout-token
  * validator and the single-use {@code jti} store come from {@code OidcClients} (a
- * logout-token validator is the OIDC JwtValidator with {@code aud = CLIENT_ID} and
- * {@code exp} not required); the session registry is the Vaadin-side
- * {@link VaadinBackChannelSessionRegistry}.
+ * logout-token validator is the OIDC JwtValidator with {@code aud = CLIENT_ID}); the
+ * session registry is the Vaadin-side {@link VaadinBackChannelSessionRegistry}.
+ *
+ * <p>The validator checks issuer, audience, {@code exp}/{@code iat} and the replay window
+ * itself (JS-SEC-087): pass the expected issuer and client id. The constructors without
+ * them are deprecated and reject every token.
  *
  * <p>Register this via {@code META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener}.
  */
@@ -20,6 +23,8 @@ public final class BackChannelLogoutInitListener implements VaadinServiceInitLis
   public void serviceInit(ServiceInitEvent event) {
     DefaultLogoutTokenValidator validator = new DefaultLogoutTokenValidator(
         OidcClients.get().logoutJwtValidator(),
+        OidcClients.ISSUER,
+        OidcClients.CLIENT_ID,
         OidcClients.get().jtiStore());
     BackChannelLogoutReceiver receiver = new BackChannelLogoutReceiver(
         validator, VaadinBackChannelSessionRegistry.instance());

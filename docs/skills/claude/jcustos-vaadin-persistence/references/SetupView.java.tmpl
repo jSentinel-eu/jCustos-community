@@ -17,6 +17,7 @@ import com.vaadin.flow.component.textfield.TextField;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import {{BASE_PACKAGE}}.security.bootstrap.BootstrapWiring;
 
 /**
@@ -32,8 +33,10 @@ import {{BASE_PACKAGE}}.security.bootstrap.BootstrapWiring;
  * <p>The view is intentionally NOT embedded in {@code MainLayout}:
  * the layout's drawer assumes a working user / session model, which
  * doesn't yet exist before the first admin is created. Standalone
- * {@code @Route} keeps the setup surface minimal.
+ * {@code @Route} keeps the setup surface minimal. {@code @PublicRoute}
+ * keeps it reachable under {@code denyByDefault(true)} (JS-SEC-085).
  */
+@PublicRoute
 @Route(SetupView.NAV)
 public class SetupView extends Composite<Div> implements BeforeEnterObserver {
 

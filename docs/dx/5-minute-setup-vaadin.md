@@ -75,16 +75,47 @@ public final class JCustosInit {
     var runtime = VaadinSecurity.bootstrap()
         .use(VaadinJCustosStarter.developmentDefaults())
         .subjectType(MyUser.class)
+        .loginRoute("login")
+        .denyByDefault(true)                       // unannotated routes are denied
+        .logout(new VaadinLogoutService<>(SubjectStores.subjectStore(), MyUser.class))
+        .sessions(s -> s.storeBacked(sessionStore)) // also the per-request revocation check
         .policies(p -> p
             .register(Policy.named("documents.editor-or-admin")
                 .allowIf(SubjectPredicates.hasAnyRole("ROLE_ADMIN", "ROLE_EDITOR"))
                 .deny("must be ADMIN or EDITOR")
                 .build()))
         .install();
-    System.out.println(runtime.log());
+    HasLogger.staticLogger().info("{}", runtime.log());
   }
 }
 ```
+
+Fail-closed wiring, as the demos and skills ship it since 00.84.00:
+
+- **Deny-by-default.** `.denyByDefault(true)` denies every route without a security
+  annotation; mark the public ones — home, login, setup, step-up — with `@PublicRoute`
+  (JS-SEC-085). Public views, the login view and a step-up view must not live inside a
+  restricted router layout: a layout's restriction applies to every view in it
+  (JS-SEC-154).
+- **Login and step-up routes need views.** Configure `.stepUpRoute(...)` only together with
+  a registered step-up view; an unresolved login route, or a configured step-up route
+  without a view, is an error in PRODUCTION and STRICT (JS-SEC-152).
+- **Logout service.** Without `.logout(...)` PRODUCTION and STRICT report
+  `logout/missing-service` (JS-SEC-124).
+- **Throttling.** The library `LoginView` runs the `LoginAttemptPolicy` protocol itself; do
+  not call the policy from your `AuthenticationService` (every attempt would count twice).
+- **Session inventory.** Record sessions in `LoginView.onSessionRotated(...)` under
+  `SessionRef.of(sessionId)` and key the store the same way, so neither the store nor the
+  session-management grid holds the session cookie (JS-SEC-117). Revoke with
+  `VaadinSessionRevocation::revoke` (live id) or by marking the record `REVOKED` (reference):
+  the store registered through `.sessions(s -> s.storeBacked(...))` is checked on every
+  request (JS-SEC-131).
+- **Version drift.** Register `JCustosVersionEnforcerListener` with
+  `listener.register(serviceInitEvent)` — it also covers WebSocket-only push messages
+  (JS-SEC-155).
+- **Session cookie.** Give the application its own cookie name in `web.xml`
+  (`<cookie-config><name>MYAPP_SESSION</name><http-only>true</http-only><secure>true</secure>`),
+  never the shared `JSESSIONID`.
 
 The full V00.73 sub-builder set is `.audit(...)`, `.sessions(...)`,
 `.policies(...)`, `.roles(...)`, `.credentials(...)`. Each method's

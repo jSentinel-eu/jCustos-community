@@ -1,0 +1,247 @@
+/**
+ * Copyright © 2017 Sven Ruppert (sven.ruppert@gmail.com)
+ *
+ * Licensed under the EUPL, Version 1.2 or - as soon they will be
+ * approved by the European Commission - subsequent versions of the
+ * EUPL (the "Licence"); You may not use this work except in
+ * compliance with the Licence. You may obtain a copy of the Licence at:
+ *
+ * https://joinup.ec.europa.eu/software/page/eupl
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the Licence is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the Licence for the specific language governing permissions and
+ * limitations under the Licence.
+ */
+package eu.jsentinel.jcustos.demo.skill.vaadin;
+
+import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
+import eu.jsentinel.jcustos.demo.skill.vaadin.security.roles.AuthorizationRole;
+import eu.jsentinel.jcustos.demo.skill.vaadin.security.services.SessionStoreProvider;
+import eu.jsentinel.jcustos.demo.skill.vaadin.views.PublicHomeView;
+import eu.jsentinel.jcustos.demo.skill.vaadin.views.admin.SessionsView;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.session.JCustosVersion;
+import eu.jsentinel.jcustos.session.SessionId;
+import eu.jsentinel.jcustos.session.SessionRecord;
+import eu.jsentinel.jcustos.session.SessionStatus;
+import eu.jsentinel.jcustos.session.SessionStore;
+import eu.jsentinel.jcustos.session.vaadin.VaadinSessionRevocation;
+import eu.jsentinel.jcustos.test.RecordingAuditSink;
+import com.vaadin.browserless.BrowserlessTest;
+import com.vaadin.flow.component.button.Button;
+import com.vaadin.flow.data.renderer.ComponentRenderer;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.VaadinSessionState;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Supplier;
+
+import static eu.jsentinel.jcustos.demo.skill.vaadin.SkillDemoTestSupport.inSession;
+import static eu.jsentinel.jcustos.demo.skill.vaadin.SkillDemoTestSupport.openSecondSession;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * JS-SEC-131 (CWE-613) and JS-SEC-117 (CWE-522) in the demo's own wiring: the session
+ * inventory holds references, never session ids, and Revoke in {@link SessionsView} ends
+ * the revoked session on its next request.
+ *
+ * <p>Two real sessions of one Vaadin service: the user's is the browserless session (its
+ * login is a call to the REST backend, so the test binds the subject and records the
+ * session the way the login view's rotation hook does); the administrator's is a second
+ * {@link VaadinSession} of the same service, in which the real {@link SessionsView} is
+ * built and its Revoke button clicked. The demo's bootstrap chain runs as shipped.
+ */
+@DisplayName("JS-SEC-131 / JS-SEC-117 — session inventory: references only, Revoke ends the session")
+class SessionRevocationBrowserlessTest extends BrowserlessTest {
+
+  private static final User ADMIN = new User(1L, "Admin",
+      EnumSet.of(AuthorizationRole.ADMIN, AuthorizationRole.USER));
+  private static final User BOB = new User(7L, "Bob", EnumSet.of(AuthorizationRole.USER));
+
+  private final RecordingAuditSink audit = new RecordingAuditSink();
+
+  /** Strong references: Vaadin's CurrentInstance holds sessions weakly. */
+  private VaadinSession bobSession;
+  private VaadinSession adminSession;
+
+  @BeforeEach
+  void setUp() {
+    SkillDemoTestSupport.runDemoBootstrap();
+    JCustosServiceResolver.setJCustosAuditService(audit);
+    clearInventory();
+  }
+
+  @AfterEach
+  void tearDown() {
+    clearInventory();
+    JCustosServiceResolver.resetAll();
+  }
+
+  @Test
+  @DisplayName("the bootstrap registers the demo's inventory for the per-request revocation check")
+  void bootstrapRegistersTheInventory() {
+    SessionStore registered = VaadinSessionRevocation.findSessionStore().orElseThrow(
+        () -> new AssertionError("no store registered - a revoked record would end nothing"));
+    SessionRecord probe = record("probe-session", "99");
+    SessionStoreProvider.sessionStore().save(probe);
+    assertTrue(registered.findById(probe.sessionId()).isPresent(),
+        "the registered store must be the inventory the view shows");
+  }
+
+  @Test
+  @DisplayName("the inventory keeps the session under its reference - no record and no grid row carries the session id")
+  void inventoryHoldsReferencesOnly() {
+    String bobSessionId = logInAsBob();
+
+    List<SessionRecord> records = SessionStoreProvider.sessionStore().findAll();
+    assertEquals(1, records.size(), "one row for bob's login: " + records);
+    assertEquals(SessionRef.of(bobSessionId), records.getFirst().sessionId().value(),
+        "the row carries the reference of the live session id");
+    assertTrue(records.stream().noneMatch(r -> r.sessionId().value().equals(bobSessionId)),
+        "the session cookie must not be stored (JS-SEC-117)");
+
+    SessionsView view = actAsAdmin(SessionsView::new);
+    List<SessionRecord> rows = view.grid().getGenericDataView().getItems().toList();
+    assertEquals(1, rows.size());
+    assertTrue(rows.stream().noneMatch(r -> r.sessionId().value().equals(bobSessionId)),
+        "the session-id column renders sessionId().value() - it must not show the cookie");
+  }
+
+  @Test
+  @DisplayName("Revoke by the administrator ends the user's session on its next request; the administrator stays logged in")
+  void revokeEndsTheUsersSession() {
+    String bobSessionId = logInAsBob();
+    audit.clear();
+
+    actAsAdmin(() -> {
+      SessionsView view = new SessionsView();
+      SessionRecord bobRow = view.grid().getGenericDataView().getItems()
+          .filter(r -> r.subjectId().value().equals("7"))
+          .findFirst().orElseThrow();
+      revokeButton(view, bobRow).click();
+      return view;
+    });
+
+    assertEquals(List.of(SessionStatus.REVOKED),
+        SessionStoreProvider.sessionStore().findAll().stream().map(SessionRecord::status).toList());
+
+    // bob's next request
+    navigateIntoTheEndedSession();
+
+    SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
+    assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
+    assertEquals(bobSessionId, invalidated.sessionId());
+    assertNotEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState),
+        "bob's session is closed");
+    assertNull(inSession(bobSession, () -> bobSession.getAttribute(User.class)),
+        "bob's subject is dropped");
+
+    assertEquals(VaadinSessionState.OPEN, inSession(adminSession, adminSession::getState),
+        "revoking somebody else must not end the administrator's session");
+    assertEquals(ADMIN, inSession(adminSession, () -> adminSession.getAttribute(User.class)));
+  }
+
+  @Test
+  @DisplayName("without a revoke the user's next request goes through")
+  void withoutRevokeTheSessionLivesOn() {
+    logInAsBob();
+    audit.clear();
+
+    navigate(PublicHomeView.class);
+
+    assertEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState));
+    assertEquals(Optional.of(BOB), SubjectStores.subjectStore().currentSubject(User.class));
+    assertFalse(audit.events().stream().anyMatch(SessionInvalidated.class::isInstance));
+  }
+
+  // ── helpers ────────────────────────────────────────────────────
+
+  /**
+   * Bob's login: the subject is bound and the session recorded under its live id, as
+   * {@code MyLoginView.onSessionRotated} of the other layers does; the store keeps the
+   * reference.
+   */
+  private String logInAsBob() {
+    bobSession = VaadinSession.getCurrent();
+    SubjectStores.subjectStore().setCurrentSubject(BOB, User.class);
+    String sessionId = bobSession.getSession().getId();
+    SessionStoreProvider.sessionStore().save(record(sessionId, "7"));
+    navigate(PublicHomeView.class);
+    return sessionId;
+  }
+
+  private static SessionRecord record(String sessionId, String subjectId) {
+    Instant now = Instant.now();
+    return new SessionRecord(SessionId.of(sessionId), SubjectId.of(subjectId), TenantId.DEFAULT,
+        now, now, JCustosVersion.INITIAL, SessionStatus.ACTIVE);
+  }
+
+  /**
+   * Runs {@code action} on the administrator's session: a second session of the same
+   * service, bound to the test thread under its own lock as its request thread would have
+   * it. Bob's thread state is restored afterwards.
+   */
+  private <T> T actAsAdmin(Supplier<T> action) {
+    Map<Class<?>, CurrentInstance> bobsInstances = CurrentInstance.getInstances();
+    if (adminSession == null) {
+      adminSession = openSecondSession();
+    }
+    CurrentInstance.clearAll();
+    VaadinSession.setCurrent(adminSession);
+    adminSession.getLockInstance().lock();
+    try {
+      SubjectStores.subjectStore().setCurrentSubject(ADMIN, User.class);
+      return action.get();
+    } finally {
+      adminSession.getLockInstance().unlock();
+      CurrentInstance.clearAll();
+      CurrentInstance.restoreInstances(bobsInstances);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Button revokeButton(SessionsView view, SessionRecord row) {
+    var renderer = (ComponentRenderer<Button, SessionRecord>)
+        view.grid().getColumnByKey("action").getRenderer();
+    return renderer.createComponent(row);
+  }
+
+  /**
+   * The lifetime listener ends the session in the middle of this navigation. The
+   * browserless UI then belongs to a closed session and cannot finish rendering, which
+   * the harness may report as an error of its own; what the product did is asserted by
+   * the caller.
+   */
+  private void navigateIntoTheEndedSession() {
+    try {
+      navigate(PublicHomeView.class);
+    } catch (AssertionError | RuntimeException uiOfAClosedSession) {
+      // expected with the browserless UI, see above
+    }
+  }
+
+  private static void clearInventory() {
+    SessionStoreProvider.sessionStore().findAll()
+        .forEach(r -> SessionStoreProvider.sessionStore().delete(r.sessionId()));
+  }
+}

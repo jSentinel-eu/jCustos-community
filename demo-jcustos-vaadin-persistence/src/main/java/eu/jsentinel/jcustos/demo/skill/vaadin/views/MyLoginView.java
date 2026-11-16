@@ -1,6 +1,7 @@
 package eu.jsentinel.jcustos.demo.skill.vaadin.views;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
@@ -16,8 +17,7 @@ import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.Route;
-import com.vaadin.flow.server.VaadinSession;
-import com.vaadin.flow.server.WrappedSession;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.bootstrap.BootstrapWiring;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.Credentials;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.User;
@@ -34,6 +34,7 @@ import static eu.jsentinel.jcustos.demo.skill.vaadin.views.MyLoginView.NAV;
  * additionally forwards to {@link SetupView} when no administrator
  * exists yet ({@link BootstrapWiring#stateService bootstrapRequired}).
  */
+@PublicRoute
 @Route(NAV)
 public class MyLoginView
     extends LoginView
@@ -82,19 +83,26 @@ public class MyLoginView
    */
   @Override
   protected void onSessionRotated(String previousSessionId, String currentSessionId) {
-    SubjectStores.subjectStore().currentSubject(User.class).ifPresent(MyLoginView::recordSession);
+    SubjectStores.subjectStore().currentSubject(User.class)
+        .ifPresent(user -> recordSession(user, currentSessionId));
   }
 
-  private static void recordSession(User user) {
+  /**
+   * Records a {@link SessionRecord} so the {@code /admin/sessions} view
+   * has something to render. The record is keyed by the reference of the
+   * session id, never by the id itself: the id is the session cookie, and
+   * whoever reads the inventory must not be able to take the session over
+   * (JS-SEC-117, CWE-522). {@link SessionStoreProvider#sessionStore()} keys
+   * every lookup the same way, so the per-request revocation check, which
+   * knows only the live id, finds the record. Best-effort: any failure is
+   * swallowed — session bookkeeping must not block login.
+   */
+  private static void recordSession(User user, String sessionId) {
+    if (sessionId == null || sessionId.isBlank()) return;
     try {
-      VaadinSession vaadin = VaadinSession.getCurrent();
-      if (vaadin == null) return;
-      WrappedSession wrapped = vaadin.getSession();
-      String sessionId = wrapped == null ? null : wrapped.getId();
-      if (sessionId == null) return;
       Instant now = Instant.now(Clock.systemUTC());
       SessionStoreProvider.sessionStore().save(new SessionRecord(
-          SessionId.of(sessionId),
+          SessionId.of(SessionRef.of(sessionId)),
           SubjectId.of(user.id().toString()),
           TenantId.DEFAULT,
           now, now,

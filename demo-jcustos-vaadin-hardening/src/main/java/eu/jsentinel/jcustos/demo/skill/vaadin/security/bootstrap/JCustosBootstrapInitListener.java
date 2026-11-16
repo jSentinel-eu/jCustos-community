@@ -1,9 +1,13 @@
 package eu.jsentinel.jcustos.demo.skill.vaadin.security.bootstrap;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
+import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.vaadin.bootstrap.VaadinSecurity;
+import eu.jsentinel.jcustos.logout.LogoutService;
+import eu.jsentinel.jcustos.logout.vaadin.VaadinLogoutService;
 import eu.jsentinel.jcustos.starter.profile.VaadinJCustosStarter;
 import com.vaadin.flow.server.ServiceInitEvent;
 import com.vaadin.flow.server.VaadinServiceInitListener;
@@ -22,10 +26,28 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * which loads every registered {@link BootstrapExtension} via
  * {@link ServiceLoader}. New layers add a new extension; the entry
  * point here never has to change.
+ *
+ * <p>The hardening layer runs the {@code productionDefaults()} profile
+ * (JS-SEC-137): PRODUCTION reports an incomplete security configuration
+ * as errors instead of suppressing it. Three settings keep the chain
+ * fail-closed:
+ * <ul>
+ *   <li>{@code denyByDefault(true)} — a route without a security annotation
+ *       is denied unless it is marked {@code @PublicRoute} (JS-SEC-085,
+ *       CWE-1188). The public home, the login view and the setup view carry
+ *       {@code @PublicRoute}.</li>
+ *   <li>{@code logout(...)} — the logout service the layout's Sign-out button
+ *       uses. Without one, PRODUCTION and STRICT report
+ *       {@code logout/missing-service} (JS-SEC-124).</li>
+ *   <li>No {@code stepUpRoute(...)}: the application uses no step-up policy and
+ *       has no step-up view, and a configured step-up route without a view is
+ *       an error in PRODUCTION and STRICT (JS-SEC-152).</li>
+ * </ul>
  */
-public class JCustosBootstrapInitListener implements VaadinServiceInitListener {
+public class JCustosBootstrapInitListener implements VaadinServiceInitListener, HasLogger {
 
   private static final AtomicBoolean DONE = new AtomicBoolean();
+
   private static volatile JCustosRuntime runtime;
 
   /**
@@ -55,13 +77,22 @@ public class JCustosBootstrapInitListener implements VaadinServiceInitListener {
     }
     JCustosRuntime bootstrapped = BootstrapBuilder.apply(
         VaadinSecurity.bootstrap()
-            .use(VaadinJCustosStarter.developmentDefaults())
+            .use(VaadinJCustosStarter.productionDefaults())
             .authentication(authn)
             .authorization(authz)
             .loginRoute("login")
-            .stepUpRoute("step-up")
+            .denyByDefault(true)
+            .logout(logoutService(authn))
     ).install();
     runtime = bootstrapped;
-    System.out.println(bootstrapped.log());
+    logger().info("{}", bootstrapped.log());
+  }
+
+  /**
+   * Full logout: subject cleared, Vaadin session closed, HTTP session
+   * invalidated, redirect to the configured login route.
+   */
+  private static <U> LogoutService logoutService(AuthenticationService<?, U> authn) {
+    return new VaadinLogoutService<>(SubjectStores.subjectStore(), authn.subjectType());
   }
 }

@@ -23,6 +23,7 @@ import com.vaadin.flow.component.html.H1;
 import com.vaadin.flow.component.html.Paragraph;
 import com.vaadin.flow.component.orderedlayout.VerticalLayout;
 import com.vaadin.flow.router.Route;
+import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 
 /**
  * Landing route that the {@code AuthorizationListener} reroutes to
@@ -36,7 +37,12 @@ import com.vaadin.flow.router.Route;
  * would render a TOTP / WebAuthn challenge here and, on success,
  * mark the subject as step-up-completed so the next navigation to
  * the protected route lets the user through.
+ *
+ * <p>{@code @PublicRoute}: the bootstrap runs with deny-by-default, and the
+ * challenge must stay reachable while the step-up is outstanding. The view
+ * lives outside any restricted layout (JS-SEC-152, JS-SEC-154).
  */
+@PublicRoute
 @Route(StepUpChallengeView.NAV)
 public class StepUpChallengeView extends Composite<Div> {
 

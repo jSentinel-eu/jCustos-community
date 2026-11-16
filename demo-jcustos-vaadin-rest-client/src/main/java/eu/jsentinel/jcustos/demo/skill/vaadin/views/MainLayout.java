@@ -1,12 +1,11 @@
 package eu.jsentinel.jcustos.demo.skill.vaadin.views;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.logout.LogoutScope;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.logout.SubjectId;
-import eu.jsentinel.jcustos.logout.vaadin.DefaultVaadinLogoutGateway;
-import eu.jsentinel.jcustos.logout.vaadin.VaadinLogoutService;
 import eu.jsentinel.jcustos.starter.ui.SecuredUi;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.applayout.AppLayout;
@@ -48,14 +47,6 @@ import eu.jsentinel.jcustos.demo.skill.vaadin.views.admin.SessionsView;
  * the button instance, not the navbar layout.
  */
 public class MainLayout extends AppLayout implements HasLogger, BeforeEnterObserver {
-
-  private static final LogoutService LOGOUT_SERVICE =
-      new VaadinLogoutService<>(
-          SubjectStores.subjectStore(), User.class,
-          new DefaultVaadinLogoutGateway(),
-          "/" + MyLoginView.NAV,
-          /* closeVaadinSession= */ true,
-          /* invalidateHttpSession= */ true);
 
   /** Navbar slot — swapped between "Sign in" and "Sign out" on every navigation. */
   private final Div authActionSlot = new Div();
@@ -111,9 +102,8 @@ public class MainLayout extends AppLayout implements HasLogger, BeforeEnterObser
         .requiresPermission("admin:sessions")
         .hideWhenDenied()
         .build());
-    drawer.add(SecuredUi.link()
-        .hideWhenDenied()
-        .build());
+    // This layer has no role administration (the REST backend owns the users), so there
+    // is no third admin entry. A link without .to(...) fails the layout for every page.
     return drawer;
   }
 
@@ -144,6 +134,9 @@ public class MainLayout extends AppLayout implements HasLogger, BeforeEnterObser
     SubjectId subjectId = SubjectStores.subjectStore().currentSubject(User.class)
         .map(u -> SubjectId.of(String.valueOf(u.id())))
         .orElse(SubjectId.of("anonymous"));
-    LOGOUT_SERVICE.logout(subjectId, LogoutScope.CurrentSession);
+    // The service the bootstrap registered with .logout(...): subject cleared,
+    // Vaadin session closed, HTTP session invalidated, back to the login route.
+    LogoutService logoutService = JCustosServiceResolver.logoutService();
+    logoutService.logout(subjectId, LogoutScope.CurrentSession);
   }
 }

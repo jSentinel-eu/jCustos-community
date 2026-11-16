@@ -22,6 +22,7 @@ import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
 import eu.jsentinel.jcustos.demo.app.security.permissions.DemoPermission;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
+import eu.jsentinel.jcustos.demo.app.security.services.DemoSessionStoreProvider;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.vaadin.bootstrap.VaadinSecurity;
 import eu.jsentinel.jcustos.policy.api.JCustosPolicies;
@@ -85,8 +86,16 @@ public class BootstrapServiceInitListener implements VaadinServiceInitListener, 
         .authentication(authn)
         .authorization(authz)
         .loginRoute("login")
-        .stepUpRoute("step-up")
+        // JS-SEC-085 (CWE-1188): a route without a security annotation is
+        // denied unless it is @PublicRoute (PublicView, MyLoginView, SetupView).
+        .denyByDefault(true)
+        // JS-SEC-152: no stepUpRoute(...) - the demo uses no step-up policy and
+        // has no step-up view; a configured route without a view fails closed.
         .audit(a -> a.ringBuffer(256).logging())
+        // JS-SEC-131 (CWE-613): the session inventory is registered for the
+        // per-request revocation check, so Revoke in AdminSessionsView ends
+        // the session on its next request.
+        .sessions(s -> s.storeBacked(DemoSessionStoreProvider.sessionStore()))
         .credentials(c -> c.hashing(PasswordHashingServices.defaults()))
         // V00.73 + V00.74: register a Policy so the PermissionDemoCard's
         // Pattern D "SecuredUi.button(...).requiresPolicy(...)" entry has a

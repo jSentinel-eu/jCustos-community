@@ -73,7 +73,11 @@ public final class OidcClients {
         Set.of({{SCOPES}}),
         true,                           // PKCE (always for an RP)
         false,                          // refresh-token rotation
-        Duration.ofMinutes(5));         // state TTL
+        Duration.ofMinutes(5))          // state TTL
+        // JS-SEC-150 (CWE-346, RFC 9207): bind the authorisation response to this issuer;
+        // the callback is refused when it names another one - or none, when the issuer
+        // announces the iss parameter in its discovery document.
+        .withExpectedIssuer(metadata.issuer(), metadata.authorizationResponseIssParameterSupported());
     this.flow = new HttpAuthorizationCodeFlow(config, tokenClient, new VaadinSessionStateStore());
 
     NimbusJwtValidator jwt = new NimbusJwtValidator(

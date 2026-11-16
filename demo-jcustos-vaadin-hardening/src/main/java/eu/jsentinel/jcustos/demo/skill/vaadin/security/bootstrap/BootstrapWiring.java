@@ -1,6 +1,7 @@
 package eu.jsentinel.jcustos.demo.skill.vaadin.security.bootstrap;
 
 import eu.jsentinel.jcustos.bootstrap.BootstrapConfiguration;
+import eu.jsentinel.jcustos.bootstrap.BootstrapConfigurationLoader;
 import eu.jsentinel.jcustos.bootstrap.BootstrapMode;
 import eu.jsentinel.jcustos.bootstrap.BootstrapStartup;
 import eu.jsentinel.jcustos.bootstrap.BootstrapStateService;
@@ -11,11 +12,13 @@ import eu.jsentinel.jcustos.bootstrap.FileBootstrapTokenOutput;
 import eu.jsentinel.jcustos.bootstrap.FileBootstrapTokenStore;
 import eu.jsentinel.jcustos.bootstrap.InitialAdminBootstrapService;
 import eu.jsentinel.jcustos.bootstrap.MinimumLengthPasswordPolicy;
-import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.bootstrap.PasswordPolicy;
+import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.ConfiguredHashingService;
 import eu.jsentinel.jcustos.demo.skill.vaadin.security.model.UserDirectoryProvider;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ServiceLoader;
 
 /**
  * Wires the first-admin bootstrap flow.
@@ -36,6 +39,21 @@ import java.time.Clock;
  *       {@link AdministratorAccountStoreImpl} adapter.</li>
  * </ol>
  *
+ * <p>The administrator's password is hashed with
+ * {@link ConfiguredHashingService} - the service the bootstrap configured
+ * and the user directory verifies with (JS-SEC-134). Hashing it with any
+ * other service produced an envelope the directory could not verify, and
+ * the administrator the setup created could never log in. The password
+ * must pass the {@link PasswordPolicy} a layer registers through
+ * {@code META-INF/services/eu.jsentinel.jcustos.bootstrap.PasswordPolicy}
+ * (the hardening layer registers its preflight), otherwise
+ * {@link #DEFAULT_MIN_PASSWORD_LENGTH} characters.
+ *
+ * <p>Mode, token file and token validity can be overridden with the
+ * {@link BootstrapConfigurationLoader} properties
+ * ({@code security.bootstrap.mode}, {@code security.bootstrap.token.file},
+ * {@code security.bootstrap.token.ttl}) or their environment variables.
+ *
  * <p>The token file lives at {@code ./data/jcustos-vaadin-persistence/bootstrap.token} —
  * delete it (and any admin row in the persistent storage) to force
  * a re-bootstrap.
@@ -44,6 +62,9 @@ public final class BootstrapWiring {
 
   public static final BootstrapMode DEFAULT_MODE = BootstrapMode.PERSISTENT_FILE;
   public static final Path DEFAULT_TOKEN_FILE = Path.of("./data/jcustos-vaadin-persistence/bootstrap.token");
+
+  /** Minimum password length when no layer registers a {@link PasswordPolicy}. */
+  public static final int DEFAULT_MIN_PASSWORD_LENGTH = 8;
 
   private static volatile BootstrapWiring current;
 
@@ -74,7 +95,7 @@ public final class BootstrapWiring {
   }
 
   private static BootstrapWiring build() {
-    BootstrapConfiguration config = new BootstrapConfiguration(
+    BootstrapConfiguration config = new BootstrapConfigurationLoader().load(
         DEFAULT_MODE, DEFAULT_TOKEN_FILE, BootstrapConfiguration.DEFAULT_VALIDITY);
     AdministratorAccountStoreImpl adminStore =
         new AdministratorAccountStoreImpl(UserDirectoryProvider.directory());
@@ -85,9 +106,18 @@ public final class BootstrapWiring {
         state, tokenStore, new BootstrapTokenGenerator(), output, config);
     InitialAdminBootstrapService service = new InitialAdminBootstrapService(
         state, tokenStore, adminStore,
-        PasswordHashingServices.defaults(),
-        new MinimumLengthPasswordPolicy(8),
+        ConfiguredHashingService.INSTANCE,
+        passwordPolicy(),
         config.tokenValidity(), Clock.systemUTC());
     return new BootstrapWiring(state, service);
+  }
+
+  /**
+   * The policy the first administrator's password must pass: the one a
+   * layer registers, otherwise a minimum length.
+   */
+  public static PasswordPolicy passwordPolicy() {
+    return ServiceLoader.load(PasswordPolicy.class).findFirst()
+        .orElseGet(() -> new MinimumLengthPasswordPolicy(DEFAULT_MIN_PASSWORD_LENGTH));
   }
 }

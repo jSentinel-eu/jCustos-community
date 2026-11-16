@@ -29,6 +29,17 @@ import com.vaadin.flow.router.Route;
  * code is wiring it to {@link DemoSessionStoreProvider} and to a
  * revoke callback that updates the same store. Demonstrates how a
  * downstream app integrates Phase-8a with two lines of glue.
+ * <p>
+ * The grid shows the reference of each session ({@code sref-…}), never
+ * the session id: the records are stored under the reference
+ * (JS-SEC-117, CWE-522), so an administrator cannot copy a session
+ * cookie out of this view.
+ * <p>
+ * Revoke ends the session (JS-SEC-131, CWE-613): the callback marks the
+ * record {@link SessionStatus#REVOKED}, and the bootstrap registered the
+ * same store for the per-request check of {@code SessionLifetimeListener},
+ * which ends a session whose record is revoked on its next request and
+ * audits {@code SessionInvalidated} with the reason {@code Revoked}.
  */
 @Route(AdminSessionsView.NAV)
 @RequiresPermission("admin:sessions")
@@ -42,10 +53,11 @@ public class AdminSessionsView extends SessionManagementView {
 
   /**
    * Revoke callback: marks the supplied record as
-   * {@link SessionStatus#REVOKED} via {@code SessionStore.save(record.withStatus(REVOKED))}.
-   * Demo-only — a production wiring would call
-   * {@code LogoutService.logout(subjectId, CurrentSession)} so the
-   * full Vaadin session is invalidated too.
+   * {@link SessionStatus#REVOKED}. The record carries the reference, and
+   * the store keys every lookup by the reference, so the session's next
+   * request finds the record revoked and is refused. Do not wire
+   * {@code LogoutService.logout(subjectId, CurrentSession)} here: the
+   * current session is the administrator's own.
    */
   private static void revoke(SessionRecord record) {
     DemoSessionStoreProvider.sessionStore()
