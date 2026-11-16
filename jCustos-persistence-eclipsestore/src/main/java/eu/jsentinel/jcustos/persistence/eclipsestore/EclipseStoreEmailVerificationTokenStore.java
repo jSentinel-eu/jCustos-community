@@ -18,15 +18,28 @@ package eu.jsentinel.jcustos.persistence.eclipsestore;
 
 import eu.jsentinel.jcustos.accountlifecycle.EmailVerificationTokenRecord;
 import eu.jsentinel.jcustos.accountlifecycle.EmailVerificationTokenStore;
+import eu.jsentinel.jcustos.accountlifecycle.InMemoryEmailVerificationTokenStore;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.util.CapacityBound;
 
 import java.time.Instant;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link EmailVerificationTokenStore}. */
+/**
+ * Eclipse-Store-backed {@link EmailVerificationTokenStore}.
+ *
+ * <p>JS-SEC-125 (CWE-770): a verification is requested for an address the caller chooses, so the store is bounded like its in-memory
+ * counterpart (JS-SEC-074) — at most
+ * {@link EclipseStoreJCustosStorage#maxEntries()} records. At the bound
+ * consumed and expired records are dropped; when every record is still open,
+ * a further {@link #save} fails with
+ * {@code accountlifecycle/email-verification-token-store-capacity-exceeded}. Open tokens are never
+ * pushed out by new ones: that would let a flood of requests cancel a link
+ * somebody is about to use.</p>
+ */
 final class EclipseStoreEmailVerificationTokenStore implements EmailVerificationTokenStore {
 
   private final EclipseStoreJCustosStorage storage;
@@ -38,78 +51,52 @@ final class EclipseStoreEmailVerificationTokenStore implements EmailVerification
   @Override
   public Optional<EmailVerificationTokenRecord> findByHash(String tokenHash) {
     requireNonBlank(tokenHash);
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().emailVerificationTokens.get(tokenHash));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().emailVerificationTokens.get(tokenHash)));
   }
 
   @Override
   public void save(EmailVerificationTokenRecord record) {
     requireNonNull(record, "record must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().emailVerificationTokens.put(record.tokenHash(), record);
-      storage.manager().store(storage.root().emailVerificationTokens);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> {
+      StoredTable<String, EmailVerificationTokenRecord> tokens = storage.tables().emailVerificationTokens;
+      if (tokens.size() >= storage.maxEntries() && !tokens.containsKey(record.tokenHash())) {
+        tokens.dropDead(storage.now()); // consumed and expired records
+        if (tokens.size() >= storage.maxEntries()) {
+          throw new IllegalStateException(CapacityBound.capacityExceededCode(
+              InMemoryEmailVerificationTokenStore.CAPACITY_NAMESPACE) + ": " + storage.maxEntries());
+        }
+      }
+      tokens.put(record.tokenHash(), record);
+    });
   }
 
   @Override
   public boolean markConsumed(String tokenHash, Instant at) {
     requireNonBlank(tokenHash);
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      EmailVerificationTokenRecord prev = storage.root().emailVerificationTokens.get(tokenHash);
+    return storage.write(() -> {
+      EmailVerificationTokenRecord prev = storage.tables().emailVerificationTokens.get(tokenHash);
       if (prev == null || prev.isConsumed()) {
         return false;
       }
-      storage.root().emailVerificationTokens.put(tokenHash, prev.withConsumedAt(at));
-      storage.manager().store(storage.root().emailVerificationTokens);
+      storage.tables().emailVerificationTokens.put(tokenHash, prev.withConsumedAt(at));
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public int deleteBySubject(TenantId tenant, SubjectId subjectId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(subjectId, "subjectId must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().emailVerificationTokens.size();
-      storage.root().emailVerificationTokens.values().removeIf(record ->
-          record.tenant().equals(tenant) && record.subjectId().equals(subjectId));
-      int removed = before - storage.root().emailVerificationTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().emailVerificationTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> storage.tables().emailVerificationTokens.removeIf((hash, record) ->
+        record.tenant().equals(tenant) && record.subjectId().equals(subjectId)));
   }
 
   @Override
   public int purgeExpired(Instant now) {
     requireNonNull(now, "now must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().emailVerificationTokens.size();
-      storage.root().emailVerificationTokens.values().removeIf(record -> record.isExpired(now));
-      int removed = before - storage.root().emailVerificationTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().emailVerificationTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() ->
+        storage.tables().emailVerificationTokens.removeIf((hash, record) -> record.isExpired(now)));
   }
 
   private static void requireNonBlank(String value) {

@@ -77,7 +77,7 @@ class EclipseStoreLoginAttemptHardeningTest {
   }
 
   @Test
-  @DisplayName("an active lockout survives a spray of more than maxEntries new keys; the persistent map stays bounded")
+  @DisplayName("an active lockout survives a spray of more than maxEntries new keys; the persistent table stays bounded")
   void lockoutSurvivesKeySpray() {
     int cap = 20;
     try (EclipseStoreJCustosStorage storage = EclipseStoreJCustosStorage.openAt(tempDir)) {
@@ -92,8 +92,8 @@ class EclipseStoreLoginAttemptHardeningTest {
       for (int i = 0; i < cap * 3; i++) {
         StoreBackedLoginAttemptPolicy later = policy(store, T0.plusMillis(10L * (i + 1)));
         failedLogin(later, "spray-" + i);
-        assertTrue(storage.root().loginAttempts.size() <= cap,
-            "persistent map over the bound: " + storage.root().loginAttempts.size());
+        assertTrue(storage.tables().loginAttempts.size() <= cap,
+            "persistent table over the bound: " + storage.tables().loginAttempts.size());
         assertInstanceOf(LoginAttemptDecision.LockedOut.class, later.beforeAttempt(ctx("victim")),
             "the victim's lockout was pushed out after " + (i + 1) + " sprayed keys");
       }
@@ -104,8 +104,8 @@ class EclipseStoreLoginAttemptHardeningTest {
           policy(store, T0.plus(Duration.ofMinutes(15)).minusMillis(1)).beforeAttempt(ctx("victim")));
       assertEquals(LoginAttemptDecision.allowed(),
           policy(store, T0.plus(Duration.ofMinutes(15))).beforeAttempt(ctx("victim")));
-      assertFalse(storage.root().loginAttempts.containsKey(key("victim")),
-          "the expired counter is gone from the persistent map as well");
+      assertFalse(storage.tables().loginAttempts.containsKey(key("victim")),
+          "the expired counter is gone from the persistent table as well");
     }
   }
 
@@ -121,7 +121,7 @@ class EclipseStoreLoginAttemptHardeningTest {
           failedLogin(policy, "account-" + account);
         }
       }
-      assertEquals(cap, storage.root().loginAttempts.size());
+      assertEquals(cap, storage.tables().loginAttempts.size());
       LoginAttemptDecision.LockedOut refusal = assertInstanceOf(
           LoginAttemptDecision.LockedOut.class, policy.beforeAttempt(ctx("someone-new")));
       assertEquals(Duration.ofMinutes(15), refusal.remaining());
@@ -143,7 +143,7 @@ class EclipseStoreLoginAttemptHardeningTest {
       // an attempt in flight at shutdown: working state only, must not be persisted
       assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(ctx("in-flight")));
       assertEquals(List.of(key("victim"), key("bystander")),
-          List.copyOf(storage.root().loginAttempts.keySet()));
+          storage.tables().loginAttempts.keys());
     }
 
     Instant afterRestart = T0.plus(Duration.ofMinutes(5));
@@ -162,7 +162,7 @@ class EclipseStoreLoginAttemptHardeningTest {
       // the lockout rebuilt from counter + timestamp is protected like a fresh one
       for (int i = 0; i < cap * 2; i++) {
         failedLogin(policy, "spray-" + i);
-        assertTrue(reopened.root().loginAttempts.size() <= cap);
+        assertTrue(reopened.tables().loginAttempts.size() <= cap);
       }
       assertInstanceOf(LoginAttemptDecision.LockedOut.class, policy.beforeAttempt(ctx("victim")));
       assertEquals(LoginAttemptDecision.allowed(),
@@ -179,18 +179,18 @@ class EclipseStoreLoginAttemptHardeningTest {
       for (int i = 0; i < 50; i++) {
         generous.recordFailure(key("old-" + i), T0.plusSeconds(i));
       }
-      assertEquals(50, storage.root().loginAttempts.size());
+      assertEquals(50, storage.tables().loginAttempts.size());
     }
     try (EclipseStoreJCustosStorage reopened = EclipseStoreJCustosStorage.openAt(tempDir)) {
       LoginAttemptStore bounded = new EclipseStoreLoginAttemptStore(reopened, 10);
       bounded.recordFailure(key("new"), T0.plusSeconds(100));
-      assertEquals(10, reopened.root().loginAttempts.size());
+      assertEquals(10, reopened.tables().loginAttempts.size());
       assertEquals(1, bounded.failureCount(key("new")));
       assertEquals(1, bounded.failureCount(key("old-49")), "the most recent counters are the ones kept");
       assertEquals(0, bounded.failureCount(key("old-0")));
     }
     try (EclipseStoreJCustosStorage again = EclipseStoreJCustosStorage.openAt(tempDir)) {
-      assertEquals(10, again.root().loginAttempts.size(), "the trim itself was persisted");
+      assertEquals(10, again.tables().loginAttempts.size(), "the trim itself was persisted");
     }
   }
 

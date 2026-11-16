@@ -22,7 +22,11 @@ import eu.jsentinel.jcustos.session.JCustosVersionStore;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link JCustosVersionStore}. */
+/**
+ * Eclipse-Store-backed {@link JCustosVersionStore}; one entry per subject whose
+ * version was ever raised, not bounded — a version that is dropped would make
+ * stale sessions valid again.
+ */
 final class EclipseStoreJCustosVersionStore implements JCustosVersionStore {
 
   private final EclipseStoreJCustosStorage storage;
@@ -34,42 +38,28 @@ final class EclipseStoreJCustosVersionStore implements JCustosVersionStore {
   @Override
   public JCustosVersion current(JCustosVersionKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().readLock().lock();
-    try {
-      JCustosVersion v = storage.root().securityVersions.get(key);
+    return storage.read(() -> {
+      JCustosVersion v = storage.tables().securityVersions.get(key);
       return v == null ? JCustosVersion.INITIAL : v;
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    });
   }
 
   @Override
   public JCustosVersion increment(JCustosVersionKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      JCustosVersion prev = storage.root().securityVersions.get(key);
+    return storage.write(() -> {
+      JCustosVersion prev = storage.tables().securityVersions.get(key);
       JCustosVersion next = prev == null
           ? JCustosVersion.INITIAL.next()
           : prev.next();
-      storage.root().securityVersions.put(key, next);
-      storage.manager().store(storage.root().securityVersions);
+      storage.tables().securityVersions.put(key, next);
       return next;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public void reset(JCustosVersionKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      if (storage.root().securityVersions.remove(key) != null) {
-        storage.manager().store(storage.root().securityVersions);
-      }
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> storage.tables().securityVersions.remove(key));
   }
 }

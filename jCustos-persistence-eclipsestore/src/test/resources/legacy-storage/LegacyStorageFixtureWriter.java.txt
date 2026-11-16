@@ -1,0 +1,143 @@
+import eu.jsentinel.jcustos.accountlifecycle.EmailVerificationTokenRecord;
+import eu.jsentinel.jcustos.accountlifecycle.EmailVerificationTokenStore;
+import eu.jsentinel.jcustos.accountlifecycle.PasswordResetTokenRecord;
+import eu.jsentinel.jcustos.accountlifecycle.PasswordResetTokenStore;
+import eu.jsentinel.jcustos.audit.AuditEventStore;
+import eu.jsentinel.jcustos.audit.LoginFailed;
+import eu.jsentinel.jcustos.authentication.ApiKeyRecord;
+import eu.jsentinel.jcustos.authentication.ApiKeyStore;
+import eu.jsentinel.jcustos.authentication.RefreshTokenRecord;
+import eu.jsentinel.jcustos.authentication.RefreshTokenStore;
+import eu.jsentinel.jcustos.authentication.RememberMeTokenRecord;
+import eu.jsentinel.jcustos.authentication.RememberMeTokenStore;
+import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
+import eu.jsentinel.jcustos.authorization.api.roles.RoleAssignmentKey;
+import eu.jsentinel.jcustos.authorization.api.roles.RoleAssignmentStore;
+import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.bootstrap.BootstrapState;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptKey;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
+import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosStorage;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitKey;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitStore;
+import eu.jsentinel.jcustos.session.JCustosVersion;
+import eu.jsentinel.jcustos.session.JCustosVersionKey;
+import eu.jsentinel.jcustos.session.JCustosVersionStore;
+import eu.jsentinel.jcustos.session.SessionId;
+import eu.jsentinel.jcustos.session.SessionRecord;
+import eu.jsentinel.jcustos.session.SessionStatus;
+import eu.jsentinel.jcustos.session.SessionStore;
+
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * Writes the storage directory that {@code LegacyStorageCompatibilityTest} opens. It uses the
+ * public API of the persistence module only, so the same source runs against the released 00.83.00
+ * artefacts and against the classes of the commit before the stored layout changed (JS-SEC-125).
+ * Synthetic data only. Usage: {@code LegacyStorageFixtureWriter <empty directory> [with-revoke-all]}.
+ */
+public final class LegacyStorageFixtureWriter {
+
+  static final Instant T0 = Instant.parse("2026-03-01T08:00:00Z");
+  static final TenantId ACME = new TenantId("acme");
+  static final SubjectId ALICE = new SubjectId("alice");
+  static final SubjectId BOB = new SubjectId("bob");
+
+  private LegacyStorageFixtureWriter() {
+  }
+
+  public static void main(String[] args) throws Exception {
+    Path directory = Path.of(args[0]);
+    boolean withRevokeAll = args.length > 1 && "with-revoke-all".equals(args[1]);
+    try (EclipseStoreJCustosStorage storage = EclipseStoreJCustosStorage.openAt(directory)) {
+      AuditEventStore audit = storage.auditEventStore();
+      for (int i = 0; i < 5; i++) {
+        audit.append(i == 3 ? ACME : TenantId.DEFAULT,
+            new LoginFailed(T0.plusSeconds(i), "user-" + i, "192.0.2." + i, "bad-credentials"));
+      }
+
+      SessionStore sessions = storage.sessionStore();
+      sessions.save(new SessionRecord(new SessionId("session-alice-1"), ALICE, TenantId.DEFAULT,
+          T0, T0.plusSeconds(60), new JCustosVersion(2), SessionStatus.ACTIVE));
+      sessions.save(new SessionRecord(new SessionId("session-bob-1"), BOB, ACME,
+          T0.plusSeconds(5), T0.plusSeconds(5), JCustosVersion.INITIAL, SessionStatus.ACTIVE));
+      sessions.save(new SessionRecord(new SessionId("session-alice-2"), ALICE, TenantId.DEFAULT,
+          T0.plusSeconds(10), T0.plusSeconds(90), new JCustosVersion(2), SessionStatus.REVOKED));
+
+      LoginAttemptStore attempts = storage.loginAttemptStore();
+      LoginAttemptKey victim = new LoginAttemptKey(TenantId.DEFAULT, "victim", "198.51.100.7");
+      for (int i = 0; i < 5; i++) {
+        attempts.recordFailure(victim, T0.plusSeconds(100 + i));
+      }
+      attempts.recordFailure(new LoginAttemptKey(ACME, "bystander", "198.51.100.8"), T0.plusSeconds(50));
+
+      RoleAssignmentStore roles = storage.roleAssignmentStore();
+      roles.setRoles(new RoleAssignmentKey(TenantId.DEFAULT, ALICE),
+          Set.of(new RoleName("ADMIN")));
+      roles.assignRole(new RoleAssignmentKey(TenantId.DEFAULT, ALICE), new RoleName("AUDITOR"));
+      roles.assignRole(new RoleAssignmentKey(ACME, BOB), new RoleName("USER"));
+
+      storage.bootstrapStateStore().save(BootstrapState.completed(TenantId.DEFAULT, T0));
+      storage.bootstrapStateStore().save(BootstrapState.required(ACME));
+
+      RememberMeTokenStore rememberMe = storage.rememberMeTokenStore();
+      rememberMe.save(new RememberMeTokenRecord("rm-hash-alice", TenantId.DEFAULT, ALICE,
+          T0, T0.plusSeconds(86_400)));
+      rememberMe.save(new RememberMeTokenRecord("rm-hash-bob", ACME, BOB,
+          T0, T0.plusSeconds(3_600)));
+
+      PasswordResetTokenStore reset = storage.passwordResetTokenStore();
+      reset.save(new PasswordResetTokenRecord("pr-hash-open", TenantId.DEFAULT, ALICE,
+          T0, T0.plusSeconds(900), Optional.empty()));
+      reset.save(new PasswordResetTokenRecord("pr-hash-used", TenantId.DEFAULT, BOB,
+          T0, T0.plusSeconds(900), Optional.empty()));
+      reset.markConsumed("pr-hash-used", T0.plusSeconds(30));
+
+      EmailVerificationTokenStore verification = storage.emailVerificationTokenStore();
+      verification.save(new EmailVerificationTokenRecord("ev-hash-open", TenantId.DEFAULT, ALICE,
+          "alice@example.org", T0, T0.plusSeconds(86_400), Optional.empty()));
+
+      ApiKeyStore apiKeys = storage.apiKeyStore();
+      apiKeys.save(new ApiKeyRecord("ak-hash-1", TenantId.DEFAULT, ALICE, "ci",
+          Set.of(new PermissionName("reports:read")), T0, Optional.of(T0.plusSeconds(86_400)),
+          Optional.empty(), Optional.empty()));
+      apiKeys.save(new ApiKeyRecord("ak-hash-2", TenantId.DEFAULT, ALICE, "old",
+          Set.of(), T0.plusSeconds(1), Optional.empty(), Optional.empty(), Optional.empty()));
+      apiKeys.revoke("ak-hash-2", T0.plusSeconds(40));
+
+      RefreshTokenStore refresh = storage.refreshTokenStore();
+      refresh.save(new RefreshTokenRecord("rt-hash-1", TenantId.DEFAULT, ALICE,
+          T0, T0.plusSeconds(86_400), Optional.empty(), Optional.empty()));
+      refresh.save(new RefreshTokenRecord("rt-hash-2", TenantId.DEFAULT, ALICE,
+          T0.plusSeconds(60), T0.plusSeconds(86_400), Optional.empty(), Optional.empty()));
+      refresh.markReplaced("rt-hash-1", "rt-hash-2", T0.plusSeconds(60));
+      refresh.save(new RefreshTokenRecord("rt-hash-bob", ACME, BOB,
+          T0, T0.plusSeconds(86_400), Optional.empty(), Optional.empty()));
+      refresh.markRevoked("rt-hash-bob", T0.plusSeconds(70));
+
+      RateLimitStore rateLimit = storage.rateLimitStore();
+      RateLimitKey client = new RateLimitKey(TenantId.DEFAULT, "ip:203.0.113.5");
+      rateLimit.recordEvent(client, T0);
+      rateLimit.recordEvent(client, T0.plusSeconds(1));
+      rateLimit.recordEvent(client, T0.plusSeconds(2));
+      rateLimit.recordEvent(new RateLimitKey(ACME, "subject:bob"), T0.plusSeconds(3));
+
+      JCustosVersionStore versions = storage.securityVersionStore();
+      versions.increment(new JCustosVersionKey(TenantId.DEFAULT, ALICE));
+      versions.increment(new JCustosVersionKey(TenantId.DEFAULT, ALICE));
+      versions.increment(new JCustosVersionKey(ACME, BOB));
+
+      if (withRevokeAll) {
+        // 00.84.00 before JS-SEC-125 only: the subject-wide revocation with its "invalid before" mark
+        RefreshTokenStore.class
+            .getMethod("deleteBySubject", TenantId.class, SubjectId.class, Instant.class)
+            .invoke(refresh, ACME, BOB, T0.plusSeconds(80));
+      }
+    }
+  }
+}

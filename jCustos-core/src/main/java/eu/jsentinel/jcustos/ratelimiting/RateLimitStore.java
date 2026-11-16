@@ -47,7 +47,9 @@ import java.time.Instant;
  * </ol>
  *
  * <p>Implementations must be thread-safe; concurrent recordEvent
- * and countSince happen on every protected endpoint.
+ * and countSince happen on every protected endpoint. Events are a
+ * multiset: two events recorded with the same instant count as two
+ * (JS-SEC-118) — a clock with a coarse tick must not switch a limit off.
  */
 @ExperimentalJCustosApi
 public interface RateLimitStore {
@@ -101,10 +103,19 @@ public interface RateLimitStore {
   /**
    * Counts the key's events at or after {@code since} and records {@code at}
    * only when fewer than {@code limit} are present — the check and the
-   * record as one step (JS-SEC-078, CWE-367). The default is the non-atomic
-   * {@link #countSince} + {@link #recordEvent} sequence for stores that
-   * cannot do better; {@code InMemoryRateLimitStore} performs it atomically
-   * per key and drops events older than {@code since} on the way.
+   * record as one step (JS-SEC-078, CWE-367).
+   *
+   * <p><strong>Implementations must override this method</strong> with an
+   * operation that is atomic in their backing store (JS-SEC-118). The default
+   * is {@link #countSince} followed by {@link #recordEvent}; it serialises its
+   * callers on the store instance, which makes concurrent admissions through
+   * one instance in one JVM atomic, and nothing more: it does not cover a
+   * second instance over the same data, another node, or a caller that uses
+   * {@link #recordEvent} directly. The shipped in-memory and Eclipse-Store
+   * implementations override it, count events with equal instants separately
+   * and drop events older than {@code since} on the way; the contract in
+   * {@code jCustos-persistence-testkit} checks the admission under real
+   * concurrency.</p>
    *
    * @param key   bucket key
    * @param at    event instant
@@ -114,11 +125,13 @@ public interface RateLimitStore {
    * @since 00.84.00
    */
   default Admission tryAdmit(RateLimitKey key, Instant at, Instant since, int limit) {
-    int current = countSince(key, since);
-    if (current >= limit) {
-      return new Admission(false, current);
+    synchronized (this) {
+      int current = countSince(key, since);
+      if (current >= limit) {
+        return new Admission(false, current);
+      }
+      recordEvent(key, at);
+      return new Admission(true, current + 1);
     }
-    recordEvent(key, at);
-    return new Admission(true, current + 1);
   }
 }

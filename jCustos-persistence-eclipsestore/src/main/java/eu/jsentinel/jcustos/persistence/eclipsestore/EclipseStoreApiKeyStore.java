@@ -28,7 +28,12 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link ApiKeyStore}. */
+/**
+ * Eclipse-Store-backed {@link ApiKeyStore}. Keys are issued by an
+ * authenticated action, not by a request of an anonymous caller, so the
+ * store is not bounded; {@link #purgeExpired(Instant)} retires expired keys.
+ * {@link #markUsed} writes the record's slot only (JS-SEC-125).
+ */
 final class EclipseStoreApiKeyStore implements ApiKeyStore {
 
   private final EclipseStoreJCustosStorage storage;
@@ -40,110 +45,69 @@ final class EclipseStoreApiKeyStore implements ApiKeyStore {
   @Override
   public Optional<ApiKeyRecord> findByHash(String keyHash) {
     requireNonBlank(keyHash);
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().apiKeys.get(keyHash));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().apiKeys.get(keyHash)));
   }
 
   @Override
   public void save(ApiKeyRecord record) {
     requireNonNull(record, "record must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().apiKeys.put(record.keyHash(), record);
-      storage.manager().store(storage.root().apiKeys);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> storage.tables().apiKeys.put(record.keyHash(), record));
   }
 
   @Override
   public List<ApiKeyRecord> listBySubject(TenantId tenant, SubjectId subjectId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(subjectId, "subjectId must not be null");
-    storage.lock().readLock().lock();
-    try {
+    return storage.read(() -> {
       List<ApiKeyRecord> result = new ArrayList<>();
-      for (ApiKeyRecord record : storage.root().apiKeys.values()) {
+      for (ApiKeyRecord record : storage.tables().apiKeys.values()) {
         if (record.tenant().equals(tenant) && record.subjectId().equals(subjectId)) {
           result.add(record);
         }
       }
       return List.copyOf(result);
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean markUsed(String keyHash, Instant at) {
     requireNonBlank(keyHash);
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      ApiKeyRecord prev = storage.root().apiKeys.get(keyHash);
+    return storage.write(() -> {
+      ApiKeyRecord prev = storage.tables().apiKeys.get(keyHash);
       if (prev == null) {
         return false;
       }
-      storage.root().apiKeys.put(keyHash, prev.withLastUsedAt(at));
-      storage.manager().store(storage.root().apiKeys);
+      storage.tables().apiKeys.put(keyHash, prev.withLastUsedAt(at));
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean revoke(String keyHash, Instant at) {
     requireNonBlank(keyHash);
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      ApiKeyRecord prev = storage.root().apiKeys.get(keyHash);
+    return storage.write(() -> {
+      ApiKeyRecord prev = storage.tables().apiKeys.get(keyHash);
       if (prev == null || prev.isRevoked()) {
         return false;
       }
-      storage.root().apiKeys.put(keyHash, prev.withRevokedAt(at));
-      storage.manager().store(storage.root().apiKeys);
+      storage.tables().apiKeys.put(keyHash, prev.withRevokedAt(at));
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean deleteByHash(String keyHash) {
     requireNonBlank(keyHash);
-    storage.lock().writeLock().lock();
-    try {
-      boolean removed = storage.root().apiKeys.remove(keyHash) != null;
-      if (removed) {
-        storage.manager().store(storage.root().apiKeys);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> storage.tables().apiKeys.remove(keyHash) != null);
   }
 
   @Override
   public int purgeExpired(Instant now) {
     requireNonNull(now, "now must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().apiKeys.size();
-      storage.root().apiKeys.values().removeIf(record -> record.isExpired(now));
-      int removed = before - storage.root().apiKeys.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().apiKeys);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() ->
+        storage.tables().apiKeys.removeIf((hash, record) -> record.isExpired(now)));
   }
 
   private static void requireNonBlank(String value) {

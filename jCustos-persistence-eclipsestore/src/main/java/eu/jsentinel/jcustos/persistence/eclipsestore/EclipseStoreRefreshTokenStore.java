@@ -16,16 +16,14 @@
  */
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authentication.RefreshTokenRecord;
 import eu.jsentinel.jcustos.authentication.RefreshTokenStore;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
-
 import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosRoot.RefreshTokenScope;
 
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
@@ -36,9 +34,18 @@ import static java.util.Objects.requireNonNull;
  * <p>Every mutation runs under the storage write lock, so the multi-record
  * operations of JS-SEC-129 — {@link #rotate}, {@link #saveUnlessInvalidated}
  * and the marking {@link #deleteBySubject(TenantId, SubjectId, Instant)} — are
- * atomic against each other and against {@link #markRevoked}.</p>
+ * atomic against each other and against {@link #markRevoked}; what one
+ * operation changes is stored in one transaction.</p>
+ *
+ * <p>JS-SEC-125 (CWE-770): at most
+ * {@link EclipseStoreJCustosStorage#maxEntries()} records, replaced and
+ * revoked ones included. At the bound expired records go first; if none is
+ * expired the record stored first is dropped — a token whose record is gone
+ * is refused as unknown. The "invalid before" marks are one entry per subject
+ * that was ever revoked wholesale and are not bounded: a dropped mark would
+ * let a token from an overtaken operation through.</p>
  */
-final class EclipseStoreRefreshTokenStore implements RefreshTokenStore {
+final class EclipseStoreRefreshTokenStore implements RefreshTokenStore, HasLogger {
 
   private final EclipseStoreJCustosStorage storage;
 
@@ -49,40 +56,25 @@ final class EclipseStoreRefreshTokenStore implements RefreshTokenStore {
   @Override
   public Optional<RefreshTokenRecord> findByHash(String tokenHash) {
     requireNonBlank(tokenHash);
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().refreshTokens.get(tokenHash));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().refreshTokens.get(tokenHash)));
   }
 
   @Override
   public void save(RefreshTokenRecord record) {
     requireNonNull(record, "record must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().refreshTokens.put(record.tokenHash(), record);
-      storage.manager().store(storage.root().refreshTokens);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> put(record));
   }
 
   @Override
   public boolean saveUnlessInvalidated(RefreshTokenRecord record) {
     requireNonNull(record, "record must not be null");
-    storage.lock().writeLock().lock();
-    try {
+    return storage.write(() -> {
       if (isInvalidated(record)) {
         return false;
       }
-      storage.root().refreshTokens.put(record.tokenHash(), record);
-      storage.manager().store(storage.root().refreshTokens);
+      put(record);
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
@@ -94,30 +86,37 @@ final class EclipseStoreRefreshTokenStore implements RefreshTokenStore {
       throw new IllegalArgumentException("successor must not reuse the old hash");
     }
     // JS-SEC-129 (CWE-367): claim and successor in one critical section and one
-    // store call. The claim judges the record as it is now — a revoke, a
+    // transaction. The claim judges the record as it is now — a revoke, a
     // rotation, the expiry or a subject-wide deletion in the meantime refuse it.
-    storage.lock().writeLock().lock();
-    try {
-      RefreshTokenRecord prev = storage.root().refreshTokens.get(oldHash);
+    return storage.write(() -> {
+      RefreshTokenRecord prev = storage.tables().refreshTokens.get(oldHash);
       if (prev == null || !prev.isActive(now) || isInvalidated(successor)) {
         return false;
       }
-      storage.root().refreshTokens.put(oldHash, prev.withReplacedBy(successor.tokenHash()));
-      storage.root().refreshTokens.put(successor.tokenHash(), successor);
-      storage.manager().store(storage.root().refreshTokens);
+      // the claim first: making room for the successor must not find the table
+      // one entry larger than it was
+      storage.tables().refreshTokens.put(oldHash, prev.withReplacedBy(successor.tokenHash()));
+      put(successor);
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
+    });
+  }
+
+  /** Caller holds the write lock. Stores {@code record}, making room at the bound. */
+  private void put(RefreshTokenRecord record) {
+    StoredTable<String, RefreshTokenRecord> tokens = storage.tables().refreshTokens;
+    int evicted = tokens.makeRoomFor(record.tokenHash(), storage.maxEntries(), storage.now());
+    if (evicted > 0 && tokens.evictionLogDue()) {
+      logger().warn("persistence/refresh-token-store-capacity: the refresh-token store is at its"
+          + " bound of {} records; the oldest record is dropped for every new token",
+          storage.maxEntries());
     }
+    tokens.put(record.tokenHash(), record);
   }
 
   /** Caller holds the write lock. */
   private boolean isInvalidated(RefreshTokenRecord record) {
-    Map<RefreshTokenScope, Instant> marks = storage.root().refreshTokenInvalidBefore;
-    if (marks == null) {
-      return false; // root stored before 00.84.00 and never revoked wholesale since
-    }
-    Instant mark = marks.get(scope(record.tenant(), record.subjectId()));
+    Instant mark = storage.tables().refreshTokenInvalidBefore
+        .get(scope(record.tenant(), record.subjectId()));
     return mark != null && record.createdAt().isBefore(mark);
   }
 
@@ -132,55 +131,35 @@ final class EclipseStoreRefreshTokenStore implements RefreshTokenStore {
       throw new IllegalArgumentException("newHash must not be blank");
     }
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      RefreshTokenRecord prev = storage.root().refreshTokens.get(oldHash);
+    return storage.write(() -> {
+      RefreshTokenRecord prev = storage.tables().refreshTokens.get(oldHash);
       if (prev == null || prev.isReplaced()) {
         return false;
       }
-      storage.root().refreshTokens.put(oldHash, prev.withReplacedBy(newHash));
-      storage.manager().store(storage.root().refreshTokens);
+      storage.tables().refreshTokens.put(oldHash, prev.withReplacedBy(newHash));
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean markRevoked(String tokenHash, Instant at) {
     requireNonBlank(tokenHash);
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      RefreshTokenRecord prev = storage.root().refreshTokens.get(tokenHash);
+    return storage.write(() -> {
+      RefreshTokenRecord prev = storage.tables().refreshTokens.get(tokenHash);
       if (prev == null || prev.isRevoked()) {
         return false;
       }
-      storage.root().refreshTokens.put(tokenHash, prev.withRevokedAt(at));
-      storage.manager().store(storage.root().refreshTokens);
+      storage.tables().refreshTokens.put(tokenHash, prev.withRevokedAt(at));
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public int deleteBySubject(TenantId tenant, SubjectId subjectId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(subjectId, "subjectId must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().refreshTokens.size();
-      storage.root().refreshTokens.values().removeIf(record ->
-          record.tenant().equals(tenant) && record.subjectId().equals(subjectId));
-      int removed = before - storage.root().refreshTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().refreshTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> removeTokensOf(tenant, subjectId));
   }
 
   @Override
@@ -191,49 +170,28 @@ final class EclipseStoreRefreshTokenStore implements RefreshTokenStore {
     // JS-SEC-129 (CWE-613): deletion and "invalid before" mark under the same
     // write lock as rotate and saveUnlessInvalidated; the mark is persisted so
     // that it also holds across a restart.
-    storage.lock().writeLock().lock();
-    try {
-      EclipseStoreJCustosRoot root = storage.root();
-      if (root.refreshTokenInvalidBefore == null) {
-        // Root written by a version before 00.84.00: create the map and attach
-        // it to the root before it is used.
-        root.refreshTokenInvalidBefore = new LinkedHashMap<>();
-        storage.manager().store(root);
-      }
+    return storage.write(() -> {
+      StoredTable<RefreshTokenScope, Instant> marks = storage.tables().refreshTokenInvalidBefore;
       RefreshTokenScope key = scope(tenant, subjectId);
-      Instant known = root.refreshTokenInvalidBefore.get(key);
+      Instant known = marks.get(key);
       if (known == null || invalidBefore.isAfter(known)) {
-        root.refreshTokenInvalidBefore.put(key, invalidBefore);
-        storage.manager().store(root.refreshTokenInvalidBefore);
+        marks.put(key, invalidBefore);
       }
-      int before = root.refreshTokens.size();
-      root.refreshTokens.values().removeIf(record ->
-          record.tenant().equals(tenant) && record.subjectId().equals(subjectId));
-      int removed = before - root.refreshTokens.size();
-      if (removed > 0) {
-        storage.manager().store(root.refreshTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+      return removeTokensOf(tenant, subjectId);
+    });
+  }
+
+  /** Caller holds the write lock. */
+  private int removeTokensOf(TenantId tenant, SubjectId subjectId) {
+    return storage.tables().refreshTokens.removeIf((hash, record) ->
+        record.tenant().equals(tenant) && record.subjectId().equals(subjectId));
   }
 
   @Override
   public int purgeExpired(Instant now) {
     requireNonNull(now, "now must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().refreshTokens.size();
-      storage.root().refreshTokens.values().removeIf(record -> record.isExpired(now));
-      int removed = before - storage.root().refreshTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().refreshTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() ->
+        storage.tables().refreshTokens.removeIf((hash, record) -> record.isExpired(now)));
   }
 
   private static void requireNonBlank(String value) {

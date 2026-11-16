@@ -24,7 +24,6 @@ import eu.jsentinel.jcustos.util.CapacityBound;
 
 import java.time.Instant;
 import java.util.LinkedHashSet;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
@@ -41,7 +40,8 @@ import static java.util.Objects.requireNonNull;
  * before, counter and last-failure instant per key. Every operation runs
  * under the storage's write lock, asks the working state, and then copies
  * the outcome for the key — and every key the working state dropped on the
- * way — into the persistent map.</p>
+ * way — into the persistent table, which writes those entries and nothing
+ * else (JS-SEC-125).</p>
  *
  * <ul>
  *   <li><strong>Lockouts</strong> follow from counter, last failure and the
@@ -52,7 +52,7 @@ import static java.util.Objects.requireNonNull;
  *       either.</li>
  *   <li><strong>Bound</strong>: at most
  *       {@link CapacityBound#DEFAULT_MAX_ENTRIES} keys. Expired counters are
- *       removed from the persistent map as well; a live lockout is never
+ *       removed from the persistent table as well; a live lockout is never
  *       evicted; a store full of live lockouts refuses new keys.</li>
  * </ul>
  */
@@ -77,7 +77,7 @@ final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
   /**
    * The working state of the login-attempt store: the deciding in-memory store and the keys it
    * has dropped since the adapter last looked. Not persisted - the root keeps it in a
-   * {@code transient} field and it is rebuilt from the persistent map after a restart.
+   * {@code transient} field and it is rebuilt from the persistent table after a restart.
    */
   static final class WorkingState {
     private final Set<LoginAttemptKey> dropped = new LinkedHashSet<>();
@@ -139,25 +139,19 @@ final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
   @Override
   public int failureCount(LoginAttemptKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().readLock().lock();
-    try {
-      LoginAttemptLedger ledger = storage.root().loginAttempts.get(key);
+    return storage.read(() -> {
+      LoginAttemptLedger ledger = storage.tables().loginAttempts.get(key);
       return ledger == null ? 0 : ledger.count();
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    });
   }
 
   @Override
   public Optional<Instant> lastFailureAt(LoginAttemptKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().readLock().lock();
-    try {
-      LoginAttemptLedger ledger = storage.root().loginAttempts.get(key);
-      return ledger == null ? Optional.empty() : Optional.of(ledger.lastFailureAt());
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> {
+      LoginAttemptLedger ledger = storage.tables().loginAttempts.get(key);
+      return ledger == null ? Optional.<Instant>empty() : Optional.of(ledger.lastFailureAt());
+    });
   }
 
   @Override
@@ -172,17 +166,17 @@ final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
   // ── working state and its persistent copy ──────────────────────────
 
   /**
-   * Runs one operation on the working state under the write lock and brings the persistent map
-   * up to date: the key the operation was about, and every key the working state dropped because
-   * it expired or had to make room.
+   * Runs one operation on the working state under the write lock and brings the persistent
+   * table up to date: the key the operation was about, and every key the working state dropped
+   * because it expired or had to make room. Only those entries are written (JS-SEC-125) - until
+   * 00.84.00 every failed login rewrote the map of all tracked keys.
    */
   private <R> R mutate(LoginAttemptKey key, Function<InMemoryLoginAttemptStore, R> operation) {
-    storage.lock().writeLock().lock();
-    try {
+    return storage.write(() -> {
       WorkingState runtime = runtime();
       R result = operation.apply(runtime.live);
-      Map<LoginAttemptKey, LoginAttemptLedger> persistent = storage.root().loginAttempts;
-      boolean changed = removeDropped(runtime, persistent);
+      StoredTable<LoginAttemptKey, LoginAttemptLedger> persistent = storage.tables().loginAttempts;
+      removeDropped(runtime, persistent);
 
       int failures = runtime.live.failureCount(key);
       Optional<Instant> lastFailureAt = runtime.live.lastFailureAt(key);
@@ -190,49 +184,38 @@ final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
         LoginAttemptLedger current = new LoginAttemptLedger(failures, lastFailureAt.get());
         if (!current.equals(persistent.get(key))) {
           persistent.put(key, current);
-          changed = true;
         }
-      } else if (persistent.remove(key) != null) {
+      } else {
         // a key that only has an attempt in flight holds nothing worth persisting
-        changed = true;
-      }
-      if (changed) {
-        storage.manager().store(persistent);
+        persistent.remove(key);
       }
       return result;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
-  /** Returns the working state, building it from the persistent map on first use. */
+  /** Returns the working state, building it from the persistent table on first use. */
   private WorkingState runtime() {
     EclipseStoreJCustosRoot root = storage.root();
     WorkingState runtime = root.loginAttemptRuntime;
     if (runtime == null) {
       runtime = new WorkingState(maxEntries);
-      for (Map.Entry<LoginAttemptKey, LoginAttemptLedger> entry : root.loginAttempts.entrySet()) {
-        runtime.live.restore(entry.getKey(), entry.getValue().count(),
-            entry.getValue().lastFailureAt());
+      StoredTable<LoginAttemptKey, LoginAttemptLedger> persistent = storage.tables().loginAttempts;
+      for (LoginAttemptKey key : persistent.keys()) {
+        LoginAttemptLedger ledger = persistent.get(key);
+        runtime.live.restore(key, ledger.count(), ledger.lastFailureAt());
       }
       // a storage written before the bound existed can hold more keys than the bound allows
-      if (removeDropped(runtime, root.loginAttempts)) {
-        storage.manager().store(root.loginAttempts);
-      }
+      removeDropped(runtime, persistent);
       root.loginAttemptRuntime = runtime;
     }
     return runtime;
   }
 
-  private static boolean removeDropped(WorkingState runtime,
-                                       Map<LoginAttemptKey, LoginAttemptLedger> persistent) {
-    boolean changed = false;
+  private static void removeDropped(WorkingState runtime,
+                                    StoredTable<LoginAttemptKey, LoginAttemptLedger> persistent) {
     for (LoginAttemptKey dropped : runtime.dropped) {
-      if (persistent.remove(dropped) != null) {
-        changed = true;
-      }
+      persistent.remove(dropped);
     }
     runtime.dropped.clear();
-    return changed;
   }
 }

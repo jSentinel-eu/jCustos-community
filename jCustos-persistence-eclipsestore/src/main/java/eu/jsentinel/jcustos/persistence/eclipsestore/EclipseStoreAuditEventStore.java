@@ -31,8 +31,15 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Eclipse-Store-backed {@link AuditEventStore}. Operates on the
- * shared {@link EclipseStoreJCustosRoot#auditEnvelopes} map under
+ * shared {@link EclipseStoreJCustosRoot.Tables#auditEnvelopes} log under
  * the storage's read-write lock.
+ *
+ * <p>JS-SEC-125 (CWE-770, CWE-400): an append writes the envelope and the
+ * last chunk of the log — at most {@value StoredLog#CHUNK_SIZE} references —
+ * where it rewrote a map over every envelope before. The log itself is not
+ * bounded: an audit trail is not shortened behind the operator's back, and
+ * {@link #purgeOlderThan(Instant)} is the retention the application has to
+ * schedule.</p>
  */
 final class EclipseStoreAuditEventStore implements AuditEventStore {
 
@@ -47,13 +54,7 @@ final class EclipseStoreAuditEventStore implements AuditEventStore {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(event, "event must not be null");
     AuditEnvelope envelope = new AuditEnvelope(UUID.randomUUID().toString(), tenant, event);
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().auditEnvelopes.put(envelope.id(), envelope);
-      storage.manager().store(storage.root().auditEnvelopes);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> storage.tables().auditEnvelopes.append(envelope));
     return envelope;
   }
 
@@ -61,11 +62,10 @@ final class EclipseStoreAuditEventStore implements AuditEventStore {
   public List<AuditEnvelope> query(TenantId tenant, AuditQuery query) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(query, "query must not be null");
-    storage.lock().readLock().lock();
-    try {
+    return storage.read(() -> {
       List<AuditEnvelope> result = new ArrayList<>();
       int limit = query.limit();
-      for (AuditEnvelope envelope : storage.root().auditEnvelopes.values()) {
+      for (AuditEnvelope envelope : storage.tables().auditEnvelopes.elements()) {
         if (envelope.tenant().equals(tenant) && query.matches(envelope.event())) {
           result.add(envelope);
           // R039: honour AuditQuery.limit (0 = unlimited) — previously ignored.
@@ -75,23 +75,13 @@ final class EclipseStoreAuditEventStore implements AuditEventStore {
         }
       }
       return List.copyOf(result);
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    });
   }
 
   @Override
   public int purgeOlderThan(Instant cutoff) {
     requireNonNull(cutoff, "cutoff must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().auditEnvelopes.size();
-      storage.root().auditEnvelopes.values()
-          .removeIf(envelope -> envelope.event().timestamp().isBefore(cutoff));
-      storage.manager().store(storage.root().auditEnvelopes);
-      return before - storage.root().auditEnvelopes.size();
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> storage.tables().auditEnvelopes
+        .removeIf(envelope -> envelope.event().timestamp().isBefore(cutoff)));
   }
 }

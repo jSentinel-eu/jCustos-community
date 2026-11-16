@@ -71,6 +71,103 @@ class InMemoryRateLimitStoreTest {
     assertEquals(1, store.countSince(k, T0), "old events are gone from the bucket, not just ignored");
   }
 
+  // ── JS-SEC-118: one structure for keys, order of use and buckets ────
+
+  @Test
+  @DisplayName("JS-SEC-118: a key that was reset and came back is not evicted through its stale place in the order")
+  void staleOrderEntryDoesNotEvictTheFreshBucket() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(3);
+    RateLimitKey a = key("client:a");
+    RateLimitKey b = key("client:b");
+    RateLimitKey c = key("client:c");
+    bounded.recordEvent(a, T0);
+    bounded.reset(a);                       // until 00.84.00 the queue kept a's place at the head
+    bounded.recordEvent(b, T0.plusSeconds(1));
+    bounded.recordEvent(c, T0.plusSeconds(2));
+    bounded.recordEvent(a, T0.plusSeconds(3)); // a is the newest key now; the store is full
+
+    bounded.recordEvent(key("client:d"), T0.plusSeconds(4));
+
+    assertEquals(3, bounded.trackedKeyCount());
+    assertEquals(1, bounded.countSince(a, T0), "the key that came back last must still be tracked");
+    assertEquals(0, bounded.countSince(b, T0), "the key used least recently is the one that goes");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-118: at the bound the key used least recently goes - a key under throttle is in use")
+  void evictionSparesTheKeyInUse() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(3);
+    RateLimitKey throttled = key("login:admin");
+    Instant since = T0.minusSeconds(60);
+    assertTrue(bounded.tryAdmit(throttled, T0, since, 1).admitted());
+    bounded.recordEvent(key("client:b"), T0.plusSeconds(1));
+    bounded.recordEvent(key("client:c"), T0.plusSeconds(2));
+    // the attacker keeps hitting the throttled key and sprays new keys to push it out
+    for (int i = 0; i < 50; i++) {
+      assertEquals(false, bounded.tryAdmit(throttled, T0.plusSeconds(3), since, 1).admitted(),
+          "the throttle was lifted by spraying " + i + " new keys");
+      bounded.recordEvent(key("spray:" + i), T0.plusSeconds(3));
+    }
+    assertEquals(3, bounded.trackedKeyCount());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-118: purge and reset in a loop leave nothing behind; the bound holds under parallel inserts")
+  void boundIsHardUnderConcurrencyAndChurn() throws Exception {
+    int cap = 100;
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(cap);
+    for (int round = 0; round < 5_000; round++) {
+      for (int k = 0; k < 10; k++) {
+        bounded.tryAdmit(key("client:" + k), T0.plusSeconds(round), T0.plusSeconds(round - 1L), 5);
+      }
+      bounded.purgeOlderThan(T0.plusSeconds(round + 1L));
+      assertEquals(0, bounded.trackedKeyCount(), "a purged key leaves no trace");
+    }
+
+    int threads = 16;
+    java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+    java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicInteger highWater = new java.util.concurrent.atomic.AtomicInteger();
+    try {
+      java.util.List<java.util.concurrent.Future<?>> workers = new java.util.ArrayList<>();
+      for (int t = 0; t < threads; t++) {
+        int worker = t;
+        workers.add(pool.submit(() -> {
+          start.await();
+          for (int i = 0; i < 4_000; i++) {
+            bounded.recordEvent(key("w" + worker + ":" + i), T0.plusSeconds(i));
+            highWater.accumulateAndGet(bounded.trackedKeyCount(), Math::max);
+          }
+          return null;
+        }));
+      }
+      start.countDown();
+      for (java.util.concurrent.Future<?> worker : workers) {
+        worker.get(60, java.util.concurrent.TimeUnit.SECONDS);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    assertEquals(cap, bounded.trackedKeyCount());
+    assertTrue(highWater.get() <= cap, "the store held " + highWater.get() + " keys at a bound of " + cap);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-118: one key holds at most maxEventsPerKey events; tryAdmit refuses at that bound")
+  void eventsPerKeyAreBounded() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(10, 5);
+    RateLimitKey k = key("ip:9.9.9.9");
+    for (int i = 0; i < 100; i++) {
+      bounded.recordEvent(k, T0.plusSeconds(i));
+    }
+    assertEquals(5, bounded.countSince(k, T0), "the newest events are the ones kept");
+    assertEquals(5, bounded.countSince(k, T0.plusSeconds(95)));
+    RateLimitStore.Admission refused = bounded.tryAdmit(k, T0.plusSeconds(100), T0, 1_000);
+    assertEquals(false, refused.admitted(), "a limit above the per-key bound must not be unreachable");
+    assertEquals(5, refused.eventsInWindow());
+    assertThrows(IllegalArgumentException.class, () -> new InMemoryRateLimitStore(10, 0));
+  }
+
   @Nested
   @DisplayName("RateLimitKey invariants")
   class KeyInvariants {

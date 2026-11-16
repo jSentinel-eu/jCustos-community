@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.session.SessionId;
@@ -28,8 +29,21 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link SessionStore}. */
-final class EclipseStoreSessionStore implements SessionStore {
+/**
+ * Eclipse-Store-backed {@link SessionStore}.
+ *
+ * <p>JS-SEC-125 (CWE-770): a new session writes one segment of the table, an
+ * update of a known session — the last-activity instant, a status change —
+ * writes that session's slot. The store holds at most
+ * {@link EclipseStoreJCustosStorage#maxEntries()} records; at the bound the
+ * record that was stored first is dropped to make room. A session whose
+ * record is gone is not listed any more and cannot be revoked by id; the
+ * Vaadin adapter treats a record that disappeared as a revocation. Records
+ * carry no expiry of their own — wrap the store in a
+ * {@code SweepingSessionStore} to retire stale and terminal records by
+ * policy.</p>
+ */
+final class EclipseStoreSessionStore implements SessionStore, HasLogger {
 
   private final EclipseStoreJCustosStorage storage;
 
@@ -40,66 +54,50 @@ final class EclipseStoreSessionStore implements SessionStore {
   @Override
   public void save(SessionRecord session) {
     requireNonNull(session, "session must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().sessions.put(session.sessionId(), session);
-      storage.manager().store(storage.root().sessions);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> {
+      StoredTable<SessionId, SessionRecord> sessions = storage.tables().sessions;
+      int evicted = sessions.makeRoomFor(session.sessionId(), storage.maxEntries(), storage.now());
+      if (evicted > 0 && sessions.evictionLogDue()) {
+        logger().warn("persistence/session-store-capacity: the session store is at its bound of {}"
+            + " records; the oldest record is dropped for every new session", storage.maxEntries());
+      }
+      sessions.put(session.sessionId(), session);
+    });
   }
 
   @Override
   public Optional<SessionRecord> findById(SessionId sessionId) {
     requireNonNull(sessionId, "sessionId must not be null");
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().sessions.get(sessionId));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().sessions.get(sessionId)));
   }
 
   @Override
   public List<SessionRecord> findBySubject(TenantId tenant, SubjectId subjectId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(subjectId, "subjectId must not be null");
-    storage.lock().readLock().lock();
-    try {
+    return storage.read(() -> {
       List<SessionRecord> result = new ArrayList<>();
-      for (SessionRecord record : storage.root().sessions.values()) {
+      for (SessionRecord record : storage.tables().sessions.values()) {
         if (record.tenant().equals(tenant) && record.subjectId().equals(subjectId)) {
           result.add(record);
         }
       }
       return List.copyOf(result);
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean delete(SessionId sessionId) {
     requireNonNull(sessionId, "sessionId must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      boolean removed = storage.root().sessions.remove(sessionId) != null;
-      if (removed) {
-        storage.manager().store(storage.root().sessions);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> storage.tables().sessions.remove(sessionId) != null);
   }
 
   @Override
   public List<SessionRecord> findAll() {
-    storage.lock().readLock().lock();
-    try {
-      return List.copyOf(storage.root().sessions.values());
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> {
+      List<SessionRecord> result = new ArrayList<>(storage.tables().sessions.size());
+      storage.tables().sessions.values().forEach(result::add);
+      return List.copyOf(result);
+    });
   }
 }

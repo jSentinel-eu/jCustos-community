@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authentication.RememberMeTokenRecord;
 import eu.jsentinel.jcustos.authentication.RememberMeTokenStore;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -26,8 +27,28 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link RememberMeTokenStore}. */
-final class EclipseStoreRememberMeTokenStore implements RememberMeTokenStore {
+/**
+ * Eclipse-Store-backed {@link RememberMeTokenStore}.
+ *
+ * <h2>Rotation trail (JS-SEC-128, CWE-613, CWE-294)</h2>
+ * <p>{@link #markRotated} retires the live record and leaves a trail under
+ * the same hash, in one step under the storage's write lock and in one
+ * transaction, so that of several presentations of one token exactly one
+ * obtains the successor. {@link #findRotated} answers from that trail; it is
+ * persisted, so a token that was exchanged before a restart is still
+ * recognised as replayed after it. A trail lives until the consumed record
+ * would have expired, goes with the subject's tokens in
+ * {@link #deleteBySubject}, and is dropped by {@link #purgeExpired}.</p>
+ *
+ * <h2>Bounds (JS-SEC-125, CWE-770)</h2>
+ * <p>Live records and trails are two tables of at most
+ * {@link EclipseStoreJCustosStorage#maxEntries()} entries each. At the bound
+ * expired entries go first; if none is expired the entry stored first is
+ * dropped. A dropped live record means that its holder has to log in again;
+ * a dropped trail means that a replay of that one token is refused as
+ * unknown instead of being recognised as a replay.</p>
+ */
+final class EclipseStoreRememberMeTokenStore implements RememberMeTokenStore, HasLogger {
 
   private final EclipseStoreJCustosStorage storage;
 
@@ -38,75 +59,83 @@ final class EclipseStoreRememberMeTokenStore implements RememberMeTokenStore {
   @Override
   public Optional<RememberMeTokenRecord> findByHash(String tokenHash) {
     requireNonBlank(tokenHash);
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().rememberMeTokens.get(tokenHash));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().rememberMeTokens.get(tokenHash)));
   }
 
   @Override
   public void save(RememberMeTokenRecord record) {
     requireNonNull(record, "record must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().rememberMeTokens.put(record.tokenHash(), record);
-      storage.manager().store(storage.root().rememberMeTokens);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> {
+      StoredTable<String, RememberMeTokenRecord> tokens = storage.tables().rememberMeTokens;
+      int evicted = tokens.makeRoomFor(record.tokenHash(), storage.maxEntries(), storage.now());
+      if (evicted > 0 && tokens.evictionLogDue()) {
+        logger().warn("persistence/remember-me-store-capacity: the remember-me store is at its"
+            + " bound of {} live tokens; the oldest token is dropped for every new one",
+            storage.maxEntries());
+      }
+      tokens.put(record.tokenHash(), record);
+    });
   }
 
   @Override
   public boolean deleteByHash(String tokenHash) {
     requireNonBlank(tokenHash);
-    storage.lock().writeLock().lock();
-    try {
-      boolean removed = storage.root().rememberMeTokens.remove(tokenHash) != null;
-      if (removed) {
-        storage.manager().store(storage.root().rememberMeTokens);
+    return storage.write(() -> storage.tables().rememberMeTokens.remove(tokenHash) != null);
+  }
+
+  @Override
+  public boolean markRotated(String tokenHash, Instant at) {
+    requireNonBlank(tokenHash);
+    requireNonNull(at, "at must not be null");
+    // JS-SEC-128: claim and trail under one write lock and in one transaction. Whoever
+    // presents the token second finds no live record and, through findRotated, the trail.
+    return storage.write(() -> {
+      RememberMeTokenRecord live = storage.tables().rememberMeTokens.remove(tokenHash);
+      if (live == null) {
+        return false;
       }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+      StoredTable<String, RotatedToken> rotated = storage.tables().rememberMeRotated;
+      int evicted = rotated.makeRoomFor(tokenHash, storage.maxEntries(), storage.now());
+      if (evicted > 0 && rotated.evictionLogDue()) {
+        logger().warn("persistence/remember-me-trail-capacity: the trail of rotated remember-me"
+            + " tokens is at its bound of {} entries; the oldest trail is dropped for every"
+            + " rotation, a replay of that token is then refused without being recognised",
+            storage.maxEntries());
+      }
+      rotated.put(tokenHash, new RotatedToken(live, at));
+      return true;
+    });
+  }
+
+  @Override
+  public Optional<RotatedToken> findRotated(String tokenHash) {
+    requireNonBlank(tokenHash);
+    return storage.read(() -> Optional.ofNullable(storage.tables().rememberMeRotated.get(tokenHash)));
   }
 
   @Override
   public int deleteBySubject(TenantId tenant, SubjectId subjectId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(subjectId, "subjectId must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().rememberMeTokens.size();
-      storage.root().rememberMeTokens.values().removeIf(record ->
+    return storage.write(() -> {
+      int removed = storage.tables().rememberMeTokens.removeIf((hash, record) ->
           record.tenant().equals(tenant) && record.subjectId().equals(subjectId));
-      int removed = before - storage.root().rememberMeTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().rememberMeTokens);
-      }
+      storage.tables().rememberMeRotated.removeIf((hash, trail) ->
+          trail.record().tenant().equals(tenant) && trail.record().subjectId().equals(subjectId));
       return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public int purgeExpired(Instant now) {
     requireNonNull(now, "now must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().rememberMeTokens.size();
-      storage.root().rememberMeTokens.values().removeIf(record -> record.isExpired(now));
-      int removed = before - storage.root().rememberMeTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().rememberMeTokens);
-      }
+    return storage.write(() -> {
+      int removed = storage.tables().rememberMeTokens
+          .removeIf((hash, record) -> record.isExpired(now));
+      storage.tables().rememberMeRotated
+          .removeIf((hash, trail) -> trail.record().isExpired(now));
       return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   private static void requireNonBlank(String value) {

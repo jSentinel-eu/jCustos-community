@@ -24,7 +24,7 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link BootstrapStateStore}. */
+/** Eclipse-Store-backed {@link BootstrapStateStore}; one entry per tenant, not bounded. */
 final class EclipseStoreBootstrapStateStore implements BootstrapStateStore {
 
   private final EclipseStoreJCustosStorage storage;
@@ -36,38 +36,18 @@ final class EclipseStoreBootstrapStateStore implements BootstrapStateStore {
   @Override
   public Optional<BootstrapState> find(TenantId tenant) {
     requireNonNull(tenant, "tenant must not be null");
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().bootstrapStates.get(tenant));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().bootstrapStates.get(tenant)));
   }
 
   @Override
   public void save(BootstrapState state) {
     requireNonNull(state, "state must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().bootstrapStates.put(state.tenant(), state);
-      storage.manager().store(storage.root().bootstrapStates);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> storage.tables().bootstrapStates.put(state.tenant(), state));
   }
 
   @Override
   public boolean delete(TenantId tenant) {
     requireNonNull(tenant, "tenant must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      boolean removed = storage.root().bootstrapStates.remove(tenant) != null;
-      if (removed) {
-        storage.manager().store(storage.root().bootstrapStates);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> storage.tables().bootstrapStates.remove(tenant) != null);
   }
 }

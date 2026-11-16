@@ -30,7 +30,6 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -89,32 +88,34 @@ class EclipseStoreRefreshTokenRevocationRestartTest {
   }
 
   @Test
-  @DisplayName("a root stored without the mark map (written before 00.84.00) rotates, and gains the map on the first revocation")
-  void rootWithoutMarkMap() {
-    Instant revokedAt = T0.plusSeconds(100);
-    try (EclipseStoreJCustosStorage storage = EclipseStoreJCustosStorage.openAt(tempDir)) {
-      storage.refreshTokenStore().save(token("h1", T0));
-      // The state such a root has after loading: the field added in 00.84.00 is null.
-      storage.lock().writeLock().lock();
-      try {
-        storage.root().refreshTokenInvalidBefore = null;
-        storage.manager().store(storage.root());
-      } finally {
-        storage.lock().writeLock().unlock();
-      }
-    }
+  @DisplayName("a storage written by 00.83.00 (no mark map in its root) rotates, and keeps the mark of its first revocation")
+  void rootWithoutMarkMap() throws Exception {
+    // The real thing instead of a simulation: a storage directory the released 00.83.00
+    // artefacts wrote. Its root has no refreshTokenInvalidBefore field at all.
+    LegacyStorageFixtures.copyTo(LegacyStorageFixtures.WRITTEN_BY_00_83_00, tempDir);
+    Instant t0 = LegacyStorageFixtures.T0;
+    Instant revokedAt = t0.plusSeconds(1_000);
     try (EclipseStoreJCustosStorage reopened = EclipseStoreJCustosStorage.openAt(tempDir)) {
-      assertNull(reopened.root().refreshTokenInvalidBefore, "precondition: no mark map on disk");
       RefreshTokenStore store = reopened.refreshTokenStore();
-      assertTrue(store.saveUnlessInvalidated(token("h0", T0)));
-      assertTrue(store.rotate("h1", token("h2", T0.plusSeconds(60)), T0.plusSeconds(60)));
-      assertEquals(3, store.deleteBySubject(TenantId.DEFAULT, ALICE, revokedAt));
-      assertFalse(store.saveUnlessInvalidated(token("older", revokedAt.minusSeconds(1))));
+      assertTrue(store.saveUnlessInvalidated(fixtureToken("h0", t0)),
+          "no mark on disk: nothing is invalidated");
+      assertTrue(store.rotate("rt-hash-2", fixtureToken("rt-hash-3", t0.plusSeconds(120)),
+          t0.plusSeconds(120)));
+      // rt-hash-1 (replaced), rt-hash-2 (now replaced), rt-hash-3 and h0 belong to alice
+      assertEquals(4, store.deleteBySubject(TenantId.DEFAULT, ALICE, revokedAt));
+      assertFalse(store.saveUnlessInvalidated(fixtureToken("older", revokedAt.minusSeconds(1))));
     }
     try (EclipseStoreJCustosStorage again = EclipseStoreJCustosStorage.openAt(tempDir)) {
       assertFalse(again.refreshTokenStore()
-              .saveUnlessInvalidated(token("older", revokedAt.minusSeconds(1))),
-          "the map created on first use must be attached to the persisted root");
+              .saveUnlessInvalidated(fixtureToken("older", revokedAt.minusSeconds(1))),
+          "the mark of the first revocation must be on disk");
+      assertTrue(again.refreshTokenStore()
+          .saveUnlessInvalidated(fixtureToken("newer", revokedAt.plusSeconds(1))));
     }
+  }
+
+  private static RefreshTokenRecord fixtureToken(String hash, Instant createdAt) {
+    return new RefreshTokenRecord(hash, TenantId.DEFAULT, ALICE, createdAt,
+        createdAt.plusSeconds(86_400), Optional.empty(), Optional.empty());
   }
 }

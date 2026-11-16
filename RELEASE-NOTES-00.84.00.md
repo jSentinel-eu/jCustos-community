@@ -750,8 +750,8 @@ security version and revokes its remember-me and refresh tokens.
 
 `StoreBackedRememberMeService.rotate` exchanges a remember-me token on every use, and a token that
 was already exchanged revokes all remember-me tokens of the subject when it is presented again —
-with a store that records rotated tokens, which the in-memory store does; the Eclipse-Store
-remember-me store still inherits the defaults and rotates without replay detection. All of this is
+with a store that records rotated tokens, which both shipped stores do (the Eclipse-Store store
+since the addition further down). All of this is
 additive: an application that does not configure the new collaborators behaves as before, except
 that a reset token whose claim succeeded is spent even when the hash write then fails.
 
@@ -1421,6 +1421,86 @@ and keeps the fallback to that class. `@PublicRoute` on a method still does not 
 restriction on this path; this differs from the REST filter, where it does, and is unchanged.
 **Consumers:** a call on a subclass with a restriction of its own is decided by that restriction,
 not by the base class's.
+
+## Rate limiting admits exactly `limit` requests: atomic in the Eclipse-Store store, and equal instants count separately (SA18, JS-SEC-118, CWE-367, CWE-799, CWE-770, CWE-401)
+
+`EclipseStoreRateLimitStore` inherited the two-step default of `tryAdmit` — count under the read
+lock, record under the write lock — so parallel requests all read the counter before the first one
+wrote; in the analysis 15 to 50 of 50 callers passed a limit of 10. It also kept the events of a key
+in a set, which dropped every further event with the same instant: with a clock that ticks coarsely
+a limit of 3 admitted 20 of 20 calls. The adapter now counts, prunes and records in one step under
+the write lock and keeps the events as an ordered list. `InMemoryRateLimitStore` was rebuilt on one
+lock and one map: its separate queue of keys grew with every key that was purged or reset and seen
+again, a stale queue entry could evict the bucket a key had just been given anew, parallel inserts
+could push the map past its bound, and events that arrived out of order were miscounted. Both stores
+evict the key used least recently at the bound, so a key that is being throttled is the last
+candidate instead of the first, and hold at most 10 000 events per key
+(`InMemoryRateLimitStore.DEFAULT_MAX_EVENTS_PER_KEY`); at that bound `tryAdmit` refuses. The default
+of `RateLimitStore.tryAdmit` now serialises its callers on the store instance.
+
+**Consumers:** a third-party `RateLimitStore` should override `tryAdmit` with an operation that is
+atomic in its backing store; `RateLimitStoreContract` gained tests for equal instants, out-of-order
+events and — with real threads — atomic admission (`admitsAtomically()` opts a store out of the last
+one). The eviction order of `InMemoryRateLimitStore` changed from first seen to least recently used,
+and all its operations now share one lock.
+
+## Eclipse-Store adapters write the changed entry instead of the whole store, and every request-keyed store is bounded (SA25, JS-SEC-125, CWE-770, CWE-400, CWE-407)
+
+Each adapter kept its data in one `java.util` map and stored that map after every mutation, under
+the write lock all security stores share. The n-th failed login with a new user name therefore wrote
+n entries: 2 000 of them put 32 MB on the disk, 10 000 more than 1 GB, and a full disk fails every
+store, revocation and lockout included. The data now lives in segmented tables (the audit events in
+a chunked log): a new key writes one of 1 024 segments, a changed value its own slot, and one
+operation is one transaction. The same 2 000 failed logins write under 1 MB, 10 000 about 4 MB.
+
+The stores that are filled by requests are bounded to 100 000 entries each
+(`EclipseStoreJCustosStorage.DEFAULT_MAX_ENTRIES_PER_STORE`, configurable through `openAt(Path,
+int)` and `JCustosStorageFactory.openAt(Path, StorageLayout, int)`): sessions, remember-me tokens
+and refresh tokens drop expired entries first and then the entry stored first; password-reset and
+email-verification tokens drop consumed and expired records and then refuse `save` with
+`…-token-store-capacity-exceeded`, like their in-memory counterparts; rate-limit keys drop buckets
+that left every window applied to them and then the key used least recently. Not bounded, by intent:
+audit events (retention stays `purgeOlderThan`), role assignments, security versions, bootstrap
+states, API keys and the refresh-token "invalid before" marks.
+
+**Consumers:** the stored layout changed. A storage written by 00.83.x or by an earlier 00.84.00
+build is converted when it is first opened (`persistence/storage-layout-migrated` in the log) and
+keeps every record; afterwards a release before 00.84.00 can no longer open it — back up the
+directory before the upgrade. Installations with more than 100 000 concurrent sessions or live
+tokens raise the bound; at the bound the oldest session record is dropped, which the Vaadin
+revocation check treats as a revoked session.
+
+## Backups and existing storage directories are owner-only; a foreign storage is refused instead of replaced (SA36, JS-SEC-136, CWE-276, CWE-530, CWE-732, CWE-665, CWE-754)
+
+`issueFullBackup` wrote the copy of the security store with the process umask, usually readable for
+every local user, and the owner-only hardening of JS-SEC-017/038 applied only to a directory it
+created: a directory that already existed earned a warning and stayed open. On POSIX a backup target
+is now created with `0700` (an existing empty one is restricted), an existing storage directory that
+belongs to the process user is restricted to its owner when it is opened, and the channel
+directories, data files and type dictionary lose their rights for group and others. A storage
+directory or backup target that belongs to another user, or cannot be restricted, fails with
+`persistence/storage-permissions` or `persistence/backup-permissions`. A storage whose root object
+is not a jCustos security root used to be replaced by an empty root without a word; it now fails
+start-up with `persistence/foreign-root` and is left untouched. On filesystems without POSIX
+attributes owner and permissions still cannot be checked or enforced (JS-SEC-016).
+
+**Consumers:** start-up fails where the storage directory is owned by a different user than the
+process (for example a root-owned volume mount) — hand the directory to the process user.
+`StorageTreeHardening.hardenOwnerOnly` keeps its signature and never throws, but now restricts an
+existing directory it owns; `requireOwnerOnly` and `restrictStorageFiles` are new.
+
+## The Eclipse-Store remember-me store recognises a replayed token, also after a restart (addition to SA28, JS-SEC-128, CWE-613, CWE-294)
+
+`StoreBackedRememberMeService.rotate` revokes all remember-me tokens of a subject when a token that
+was already exchanged is presented again — with a store that records rotated tokens.
+`EclipseStoreRememberMeTokenStore` inherited the SPI defaults, so with the persistent store a stolen
+and already exchanged cookie was merely "unknown" and the thief's successor token stayed valid. The
+adapter now implements `markRotated` and `findRotated`: claim and trail are one step under the write
+lock and one transaction, the trail is persisted, lives until the consumed token would have expired,
+goes with `deleteBySubject` and `purgeExpired`, and is bounded like the other request-keyed stores.
+`RememberMeTokenStoreContract` holds both shipped stores to the rotation and replay cases, including
+one with 32 parallel presentations of one token. **Consumers:** a third-party `RememberMeTokenStore`
+that keeps no trail overrides `implementsRotationTrail()` in its contract test to return `false`.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

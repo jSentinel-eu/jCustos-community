@@ -81,4 +81,42 @@ class EclipseStoreRateLimitRestartTest {
           "the surviving event must be the after-cutoff one (T0+20)");
     }
   }
+
+  @Test
+  @DisplayName("JS-SEC-118: events with one and the same instant survive a close/reopen as separate events")
+  void equalInstantsSurviveRestart() {
+    try (EclipseStoreJCustosStorage storage =
+             EclipseStoreJCustosStorage.openAt(tempDir)) {
+      RateLimitStore store = storage.rateLimitStore();
+      store.recordEvent(KEY, T0);
+      store.recordEvent(KEY, T0);
+      store.recordEvent(KEY, T0);
+      assertEquals(3, store.countSince(KEY, T0));
+    }
+    try (EclipseStoreJCustosStorage reopened =
+             EclipseStoreJCustosStorage.openAt(tempDir)) {
+      assertEquals(3, reopened.rateLimitStore().countSince(KEY, T0),
+          "a set would have kept one of the three");
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-118: a limit reached before a restart is still reached after it")
+  void admissionsSurviveRestart() {
+    Instant since = T0.minusSeconds(60);
+    try (EclipseStoreJCustosStorage storage =
+             EclipseStoreJCustosStorage.openAt(tempDir)) {
+      RateLimitStore store = storage.rateLimitStore();
+      for (int i = 0; i < 3; i++) {
+        assertEquals(true, store.tryAdmit(KEY, T0, since, 3).admitted());
+      }
+      assertEquals(false, store.tryAdmit(KEY, T0, since, 3).admitted());
+    }
+    try (EclipseStoreJCustosStorage reopened =
+             EclipseStoreJCustosStorage.openAt(tempDir)) {
+      RateLimitStore.Admission refused = reopened.rateLimitStore().tryAdmit(KEY, T0, since, 3);
+      assertEquals(false, refused.admitted(), "a restart must not hand out a fresh budget");
+      assertEquals(3, refused.eventsInWindow());
+    }
+  }
 }

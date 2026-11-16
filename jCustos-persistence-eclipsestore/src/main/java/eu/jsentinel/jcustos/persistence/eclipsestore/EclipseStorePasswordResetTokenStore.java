@@ -16,17 +16,30 @@
  */
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
+import eu.jsentinel.jcustos.accountlifecycle.InMemoryPasswordResetTokenStore;
 import eu.jsentinel.jcustos.accountlifecycle.PasswordResetTokenRecord;
 import eu.jsentinel.jcustos.accountlifecycle.PasswordResetTokenStore;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.util.CapacityBound;
 
 import java.time.Instant;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link PasswordResetTokenStore}. */
+/**
+ * Eclipse-Store-backed {@link PasswordResetTokenStore}.
+ *
+ * <p>JS-SEC-125 (CWE-770): a reset is requested by a caller who is not logged in, so the store is bounded like its in-memory
+ * counterpart (JS-SEC-074) — at most
+ * {@link EclipseStoreJCustosStorage#maxEntries()} records. At the bound
+ * consumed and expired records are dropped; when every record is still open,
+ * a further {@link #save} fails with
+ * {@code accountlifecycle/password-reset-token-store-capacity-exceeded}. Open tokens are never
+ * pushed out by new ones: that would let a flood of requests cancel a link
+ * somebody is about to use.</p>
+ */
 final class EclipseStorePasswordResetTokenStore implements PasswordResetTokenStore {
 
   private final EclipseStoreJCustosStorage storage;
@@ -38,78 +51,52 @@ final class EclipseStorePasswordResetTokenStore implements PasswordResetTokenSto
   @Override
   public Optional<PasswordResetTokenRecord> findByHash(String tokenHash) {
     requireNonBlank(tokenHash);
-    storage.lock().readLock().lock();
-    try {
-      return Optional.ofNullable(storage.root().passwordResetTokens.get(tokenHash));
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    return storage.read(() -> Optional.ofNullable(storage.tables().passwordResetTokens.get(tokenHash)));
   }
 
   @Override
   public void save(PasswordResetTokenRecord record) {
     requireNonNull(record, "record must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      storage.root().passwordResetTokens.put(record.tokenHash(), record);
-      storage.manager().store(storage.root().passwordResetTokens);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> {
+      StoredTable<String, PasswordResetTokenRecord> tokens = storage.tables().passwordResetTokens;
+      if (tokens.size() >= storage.maxEntries() && !tokens.containsKey(record.tokenHash())) {
+        tokens.dropDead(storage.now()); // consumed and expired records
+        if (tokens.size() >= storage.maxEntries()) {
+          throw new IllegalStateException(CapacityBound.capacityExceededCode(
+              InMemoryPasswordResetTokenStore.CAPACITY_NAMESPACE) + ": " + storage.maxEntries());
+        }
+      }
+      tokens.put(record.tokenHash(), record);
+    });
   }
 
   @Override
   public boolean markConsumed(String tokenHash, Instant at) {
     requireNonBlank(tokenHash);
     requireNonNull(at, "at must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      PasswordResetTokenRecord prev = storage.root().passwordResetTokens.get(tokenHash);
+    return storage.write(() -> {
+      PasswordResetTokenRecord prev = storage.tables().passwordResetTokens.get(tokenHash);
       if (prev == null || prev.isConsumed()) {
         return false;
       }
-      storage.root().passwordResetTokens.put(tokenHash, prev.withConsumedAt(at));
-      storage.manager().store(storage.root().passwordResetTokens);
+      storage.tables().passwordResetTokens.put(tokenHash, prev.withConsumedAt(at));
       return true;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public int deleteBySubject(TenantId tenant, SubjectId subjectId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(subjectId, "subjectId must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().passwordResetTokens.size();
-      storage.root().passwordResetTokens.values().removeIf(record ->
-          record.tenant().equals(tenant) && record.subjectId().equals(subjectId));
-      int removed = before - storage.root().passwordResetTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().passwordResetTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() -> storage.tables().passwordResetTokens.removeIf((hash, record) ->
+        record.tenant().equals(tenant) && record.subjectId().equals(subjectId)));
   }
 
   @Override
   public int purgeExpired(Instant now) {
     requireNonNull(now, "now must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      int before = storage.root().passwordResetTokens.size();
-      storage.root().passwordResetTokens.values().removeIf(record -> record.isExpired(now));
-      int removed = before - storage.root().passwordResetTokens.size();
-      if (removed > 0) {
-        storage.manager().store(storage.root().passwordResetTokens);
-      }
-      return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    return storage.write(() ->
+        storage.tables().passwordResetTokens.removeIf((hash, record) -> record.isExpired(now)));
   }
 
   private static void requireNonBlank(String value) {

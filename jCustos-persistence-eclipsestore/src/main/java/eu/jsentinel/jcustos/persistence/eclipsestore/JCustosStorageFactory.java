@@ -17,11 +17,13 @@
 package eu.jsentinel.jcustos.persistence.eclipsestore;
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.util.CapacityBound;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -91,10 +93,40 @@ public final class JCustosStorageFactory {
    *                                  validation codes if {@code parent}
    *                                  exists and is not a writable
    *                                  directory
+   * @throws IllegalStateException    {@code persistence/storage-permissions} or
+   *                                  {@code persistence/foreign-root}, see
+   *                                  {@link #openAt(Path, StorageLayout, int)}
    */
   public static JCustosStoragePair openAt(Path parent, StorageLayout layout) {
+    return openAt(parent, layout, EclipseStoreJCustosStorage.DEFAULT_MAX_ENTRIES_PER_STORE);
+  }
+
+  /**
+   * Opens a storage pair under {@code parent} with an explicit bound for the
+   * framework stores that are filled with keys arriving in requests
+   * (JS-SEC-125, CWE-770) — see
+   * {@link EclipseStoreJCustosStorage#openAt(Path, int)}.
+   *
+   * @param parent             parent directory under which the framework and
+   *                           app sub-directories will be created or read
+   * @param layout             sub-directory layout to use
+   * @param maxEntriesPerStore upper bound on the entries of each
+   *                           request-keyed framework store; at least 1
+   * @return a freshly opened {@link JCustosStoragePair}
+   * @throws NullPointerException     if {@code parent} or {@code layout} is {@code null}
+   * @throws IllegalArgumentException as for {@link #openAt(Path, StorageLayout)},
+   *                                  or when {@code maxEntriesPerStore < 1}
+   * @throws IllegalStateException    {@code persistence/storage-permissions} when a storage
+   *                                  directory cannot be restricted to its owner on POSIX,
+   *                                  {@code persistence/foreign-root} when the framework
+   *                                  directory holds another application's storage (JS-SEC-136)
+   * @since 00.84.00
+   */
+  public static JCustosStoragePair openAt(Path parent, StorageLayout layout,
+                                          int maxEntriesPerStore) {
     Objects.requireNonNull(parent, "parent");
     Objects.requireNonNull(layout, "layout");
+    CapacityBound.requirePositiveCapacity(maxEntriesPerStore);
     ensureParentIsWritableDirectory(parent);
     hardenStorageTree(parent, layout);
 
@@ -106,8 +138,9 @@ public final class JCustosStorageFactory {
     try {
       frameworkMgr = EclipseStoreJCustosStorage.initStorageManager(frameworkDir);
       appMgr       = EmbeddedStorage.start(appDir);
+      StorageTreeHardening.restrictStorageFiles(appDir, "persistence/storage-permissions");
       return new JCustosStoragePair(
-          new EclipseStoreJCustosStorage(frameworkMgr),
+          new EclipseStoreJCustosStorage(frameworkMgr, maxEntriesPerStore, Clock.systemUTC()),
           appMgr,
           parent,
           layout,
@@ -156,11 +189,15 @@ public final class JCustosStorageFactory {
    * downstream by {@link EclipseStoreJCustosStorage#initStorageManager(Path)}, so hardening
    * it here too would harden it twice. Only the parent and the app sub-directory (opened via a
    * bare {@code EmbeddedStorage.start}) need hardening at this level.
+   *
+   * <p>JS-SEC-136 (CWE-276, CWE-732): existing directories are restricted too. The parent is
+   * restricted when it belongs to the process user and reported otherwise; the two storage
+   * directories must be owner-only, and one that cannot be made so stops the open.
    */
   private static void hardenStorageTree(Path parent, StorageLayout layout) {
     StorageTreeHardening.hardenOwnerOnly(parent, "persistence/storage-permissions",
         "the framework store holds session handles, roles and token hashes");
-    StorageTreeHardening.hardenOwnerOnly(parent.resolve(layout.appSubdir()),
+    StorageTreeHardening.requireOwnerOnly(parent.resolve(layout.appSubdir()),
         "persistence/storage-permissions",
         "the app store shares the framework's owner-only tree");
   }

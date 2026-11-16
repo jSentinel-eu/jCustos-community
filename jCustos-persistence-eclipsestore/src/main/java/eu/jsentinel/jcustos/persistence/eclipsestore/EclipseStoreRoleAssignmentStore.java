@@ -25,7 +25,11 @@ import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
-/** Eclipse-Store-backed {@link RoleAssignmentStore}. */
+/**
+ * Eclipse-Store-backed {@link RoleAssignmentStore}; one entry per subject
+ * that holds a role, not bounded — assignments are written by an
+ * administrative action.
+ */
 final class EclipseStoreRoleAssignmentStore implements RoleAssignmentStore {
 
   private final EclipseStoreJCustosStorage storage;
@@ -37,95 +41,68 @@ final class EclipseStoreRoleAssignmentStore implements RoleAssignmentStore {
   @Override
   public Set<RoleName> findRoles(RoleAssignmentKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().readLock().lock();
-    try {
-      Set<RoleName> roles = storage.root().roleAssignments.get(key);
+    return storage.read(() -> {
+      Set<RoleName> roles = storage.tables().roleAssignments.get(key);
       return roles == null ? Set.of() : Set.copyOf(roles);
-    } finally {
-      storage.lock().readLock().unlock();
-    }
+    });
   }
 
   @Override
   public void setRoles(RoleAssignmentKey key, Set<RoleName> roles) {
     requireNonNull(key, "key must not be null");
-    storage.lock().writeLock().lock();
-    try {
+    storage.update(() -> {
       if (roles == null || roles.isEmpty()) {
-        storage.root().roleAssignments.remove(key);
+        storage.tables().roleAssignments.remove(key);
       } else {
-        storage.root().roleAssignments.put(key, new LinkedHashSet<>(roles));
+        storage.tables().roleAssignments.put(key, new LinkedHashSet<>(roles));
       }
-      storage.manager().store(storage.root().roleAssignments);
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean assignRole(RoleAssignmentKey key, RoleName role) {
     requireNonNull(key, "key must not be null");
     requireNonNull(role, "role must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      LinkedHashSet<RoleName> set = storage.root().roleAssignments.get(key);
-      boolean newKey = set == null;
-      if (newKey) {
+    return storage.write(() -> {
+      LinkedHashSet<RoleName> set = storage.tables().roleAssignments.get(key);
+      if (set == null) {
         set = new LinkedHashSet<>();
-        storage.root().roleAssignments.put(key, set);
+        storage.tables().roleAssignments.put(key, set);
       }
       boolean added = set.add(role);
       if (added) {
-        // store the mutated set itself — store(map) would not re-store an
-        // already-persisted nested set (R002); also store the map for a new key.
-        storage.manager().store(set);
-        if (newKey) {
-          storage.manager().store(storage.root().roleAssignments);
-        }
+        // the set is changed in place: it has to be stored itself, storing what
+        // refers to it would not write it again (R002)
+        storage.markChanged(set);
       }
       return added;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public boolean revokeRole(RoleAssignmentKey key, RoleName role) {
     requireNonNull(key, "key must not be null");
     requireNonNull(role, "role must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      LinkedHashSet<RoleName> set = storage.root().roleAssignments.get(key);
+    return storage.write(() -> {
+      LinkedHashSet<RoleName> set = storage.tables().roleAssignments.get(key);
       if (set == null) {
         return false;
       }
       boolean removed = set.remove(role);
       if (removed) {
         if (set.isEmpty()) {
-          // entry removal mutates the map itself, which store(map) persists.
-          storage.root().roleAssignments.remove(key);
-          storage.manager().store(storage.root().roleAssignments);
+          storage.tables().roleAssignments.remove(key);
         } else {
-          // persist the in-place set mutation (R002).
-          storage.manager().store(set);
+          storage.markChanged(set); // changed in place (R002)
         }
       }
       return removed;
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    });
   }
 
   @Override
   public void clearRoles(RoleAssignmentKey key) {
     requireNonNull(key, "key must not be null");
-    storage.lock().writeLock().lock();
-    try {
-      if (storage.root().roleAssignments.remove(key) != null) {
-        storage.manager().store(storage.root().roleAssignments);
-      }
-    } finally {
-      storage.lock().writeLock().unlock();
-    }
+    storage.update(() -> storage.tables().roleAssignments.remove(key));
   }
 }

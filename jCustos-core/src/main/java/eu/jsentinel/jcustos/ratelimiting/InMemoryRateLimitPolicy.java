@@ -135,7 +135,11 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
 
   /**
    * Convenience: purges every event older than {@code now - window}
-   * across all keys. Idempotent; safe to schedule.
+   * across all keys. Idempotent; safe to schedule — unless the store is
+   * shared with a policy that has a longer window: the purge covers all keys
+   * of the store and would remove events that policy still counts
+   * (JS-SEC-118). Purge with the longest window then, or give each policy
+   * its own store.
    *
    * @return number of events removed
    */
