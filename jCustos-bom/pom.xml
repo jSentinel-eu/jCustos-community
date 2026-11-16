@@ -26,6 +26,9 @@
         below; keep them in step with the community parent.
       * Only eu.jsentinel entries belong into <dependencyManagement>, and
         neither properties nor imports that would leak into consumers.
+      * scripts/gate.sh (stage bom) compares this POM with the reactor:
+        same version, same project.build.outputTimestamp, and exactly the
+        publishable modules of the root POM under <dependencyManagement>.
   -->
   <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-bom</artifactId>
@@ -73,6 +76,13 @@
     <system>Github</system>
     <url>https://github.com/jSentinel-eu/jCustos-community/issues</url>
   </issueManagement>
+
+  <!-- The one property of this POM. Properties of an imported BOM do not reach
+       the importing project, so nothing leaks. Same value as in the community
+       parent (reproducible builds, SA42); change both together. -->
+  <properties>
+    <project.build.outputTimestamp>2026-11-11T00:00:00Z</project.build.outputTimestamp>
+  </properties>
 
   <!-- Same deploy target as the community parent; the repository ids are the
        ones the credentials are stored under and must not be renamed. -->

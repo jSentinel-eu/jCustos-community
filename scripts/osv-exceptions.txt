@@ -1,0 +1,12 @@
+# Advisories the verification gate (scripts/gate.sh, stage "advisories") accepts
+# for a limited time. One exception per line:
+#
+#   <advisory id> <YYYY-MM-DD> <reason>
+#
+# The id is the OSV id or one of its aliases (GHSA-..., CVE-...). The date is
+# the last day on which the exception holds; from the next day on the advisory
+# fails the gate again. Give the reason a reader can check: why the vulnerable
+# code is not reachable, or which release of the dependency is being waited for.
+# Remove an entry as soon as the dependency is updated.
+#
+# No exceptions at present.

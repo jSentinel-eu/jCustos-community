@@ -173,6 +173,34 @@
              ban-vulnerable-jackson; raise the three places together. -->
         <jackson3.version>3.2.4</jackson3.version>
         <jackson2.version>2.22.4</jackson2.version>
+
+        <!-- Security analysis 2026-11-10, SA42: reproducible builds. With this
+             property set, the archive plugins write entries in a fixed order
+             with this timestamp instead of the build time, so two builds of
+             the same commit with the same JDK produce byte-identical jars and
+             anyone can recompute a published artefact from its tag
+             (reproducibility stage of scripts/gate.sh).
+             Maven 4 supplies a default of its own (1980-02-01T00:00:00Z),
+             which is why the jars of 00.83.00 can already be recomputed. The
+             explicit value makes this a property of the project instead of a
+             default of the Maven version in use. It has no meaning beyond
+             being fixed and need not follow the release date. If it is
+             changed, change jCustos-bom/pom.xml as well: that POM has no
+             parent and repeats the property; scripts/gate.sh compares the
+             two. -->
+        <project.build.outputTimestamp>2026-11-11T00:00:00Z</project.build.outputTimestamp>
+
+        <!-- Security analysis 2026-11-10, SA42: the CycloneDX SBOM is generated
+             in the release build (profile _release_prepare) and on request
+             (profile sbom), not in every build. Every goal of the plugin
+             requires online mode; in the offline builds used during
+             development Maven skips it with nothing more than a warning. A
+             build step that is silently absent is worse than one that is
+             requested explicitly and verified: scripts/gate.sh,
+             scripts/clean-bundle-for-central.sh and
+             scripts/deploy-jsentinel.sh fail when an SBOM is missing. -->
+        <cyclonedx.skip>true</cyclonedx.skip>
+        <cyclonedx.version>2.9.3</cyclonedx.version>
     </properties>
 
     <!-- Second source next to Maven Central. Central itself is published through
@@ -534,12 +562,39 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
             </plugin>
+            <!--
+              Security analysis 2026-11-10, SA42. No release up to 00.83.00
+              carried an SBOM although the plugin was configured, for three
+              reasons, each of which only showed as a line in the build log:
+
+                * every goal of the plugin requires online mode, and Maven
+                  skips it in an offline build;
+                * skipNotDeployed (default true) drops a module unless its
+                  model shows a deploy or publish execution. Under Maven 4
+                  with the central-publishing extension no module shows one,
+                  so every module was skipped as "module skips deploy";
+                * this POM added a second, unnamed execution next to the one
+                  inherited from com.svenruppert:dependencies (build-sbom).
+
+              Hence: one execution that reuses the inherited id, and
+              skipNotDeployed off. makeAggregateBom writes
+              target/CycloneDX-SBom.{json,xml} for every module and, in the
+              root project, the aggregate over the modules of the reactor.
+              The release scripts build the library modules only, so the
+              published aggregate does not list the demos. Each file is
+              attached with the classifier cyclonedx; the release build signs
+              it and publishes it next to the jar.
+
+              Skipped unless cyclonedx.skip is false: see the property above
+              and the profiles sbom and _release_prepare below.
+            -->
             <plugin>
                 <groupId>org.cyclonedx</groupId>
                 <artifactId>cyclonedx-maven-plugin</artifactId>
-                <version>2.9.1</version>
+                <version>${cyclonedx.version}</version>
                 <executions>
                     <execution>
+                        <id>build-sbom</id>
                         <phase>package</phase>
                         <goals>
                             <goal>makeAggregateBom</goal>
@@ -548,7 +603,7 @@
                 </executions>
                 <configuration>
                     <projectType>library</projectType>
-                    <schemaVersion>1.4</schemaVersion>
+                    <schemaVersion>1.6</schemaVersion>
                     <includeBomSerialNumber>true</includeBomSerialNumber>
                     <includeCompileScope>true</includeCompileScope>
                     <includeProvidedScope>true</includeProvidedScope>
@@ -557,6 +612,7 @@
                     <includeTestScope>false</includeTestScope>
                     <includeLicenseText>false</includeLicenseText>
                     <outputReactorProjects>true</outputReactorProjects>
+                    <skipNotDeployed>false</skipNotDeployed>
                     <outputFormat>all</outputFormat>
                     <outputName>CycloneDX-SBom</outputName>
                 </configuration>
@@ -639,6 +695,46 @@
         </plugins>
     </reporting>
     <profiles>
+        <!-- Security analysis 2026-11-10, SA42: switches the CycloneDX SBOM on.
+             sbom is for the verification gate and for anyone who wants the
+             SBOM of a working copy (./mvnw -Psbom package, online).
+             _release_prepare carries the same id as the release profile of
+             com.svenruppert:dependencies, so -P_release_prepare activates
+             both: sources, Javadoc and the ban on snapshots from the parent,
+             the SBOM from here.
+
+             The inherited profile also attaches a -test-sources.jar. Test
+             sources and test resources (among them the key store the event
+             bus tests use) are not part of what jCustos publishes, so the
+             execution is unbound here; the release scripts leave out the
+             -tests.jar in the same way (-Dmaven.test.skip=true on deploy,
+             file filter in the Central bundle). -->
+        <profile>
+            <id>sbom</id>
+            <properties>
+                <cyclonedx.skip>false</cyclonedx.skip>
+            </properties>
+        </profile>
+        <profile>
+            <id>_release_prepare</id>
+            <properties>
+                <cyclonedx.skip>false</cyclonedx.skip>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>attach-test-sources</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <profile>
             <id>_java</id>
             <build>

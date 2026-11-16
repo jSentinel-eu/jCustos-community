@@ -1,0 +1,90 @@
+#
+# Copyright © 2018 Sven Ruppert (sven.ruppert@gmail.com)
+#
+# Licensed under the EUPL, Version 1.2 or - as soon they will be
+# approved by the European Commission - subsequent versions of the
+# EUPL (the "Licence"); You may not use this work except in
+# compliance with the Licence. You may obtain a copy of the Licence at:
+#
+# https://joinup.ec.europa.eu/software/page/eupl
+#
+# Runs the verification gate (scripts/gate.sh) for the community edition on
+# every push and pull request to develop, and once a night so that a newly
+# published advisory turns the gate red without a commit.
+#
+# Status (security analysis 2026-11-10, SA44): this workflow has NOT run on a
+# runner yet and is not a required check. Until it is, the binding gate is
+# scripts/gate.sh run by the maintainer. Before relying on it, settle the
+# points marked TODO below on the Forgejo instance.
+#
+# Design:
+#   * No third-party action. Checkout is four git commands, the JDK comes with
+#     the container image. An action is code from another repository that runs
+#     in the job; none is used, so none has to be pinned or reviewed.
+#   * No secrets. The job references no secret and does not use the automatic
+#     token: the repository is fetched anonymously. Maven runs without a
+#     settings.xml, so everything is resolved from Maven Central into an empty
+#     local repository; an artefact that only exists on a workstation or in a
+#     private registry breaks the build here.
+#   * Values of the event are read from the environment inside the scripts, not
+#     interpolated into them, so a branch name cannot become shell code.
+#   * The gate itself decides: exit code 0 passes, 1 (a stage failed) and
+#     2 (a required stage did not run, for example OSV not reachable) fail the
+#     job.
+
+name: verify
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - develop
+  schedule:
+    - cron: '17 3 * * *'
+
+# Forgejo Actions may not evaluate this key; it documents the intent and
+# applies on runners that do: the job needs to read the repository and nothing
+# else.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    # TODO (maintainer): the label of the runner on git.jsentinel.eu.
+    runs-on: docker
+    container:
+      # JDK 26, the release the project builds with (jdk.version in pom.xml).
+      # TODO (maintainer): pin the image by digest (image@sha256:...). A tag can
+      # be moved. Neither the digest nor the existence of this tag was checked
+      # when this file was written (no access to the container registry).
+      image: eclipse-temurin:26-jdk
+    timeout-minutes: 60
+    steps:
+      - name: Install the tools the gate needs
+        # git for the checkout and the gate's working-tree checks, python3 for
+        # the helper scripts, unzip and curl for the Maven wrapper. Without
+        # unzip the wrapper falls back to the .tar.gz distribution, which the
+        # pinned checksum rightly rejects.
+        run: |
+          set -eu
+          apt-get update
+          apt-get install -y --no-install-recommends git python3 unzip curl ca-certificates
+
+      - name: Check out the commit
+        # Anonymous fetch: assumes the repository is readable without
+        # credentials on git.jsentinel.eu. TODO (maintainer): confirm; a private
+        # repository needs a read-only token here, which then is the job's only
+        # secret.
+        run: |
+          set -eu
+          git config --global --add safe.directory "$PWD"
+          git init -q .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch -q --depth 1 origin "$GITHUB_REF"
+          git checkout -q --detach FETCH_HEAD
+          echo "checked out $(git rev-parse HEAD) for $GITHUB_REF (event commit $GITHUB_SHA)"
+
+      - name: Verification gate
+        run: scripts/gate.sh --with-reproducibility

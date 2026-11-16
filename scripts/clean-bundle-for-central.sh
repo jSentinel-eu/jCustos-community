@@ -1,232 +1,306 @@
 #!/usr/bin/env bash
 #
-# Builds a Central Portal-compatible bundle from artifacts in the local Maven
-# repository.
+# Builds the bundle for the Central Portal from a clean checkout of the release
+# tag.
 #
-# Background: central-publishing-maven-plugin 0.10.0 under Maven 4.0.0-rc-5 is
-# broken — it logs "Installing X.jar to central-staging/" for every module, but
-# the resulting central-bundle.zip ends up with only the POMs (no jar, no
-# sources, no javadoc, no .asc, no checksums). Central then rejects the upload
-# with hundreds of "Failed to associate file with coordinates" errors. The
-# plugin warning at the end of the reactor build is explicit:
+# Until 00.83.00 this script collected whatever lay under
+# ~/.m2/repository/eu/jsentinel/<module>/<version>: the output of some earlier
+# "mvnw install", from any commit, from a tree with local changes, with or
+# without signatures. Maven Central is immutable, so the bundle is now tied to
+# the commit it claims to be (security analysis 2026-11-10, SA42):
 #
-#   * org.sonatype.central:central-publishing-maven-plugin:0.10.0
-#     - Plugin depends on the deprecated Maven 2.x compatibility layer …
-#     - Plugin mixes multiple Maven versions: [3.9.0, 3.9.2]
+#   1. Preconditions: release version, clean working tree, HEAD is the commit
+#      of tag v<version>, the tag is signed with the pinned release key (see
+#      scripts/lib/release-common.sh), the Maven wrapper pins its download, and
+#      SECURITY.md has no decision left open.
+#   2. The tag is exported with "git archive" into an empty directory and built
+#      there into a dedicated, empty local repository
+#      (target/release-<version>/local-repository), with strict checksums for
+#      everything Maven downloads. Only the library modules are built: the demos
+#      and their npm frontend build are not part of a release.
+#   3. The artefacts are taken from that repository and from nowhere else. Per
+#      module the script requires POM, jar, sources, Javadoc (not empty) and the
+#      CycloneDX SBOM, and for every file a signature that verifies against the
+#      pinned key.
+#   4. Checksums are written, read back and compared; the zip is tested; a
+#      manifest next to the bundle records tag, commit, tool versions and the
+#      SHA-256 of every file.
 #
-# This script bypasses the plugin and assembles the bundle directly from
-# ~/.m2/repository, where Maven 4's installer already names the consumer POM
-# correctly (<artifact>-<version>.pom) and keeps the build POM as a separate
-# -build classifier we drop here.
-#
-# Prerequisite:
-#   ./mvnw clean install -P _release_sign-artifacts,_java,_release_prepare,gpg
-#
-# That populates ~/.m2/repository/com/svenruppert/<module>/<version>/ with the
-# signed jar / sources / javadoc / pom (plus their .asc signatures).
+# Why a bundle at all: central-publishing-maven-plugin under Maven 4.0.0-rc-5
+# produces a zip that holds the POMs only (it depends on the Maven 2
+# compatibility layer); Central rejects it. Maven 4's installer names the
+# consumer POM <artifactId>-<version>.pom and keeps the build POM under the
+# classifier "build", which is left out here, as are test jars and test sources.
 #
 # Usage:
-#   ./scripts/clean-bundle-for-central.sh             # version from pom.xml
-#   ./scripts/clean-bundle-for-central.sh 00.74.00    # explicit version
-
+#   scripts/clean-bundle-for-central.sh [--dry-run] [--skip-tests] [<version>] [-- <maven arguments>]
+#
+#   --dry-run     Performs every check and the complete build, but neither
+#                 signs nor installs nor writes a bundle. It builds with
+#                 "verify", lists what would be signed and bundled and prints
+#                 the manifest. Failed checks are reported and the run goes on;
+#                 if the tree is not at a clean release tag, the working tree is
+#                 built instead so that the rest can still be inspected.
+#   --skip-tests  Builds without running the tests. For re-bundling a commit
+#                 that scripts/gate.sh has passed; the default runs them.
+#   <version>     Optional; must equal the version in pom.xml.
+#
+# Exit codes: 0 bundle written (or dry run without findings), 1 a check or the
+# build failed, 64 usage.
 set -euo pipefail
 
-REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-M2_REPO="${HOME}/.m2/repository"
-# Coordinates history: V00.73 moved the groupId com.svenruppert ->
-# com.svenruppert.jsentinel; the V00.81.10 jCustos rebrand moved it to
-# eu.jsentinel (external com.svenruppert:* deps keep their groupId —
-# those are not produced here).
-GROUP_PATH="eu/jsentinel"
+# shellcheck source=scripts/lib/release-common.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/release-common.sh"
 
-# Library modules that should appear on Maven Central. The demo modules
-# (demo-vaadin, demo-rest, demo-vaadin-rest-client, demo-standalone,
-# demo-rest-shared, demo-jsentinel-vaadin) are deliberately excluded —
-# they are reference implementations, not publishable artefacts.
-#
-# Module list per release line:
-#   V00.70 baseline (9): parent, core, test, vaadin, rest, standalone,
-#                        processor, persistence-testkit, persistence-eclipsestore
-#   V00.71 additions (2): crypto-bc, credentials-hibp
-#   V00.72 additions (7): dx, dx-vaadin, dx-rest, dx-standalone,
-#                         autoservice-annotations, autoservice-processor,
-#                         vaadin-starter
-#   V00.73 rename: artefacts took the jSentinel- prefix (parent was
-#                  security-for-flow-parent before that);
-#   V00.81.10 rename: all artefacts now use the jCustos- prefix.
-#   V00.74 additions (3): propagation, propagation-processor,
-#                         propagation-oidc — declarative token-forwarding
-#                         surface (Konzept-V00.74).
-#
-# Note on jCustos-autoservice-processor: published even though
-# consumers wire it via <annotationProcessorPath> rather than as a
-# runtime dep. Central still needs the jar so the path can be resolved.
-# Generated from the reactor's module list — keep it that way. A hand-maintained
-# copy silently ships a stale set: this list still named nine modules that moved
-# to the enterprise edition, and missed jCustos-bom entirely.
-#   grep '<module>' pom.xml | sed -E 's/.*<module>(.*)<\/module>.*/\1/' | grep -v '^demo'
-MODULES=(
-    "jCustos-community-parent"
-    "jCustos-bom"
-    "jCustos-core"
-    "jCustos-vaadin"
-    "jCustos-rest"
-    "jCustos-standalone"
-    "jCustos-test"
-    "jCustos-processor"
-    "jCustos-persistence-testkit"
-    "jCustos-persistence-eclipsestore"
-    "jCustos-crypto-bc"
-    "jCustos-credentials-hibp"
-    "jCustos-autoservice-annotations"
-    "jCustos-autoservice-processor"
-    "jCustos-dx"
-    "jCustos-dx-vaadin"
-    "jCustos-dx-rest"
-    "jCustos-dx-standalone"
-    "jCustos-vaadin-starter"
-    "jCustos-propagation"
-    "jCustos-propagation-processor"
-    "jCustos-propagation-oidc"
-    "jCustos-events"
-    "jCustos-events-testkit"
-    "jCustos-jwt"
-    "jCustos-oauth2"
-    "jCustos-oauth2-vaadin"
-    "jCustos-oauth2-rest"
-    "jCustos-identity-oidc"
-    "jCustos-identity-oidc-vaadin"
-    "jCustos-identity-oidc-rest"
-    "jCustos-test-oidc"
-    "jCustos-identity-vendor-keycloak"
-    "jCustos-identity-vendor-entra"
-    "jCustos-identity-vendor-auth0"
-    "jCustos-identity-vendor-okta"
-    "jCustos-identity-vendor-google"
-    "jCustos-identity-vendor-github"
-    "jCustos-dpop"
-)
-
-if [ $# -ge 1 ]; then
-    VERSION="$1"
-else
-    # Project <version> is the second <version> element in the parent pom.xml
-    # (the first one is the <parent>'s version — com.svenruppert:dependencies).
-    VERSION=$(grep -n -E '<version>[0-9]' "$REPO_ROOT/pom.xml" \
-        | sed -n '2p' \
-        | sed -E 's:.*<version>([^<]+)</version>.*:\1:')
-fi
-
-if [ -z "${VERSION:-}" ]; then
-    echo "ERROR: could not read project <version> from pom.xml." >&2
-    exit 1
-fi
-
-STAGING="$REPO_ROOT/target/central-bundle-staging"
-BUNDLE_DIR="$REPO_ROOT/target/central-publishing"
-BUNDLE="$BUNDLE_DIR/central-bundle.zip"
-
-# Minimum acceptable size (bytes) for a -javadoc.jar. An empty javadoc jar
-# (only META-INF/MANIFEST.MF, no rendered HTML) is ~300 B; the smallest real
-# one we ship is ~111 KB (jCustos-autoservice-annotations). 50 KB sits
-# safely between the two. This guard exists because 00.74.10 shipped EMPTY
-# javadoc jars to Central: the maven-javadoc-plugin's addStylesheet pointed
-# at the .gitignore'd build/javadoc/jsentinel.css, javadoc aborted, and
-# failOnError=false swallowed the error. Fail the bundle here rather than
-# discover it on Central (or worse, after publish — Central is immutable).
-JAVADOC_MIN_BYTES=51200
-
-rm -rf "$STAGING"
-mkdir -p "$STAGING" "$BUNDLE_DIR"
-
-generate_checksums() {
-    local file="$1"
-    if command -v md5sum >/dev/null 2>&1; then
-        md5sum         "$file" | awk '{print $1}'   > "$file.md5"
-    else
-        md5 -q         "$file"                      > "$file.md5"
-    fi
-    shasum -a 1   "$file" | awk '{print $1}'   > "$file.sha1"
-    shasum -a 256 "$file" | awk '{print $1}'   > "$file.sha256"
-    shasum -a 512 "$file" | awk '{print $1}'   > "$file.sha512"
+usage() {
+  sed -n '/^# Usage:/,/^# Exit codes/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-total_files=0
-for module in "${MODULES[@]}"; do
-    src="$M2_REPO/$GROUP_PATH/$module/$VERSION"
-    dst="$STAGING/$GROUP_PATH/$module/$VERSION"
-
-    if [ ! -d "$src" ]; then
-        echo "ERROR: $src does not exist." >&2
-        echo "       Run './mvnw clean install -P _release_sign-artifacts,_java,_release_prepare,gpg' first." >&2
-        exit 1
-    fi
-
-    mkdir -p "$dst"
-
-    # Keep: consumer pom (*.pom — Maven 4's local-repo name), main jar, sources,
-    # javadoc, plus the .asc signature for each.
-    # Drop: *-build.pom (Maven 4 build POM), tests + test-sources (Central
-    #       doesn't accept these classifiers), _remote.repositories,
-    #       *.lastUpdated.
-    shopt -s nullglob
-    for f in "$src"/*; do
-        name=$(basename "$f")
-        case "$name" in
-            *-build.pom|*-build.pom.asc) continue ;;
-            *-tests.jar|*-tests.jar.asc) continue ;;
-            *-test-sources.jar|*-test-sources.jar.asc) continue ;;
-            _remote.repositories|*.lastUpdated|*.repositories) continue ;;
-            *.pom|*.pom.asc|*.jar|*.jar.asc)
-                cp "$f" "$dst/"
-                ;;
-        esac
-    done
-    shopt -u nullglob
-
-    # Guard: every jar module must carry a non-empty -javadoc.jar. Detected by
-    # the presence of the main jar rather than by name — a name list silently
-    # stops matching when a module is renamed, which is exactly what happened
-    # when the parent became jCustos-community-parent and jCustos-bom arrived.
-    if [ -f "$dst/$module-$VERSION.jar" ]; then
-        jdoc="$dst/$module-$VERSION-javadoc.jar"
-        if [ ! -f "$jdoc" ]; then
-            echo "ERROR: $module $VERSION has no -javadoc.jar." >&2
-            echo "       Expected: $jdoc" >&2
-            exit 1
-        fi
-        jdoc_size=$(stat -f%z "$jdoc" 2>/dev/null || stat -c%s "$jdoc")
-        if [ "$jdoc_size" -lt "$JAVADOC_MIN_BYTES" ]; then
-            echo "ERROR: $module $VERSION -javadoc.jar is only ${jdoc_size} B" \
-                 "(< ${JAVADOC_MIN_BYTES} B threshold) — almost certainly empty." >&2
-            echo "       This is the 00.74.10 regression: check that" >&2
-            echo "       docs/javadoc/jcustos.css exists and the javadoc tool" >&2
-            echo "       did not abort. Re-run the release build, then re-bundle." >&2
-            exit 1
-        fi
-    fi
-
-    module_files=0
-    for f in "$dst"/*; do
-        case "$f" in
-            *.md5|*.sha1|*.sha256|*.sha512) continue ;;
-        esac
-        generate_checksums "$f"
-        module_files=$((module_files + 1))
-    done
-
-    echo "Staged $module $VERSION ($module_files primary files + checksums)"
-    total_files=$((total_files + module_files))
+SKIP_TESTS=false
+REQUESTED_VERSION=""
+MAVEN_EXTRA=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --dry-run) JC_DRY_RUN=true ;;
+  --skip-tests) SKIP_TESTS=true ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  --)
+    shift
+    MAVEN_EXTRA=("$@")
+    break
+    ;;
+  -*)
+    usage >&2
+    exit 64
+    ;;
+  *) REQUESTED_VERSION="$1" ;;
+  esac
+  shift
 done
 
-rm -f "$BUNDLE"
-(cd "$STAGING" && zip -qr "$BUNDLE" .)
-ls -lh "$BUNDLE"
+jc_require_tools git python3 shasum tar zip unzip java
+[ "$JC_DRY_RUN" = true ] || jc_require_tools gpg
 
+VERSION=$(jc_reactor version)
+TAG="v$VERSION"
+WORK="$JC_REPO_ROOT/target/release-$VERSION"
+SOURCE="$WORK/source"
+LOCAL_REPOSITORY="$WORK/local-repository"
+STAGING="$WORK/staging"
+BUILD_LOG="$WORK/build.log"
+OUTPUT="$JC_REPO_ROOT/target/central-publishing"
+BUNDLE="$OUTPUT/central-bundle.zip"
+MANIFEST="$OUTPUT/central-bundle.manifest.txt"
+[ "$JC_DRY_RUN" = true ] && MANIFEST="$WORK/central-bundle.manifest.dry-run.txt"
+
+if [ "$JC_DRY_RUN" = true ]; then
+  jc_say "DRY RUN: nothing is signed, installed or bundled."
+fi
+
+# --- 1. preconditions -------------------------------------------------------
+jc_say "Preconditions for $JC_GROUP_ID $VERSION"
+if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "$VERSION" ]; then
+  jc_fail "requested version $REQUESTED_VERSION, but pom.xml is at $VERSION"
+fi
+jc_check_release_version "$VERSION"
+if jc_reactor check-bom >/dev/null 2>&1; then
+  jc_pass "jCustos-bom matches the reactor"
+else
+  jc_fail "jCustos-bom does not match the reactor (scripts/lib/reactor.py check-bom)"
+fi
+jc_check_clean_tree
+jc_check_head_is_tag "$TAG"
+jc_check_trust_anchor
+jc_check_tag_signature "$TAG"
+jc_check_no_open_decisions
+WRAPPER_SUM=$(sed -n 's/^distributionSha256Sum=//p' "$JC_REPO_ROOT/.mvn/wrapper/maven-wrapper.properties" | tr -d '[:space:]')
+if [ -n "$WRAPPER_SUM" ]; then
+  jc_pass "Maven wrapper pins its distribution (sha256 $WRAPPER_SUM)"
+else
+  jc_fail "the Maven wrapper has no distributionSha256Sum"
+fi
+
+BOUND_TO_TAG=false
+if jc_tree_is_clean && [ "$(jc_git rev-parse -q --verify "refs/tags/$TAG^{commit}" 2>/dev/null || true)" = "$(jc_head_commit)" ]; then
+  BOUND_TO_TAG=true
+fi
+
+# --- 2. clean export and build ---------------------------------------------
+rm -rf "$WORK"
+mkdir -p "$SOURCE" "$LOCAL_REPOSITORY" "$STAGING"
+
+if [ "$BOUND_TO_TAG" = true ]; then
+  SOURCE_DESCRIPTION="git archive of tag $TAG"
+  jc_git archive --format=tar "$TAG" | tar -x -C "$SOURCE"
+else
+  # Reached in a dry run only: a real run has stopped at the checks above.
+  SOURCE_DESCRIPTION="WORKING TREE at $(jc_head_commit), not a clean checkout of tag $TAG (not releasable)"
+  (cd "$JC_REPO_ROOT" && git ls-files -co --exclude-standard -z) |
+    python3 -c '
+import os, shutil, sys
+source, target = sys.argv[1:3]
+for name in sys.stdin.buffer.read().split(b"\0"):
+    name = name.decode()
+    path = os.path.join(source, name)
+    if name and os.path.isfile(path):
+        destination = os.path.join(target, name)
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.copy2(path, destination)
+' "$JC_REPO_ROOT" "$SOURCE"
+fi
+jc_say ""
+jc_say "Source:           $SOURCE_DESCRIPTION"
+jc_say "Build directory:  $SOURCE"
+jc_say "Local repository: $LOCAL_REPOSITORY (empty)"
+
+MAVEN=(./mvnw -B -V -C "-Dmaven.repo.local=$LOCAL_REPOSITORY" -pl "$(jc_demo_exclusions)")
+[ "$SKIP_TESTS" = true ] && MAVEN+=(-DskipTests)
+if [ "$JC_DRY_RUN" = true ]; then
+  MAVEN+=(-P "_release_prepare,_java" clean verify)
+else
+  MAVEN+=(-P "_release_prepare,_release_sign-artifacts,_java,?gpg" "-Dgpg.keyname=$JCUSTOS_RELEASE_KEY_FINGERPRINT" clean install)
+fi
+MAVEN+=(${MAVEN_EXTRA[@]+"${MAVEN_EXTRA[@]}"})
+
+jc_say "Build:            ${MAVEN[*]}"
+jc_say "Build log:        $BUILD_LOG"
+BUILD_STARTED=$(date +%s)
+if (cd "$SOURCE" && "${MAVEN[@]}") >"$BUILD_LOG" 2>&1; then
+  jc_pass "build succeeded in $(($(date +%s) - BUILD_STARTED)) s"
+else
+  grep -E '^\[ERROR\]' "$BUILD_LOG" | head -20 || true
+  jc_fail "the build failed; see $BUILD_LOG"
+  jc_say ""
+  jc_say "Dry run stopped after the build: $JC_CHECK_FAILURES check(s) failed."
+  exit 1
+fi
+if grep -q "requires online mode" "$BUILD_LOG"; then
+  jc_fail "Maven ran offline and skipped the SBOM; a release build has to run online"
+fi
+
+# --- 3. collect, verify, checksum ------------------------------------------
+jc_say ""
+jc_say "Artefacts"
+MODULES="$JC_PARENT_ARTIFACT
+$(jc_reactor libraries)"
+MODULE_COUNT=0
+FILE_COUNT=0
+LISTING="$WORK/files.txt"
+: >"$LISTING"
+
+for module in $MODULES; do
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  destination="$STAGING/$JC_GROUP_PATH/$module/$VERSION"
+  mkdir -p "$destination"
+
+  if [ "$JC_DRY_RUN" = true ]; then
+    files=$(jc_planned_files "$SOURCE" "$module" "$VERSION")
+    for name in $files; do
+      cp "$(jc_planned_path "$SOURCE" "$module" "$VERSION" "$name")" "$destination/$name"
+    done
+  else
+    repository_directory="$LOCAL_REPOSITORY/$JC_GROUP_PATH/$module/$VERSION"
+    [ -d "$repository_directory" ] || jc_die "$module: $repository_directory does not exist; the build did not install the module"
+    files=""
+    for path in "$repository_directory"/*; do
+      name=$(basename "$path")
+      if jc_is_published_file "$name"; then
+        files="$files$name
+"
+        cp "$path" "$destination/$name"
+        if [ -f "$path.asc" ]; then
+          cp "$path.asc" "$destination/$name.asc"
+        else
+          jc_fail "$module: $name has no signature"
+        fi
+      fi
+    done
+  fi
+
+  jc_check_module_files "$module" "$VERSION" "$files"
+  jc_check_javadoc_size "$module" "$destination/$module-$VERSION-javadoc.jar"
+  jc_check_sbom_file "$module" "$VERSION" "$destination/$module-$VERSION-cyclonedx.json"
+
+  for name in $files; do
+    file="$destination/$name"
+    FILE_COUNT=$((FILE_COUNT + 1))
+    if [ "$JC_DRY_RUN" = true ]; then
+      printf '  would sign and bundle  %-70s %9s bytes\n' "$module/$VERSION/$name" "$(jc_file_size "$file")"
+    else
+      if ! jc_signature_is_pinned "$file.asc" "$file"; then
+        jc_fail "$module: the signature of $name does not verify against the pinned release key"
+      fi
+      jc_write_checksums "$file.asc"
+    fi
+    jc_write_checksums "$file"
+    jc_verify_checksums "$file" || jc_fail "$module: checksum of $name does not match after staging"
+    printf '%s  %s\n' "$(jc_sha256 "$file")" "$JC_GROUP_PATH/$module/$VERSION/$name" >>"$LISTING"
+    if [ -f "$file.asc" ]; then
+      printf '%s  %s\n' "$(jc_sha256 "$file.asc")" "$JC_GROUP_PATH/$module/$VERSION/$name.asc" >>"$LISTING"
+    fi
+  done
+  [ "$JC_DRY_RUN" = true ] || jc_say "  staged $module ($(printf '%s\n' "$files" | grep -c .) files, signatures verified)"
+done
+
+# --- 4. bundle and manifest --------------------------------------------------
+mkdir -p "$OUTPUT"
+BUNDLE_SUM="not written (dry run)"
+if [ "$JC_DRY_RUN" != true ]; then
+  rm -f "$BUNDLE"
+  (cd "$STAGING" && zip -qr "$BUNDLE" .)
+  unzip -tq "$BUNDLE" >/dev/null || jc_die "the bundle does not pass unzip -t"
+  staged=$(find "$STAGING" -type f | wc -l | tr -d ' ')
+  zipped=$(unzip -Z1 "$BUNDLE" | grep -vc '/$')
+  [ "$staged" = "$zipped" ] || jc_die "the bundle holds $zipped files, the staging directory $staged"
+  BUNDLE_SUM=$(jc_sha256 "$BUNDLE")
+fi
+
+{
+  if [ "$JC_DRY_RUN" = true ]; then
+    printf 'DRY RUN - this manifest describes no bundle\n'
+  fi
+  printf 'jCustos community edition - Central bundle manifest\n'
+  printf 'version:            %s\n' "$VERSION"
+  printf 'tag:                %s\n' "$TAG"
+  printf 'tag object:         %s\n' "$(jc_git rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || printf 'none')"
+  printf 'commit:             %s\n' "$(jc_head_commit)"
+  printf 'source:             %s\n' "$SOURCE_DESCRIPTION"
+  printf 'release key:        %s\n' "${JCUSTOS_RELEASE_KEY_FINGERPRINT:-not configured}"
+  printf 'output timestamp:   %s\n' "$(jc_reactor timestamp)"
+  printf 'built (UTC):        %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf 'java:               %s\n' "$(java -version 2>&1 | head -1)"
+  printf 'maven:              %s\n' "$(grep -m1 -E '^Apache Maven ' "$BUILD_LOG" || (cd "$SOURCE" && ./mvnw -v 2>/dev/null | grep -m1 -E '^Apache Maven '))"
+  printf 'maven distribution: sha256 %s\n' "${WRAPPER_SUM:-not pinned}"
+  printf 'tests:              %s\n' "$([ "$SKIP_TESTS" = true ] && printf 'skipped' || printf 'run')"
+  printf 'modules:            %s\n' "$MODULE_COUNT"
+  printf 'files:              %s (plus signatures and four checksum files each)\n' "$FILE_COUNT"
+  printf 'bundle sha256:      %s\n' "$BUNDLE_SUM"
+  printf '\nsha256  path\n'
+  cat "$LISTING"
+} >"$MANIFEST"
+
+jc_say ""
+if [ "$JC_DRY_RUN" = true ]; then
+  sed -n '1,/^sha256  path$/p' "$MANIFEST"
+  jc_say "(file list: $MANIFEST)"
+  jc_say ""
+  jc_say "Dry run finished: $MODULE_COUNT modules, $FILE_COUNT files would be signed and bundled, $JC_CHECK_FAILURES check(s) failed."
+  [ "$JC_CHECK_FAILURES" -eq 0 ] || exit 1
+  exit 0
+fi
+
+ls -lh "$BUNDLE"
 cat <<EOF
 
-Bundle ready: $BUNDLE
-Staged $total_files primary files across ${#MODULES[@]} modules (plus signatures and four checksum types each).
+Bundle ready:  $BUNDLE
+Manifest:      $MANIFEST
+Staged $FILE_COUNT files of $MODULE_COUNT modules from tag $TAG ($(jc_head_commit)),
+every signature verified against $JCUSTOS_RELEASE_KEY_FINGERPRINT.
+
+Keep the manifest with the release; it is the record of what was uploaded.
 
 Next steps:
   1. Open https://central.sonatype.com/publishing

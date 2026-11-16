@@ -9,14 +9,30 @@
 # Central validation (no jar/sources/javadoc needed).
 #
 # Usage:
-#   ./scripts/build-relocation-bundle.sh 00.81.10
+#   ./scripts/build-relocation-bundle.sh [--dry-run] 00.81.10
 #
 # Produces target/central-publishing/relocation-bundle.zip — upload it to
 # Central as a second deployment AFTER the main jCustos bundle validated.
+#
+# The POMs are generated here, so nothing is read from ~/.m2 and there is no
+# build to bind to a commit. What this script shares with the release scripts
+# is the question of which key signs (security analysis 2026-11-10, SA42): it
+# signs with the pinned release key of scripts/lib/release-common.sh and
+# verifies every signature against it, instead of using whatever key gpg
+# considers the default. --dry-run generates the POMs and their checksums and
+# lists what would be signed, without signing and without writing a bundle.
 set -euo pipefail
 
-REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-VERSION="${1:?usage: build-relocation-bundle.sh <version>}"
+# shellcheck source=scripts/lib/release-common.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/release-common.sh"
+
+if [ "${1:-}" = "--dry-run" ]; then
+    JC_DRY_RUN=true
+    shift
+fi
+REPO_ROOT="$JC_REPO_ROOT"
+VERSION="${1:?usage: build-relocation-bundle.sh [--dry-run] <version>}"
+jc_check_trust_anchor
 OLD_GROUP="com.svenruppert.jsentinel"
 OLD_GROUP_PATH="com/svenruppert/jsentinel"
 NEW_GROUP="eu.jsentinel"
@@ -108,11 +124,23 @@ for old in "${OLD_MODULES[@]}"; do
   </distributionManagement>
 </project>
 POM
-    gpg --batch --yes --armor --detach-sign "$pom"
     checksums "$pom"
-    checksums "$pom.asc"
     total=$((total+1))
+    if [ "$JC_DRY_RUN" = true ]; then
+        echo "  would sign and bundle  $OLD_GROUP_PATH/$old/$VERSION/$old-$VERSION.pom"
+        continue
+    fi
+    gpg --batch --yes --armor --local-user "$JCUSTOS_RELEASE_KEY_FINGERPRINT" --detach-sign "$pom"
+    jc_signature_is_pinned "$pom.asc" "$pom" \
+        || jc_die "the signature of $old-$VERSION.pom does not verify against the pinned release key"
+    checksums "$pom.asc"
 done
 
+if [ "$JC_DRY_RUN" = true ]; then
+    echo "Dry run finished: $total relocation POMs generated under $STAGING, nothing signed, no bundle written, $JC_CHECK_FAILURES check(s) failed."
+    [ "$JC_CHECK_FAILURES" -eq 0 ] || exit 1
+    exit 0
+fi
+
 ( cd "$STAGING" && zip -q -r "$BUNDLE" com )
-echo "Relocation bundle ready: $BUNDLE ($total relocation POMs, signed + checksummed)."
+echo "Relocation bundle ready: $BUNDLE ($total relocation POMs, signed with $JCUSTOS_RELEASE_KEY_FINGERPRINT and checksummed)."

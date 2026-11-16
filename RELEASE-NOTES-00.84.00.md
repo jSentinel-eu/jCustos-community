@@ -1512,6 +1512,35 @@ test also works with the `sha256sum` of macOS. The release scripts build the lib
 **Consumers:** no change. Contributors with an older copy of `mvnw` need the 3.3.4 scripts for a
 fresh download.
 
+## Releases are built from the signed tag, signed on both registries and published with a CycloneDX SBOM (SA42, JS-SEC-142, CWE-345, CWE-494, CWE-353, CWE-1059)
+
+The deploy script for `repo.jsentinel.eu` uploaded releases without the signing and release
+profiles: no signatures, sources or Javadoc, but with test jars. The Central bundle was collected
+from whatever lay in `~/.m2`, with no check of commit, tag or signatures. No release carried an SBOM
+although one was configured: the plugin needs online mode, skipped every module as "not deployed",
+and was bound twice. Both release scripts now require a clean working tree whose `HEAD` is the
+signed tag `v<version>`, and sign with a pinned release key. The Central bundle is built from a `git
+archive` of the tag into an empty local repository; every signature is verified against the pinned
+key before bundling and again after the upload to `repo.jsentinel.eu`, and a manifest records tag,
+commit, tool versions and the SHA-256 of every file. `project.build.outputTimestamp` makes the jars
+reproducible; two builds of the same commit are compared byte for byte. The release-key fingerprint
+is not decided yet, and the scripts refuse to release until it is.
+
+**Consumers:** from 00.84.00 every module ships `-cyclonedx.json` and `-cyclonedx.xml` with
+signatures, and `repo.jsentinel.eu` serves the same signed artefact set as Maven Central.
+`-tests.jar` and `-test-sources.jar` are no longer published.
+`docs/security/release-verification.md` describes how to verify signature, checksum and SBOM.
+
+## One command verifies a commit before release: `scripts/gate.sh` (SA44, JS-SEC-144, CWE-1053)
+
+Nothing ran the tests, the enforcer rules or a dependency check in a defined way before a release,
+and nothing tied the parentless BOM to the reactor. `scripts/gate.sh` runs, without credentials, a
+clean build with all tests and a check that the enforcer rules ran in every module; a comparison of
+`jCustos-bom` with the reactor's version and publishable modules; SBOM generation; an OSV advisory
+scan with dated exceptions that reports "not run" instead of passing when OSV is unreachable; and
+optionally a byte-for-byte reproducibility check. A Forgejo workflow that runs the same gate is
+prepared but not yet a required check and has not run on a runner. **Consumers:** no change.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
