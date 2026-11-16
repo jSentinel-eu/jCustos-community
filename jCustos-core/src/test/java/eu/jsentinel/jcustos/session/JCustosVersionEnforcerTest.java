@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.session;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionStale;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
@@ -89,7 +90,7 @@ class JCustosVersionEnforcerTest {
     SessionStale event = (SessionStale) audit.published.get(0);
     assertEquals(T0, event.timestamp());
     assertEquals("alice", event.subjectId());
-    assertEquals("sid-7", event.sessionId());
+    assertEquals(SessionRef.of("sid-7"), event.sessionId(), "JS-SEC-117: the reference, never the id");
     assertEquals("/admin", event.route());
     assertEquals(0L, event.snapshotVersion());
     assertEquals(2L, event.currentVersion());

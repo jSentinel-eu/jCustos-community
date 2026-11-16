@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.logout;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.LogoutPerformed;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.InMemorySubjectStore;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -91,7 +92,9 @@ class SubjectClearingLogoutAllSessionsIntegrationTest {
       assertEquals(LogoutScope.AllSessionsOfSubject, lp.scope());
       auditedSessions.add(lp.sessionId());
     }
-    assertEquals(Set.of("sid-alice-1", "sid-alice-2", "sid-alice-3"), auditedSessions);
+    // JS-SEC-117: the audit event carries the reference of each session id, never the id.
+    assertEquals(Set.of(SessionRef.of("sid-alice-1"), SessionRef.of("sid-alice-2"),
+        SessionRef.of("sid-alice-3")), auditedSessions);
 
     // Listener: one callback per removed session
     assertEquals(3, listener.callbacks.size());

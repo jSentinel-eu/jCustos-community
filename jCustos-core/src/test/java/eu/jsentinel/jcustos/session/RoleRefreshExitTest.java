@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.session;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionStale;
 import eu.jsentinel.jcustos.authorization.api.roles.InMemoryRoleAssignmentStore;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleAssignmentKey;
@@ -134,7 +135,7 @@ class RoleRefreshExitTest {
     assertEquals(1, audit.published.size());
     SessionStale staleEvent = (SessionStale) audit.published.get(0);
     assertEquals("alice", staleEvent.subjectId());
-    assertEquals("sid-alice", staleEvent.sessionId());
+    assertEquals(SessionRef.of("sid-alice"), staleEvent.sessionId(), "JS-SEC-117: the reference, never the id");
     assertEquals("/admin/dashboard", staleEvent.route());
     assertEquals(0L, staleEvent.snapshotVersion());
     assertEquals(1L, staleEvent.currentVersion());

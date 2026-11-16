@@ -20,6 +20,7 @@ import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.SessionCreated;
 import eu.jsentinel.jcustos.audit.SessionExpired;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 
@@ -170,7 +171,7 @@ public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
   @Override
   public SessionDecision onLogin(SessionContext<U> context) {
     publish(new SessionCreated(
-        Instant.now(clock), subjectIdOf(context), context.sessionId()));
+        Instant.now(clock), subjectIdOf(context), sessionRefOf(context)));
     if (config.rotateSessionAfterLogin()) {
       return new SessionDecision.Invalidate("Session rotated after login", config.loginRoute());
     }
@@ -184,14 +185,14 @@ public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
 
     if (now.isAfter(context.createdAt().plus(config.absoluteLifetime()))) {
       publish(new SessionExpired(
-          Instant.now(clock), subjectIdOf(context), context.sessionId(),
+          Instant.now(clock), subjectIdOf(context), sessionRefOf(context),
           SessionExpired.REASON_ABSOLUTE_LIFETIME));
       return new SessionDecision.Invalidate("Session lifetime exceeded", config.loginRoute());
     }
     Instant lastActivity = context.lastActivity() == null ? context.createdAt() : context.lastActivity();
     if (now.isAfter(lastActivity.plus(config.idleTimeout()))) {
       publish(new SessionExpired(
-          Instant.now(clock), subjectIdOf(context), context.sessionId(),
+          Instant.now(clock), subjectIdOf(context), sessionRefOf(context),
           SessionExpired.REASON_IDLE_TIMEOUT));
       return new SessionDecision.Invalidate("Session idle timeout", config.loginRoute());
     }
@@ -235,7 +236,18 @@ public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
   @Override
   public void onLogout(SessionContext<U> context) {
     publish(new SessionInvalidated(
-        Instant.now(clock), subjectIdOf(context), context.sessionId(), "Logout"));
+        Instant.now(clock), subjectIdOf(context), sessionRefOf(context), "Logout"));
+  }
+
+  /**
+   * JS-SEC-117 (CWE-532): the reference that stands in for the session id in every event
+   * this policy publishes. The Vaadin adapter hands the policy the servlet session id - a
+   * live credential - and until 00.84.00 it reached every sink but the logging one
+   * verbatim: ring buffer, store-backed audit, the integrity chain and its exports.
+   * {@link SessionRef#ofNullable(String)} is idempotent, so a reference passes unchanged.
+   */
+  private static String sessionRefOf(SessionContext<?> context) {
+    return SessionRef.ofNullable(context.sessionId());
   }
 
   private String subjectIdOf(SessionContext<U> context) {

@@ -1771,6 +1771,21 @@ in core, `InteractiveLoginPrompt.Credentials`, `SigningKeySnapshot` (private key
 and `BoundedTokenHttp.Response` (response body). **Consumers:** the string form of these records no
 longer shows the secret; equality is unchanged.
 
+## Core session producers and the session bus events record a session reference (addition to SA17, JS-SEC-117, CWE-532, CWE-522)
+
+The REST filters and the Vaadin adapter reduced the session id at the source, but the producers in
+`jCustos-core` did not: `TimeoutSessionPolicy` put the id it was given into `SessionCreated`,
+`SessionExpired` and `SessionInvalidated`, `SweepingSessionStore` the key of the expired record,
+`SubjectClearingLogoutService` every logged-out session id into `LogoutPerformed`, and
+`JCustosVersionEnforcer` its argument into `SessionStale`. All four now record
+`SessionRef.ofNullable(id)`, which leaves a reference unchanged. The bus events
+`SessionCreatedEvent`, `SessionExpiredEvent`, `SessionRevokedEvent` and `LogoutSucceededEvent`
+reduce in their constructor, so a signed, exported or forwarded event never carries the id, whoever
+produced it. Logout listeners still receive the session id. **Consumers:** `sessionId` of these
+audit and bus events is a 21-character `sref-…` reference; compare with `SessionRef.of(id)`. A
+consumer of `SessionRevokedEvent` that ends the session matches `SessionRef.of` of the sessions it
+holds.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.events.types;
  * #L%
  */
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.events.api.EventMetadata;
 import eu.jsentinel.jcustos.events.api.EventType;
@@ -35,10 +36,14 @@ import java.util.Objects;
 
 /**
  * A session was revoked (Konzept §247). A key bridge event: the Vaadin
- * adapter consumes it to invalidate the corresponding UI session.
+ * adapter consumes it to invalidate the corresponding UI session. Since
+ * 00.84.00 (JS-SEC-117) the event names the session by its
+ * {@link SessionRef}; a consumer matches {@code SessionRef.of(id)} of the
+ * sessions it holds against {@link #sessionId()}.
  *
  * @param metadata variable per-instance metadata
- * @param sessionId the revoked session id
+ * @param sessionId the {@link SessionRef} of the revoked session id, or {@code null};
+ *                  a raw identifier passed in is reduced to its reference
  * @param reason business reason for revocation
  * @since 00.75.00
  */
@@ -50,6 +55,10 @@ public record SessionRevokedEvent(EventMetadata metadata, String sessionId, Stri
 
   public SessionRevokedEvent {
     Objects.requireNonNull(metadata, "metadata");
+    // JS-SEC-117 (CWE-532, CWE-522): a session id is a credential, and this event is signed,
+    // stored, exported and forwarded (SIEM, webhook). It carries the reference only, whoever
+    // produced it; SessionRef.ofNullable is idempotent.
+    sessionId = SessionRef.ofNullable(sessionId);
   }
 
   @Override

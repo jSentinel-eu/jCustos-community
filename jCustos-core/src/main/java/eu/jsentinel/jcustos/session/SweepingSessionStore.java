@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.session;
 
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.SessionExpired;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
@@ -165,8 +166,11 @@ public final class SweepingSessionStore implements SessionStore {
       }
       SessionRecord expired = record.withStatus(SessionStatus.EXPIRED);
       delegate.save(expired);
+      // JS-SEC-117 (CWE-532): the event carries the reference of the record's key, never the
+      // key itself - an application that keys records by the raw session id would otherwise
+      // write a live credential into every audit sink.
       publish(new SessionExpired(now, record.subjectId().value(),
-          record.sessionId().value(), reasonFor(decision)));
+          SessionRef.of(record.sessionId().value()), reasonFor(decision)));
       return Optional.of(expired);
     }
     // terminal record — purge once the retention window has passed; the

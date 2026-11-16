@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.session;
 
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.SessionStale;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
@@ -46,12 +47,14 @@ import static java.util.Objects.requireNonNull;
  * <p>Audit failures are swallowed — a misbehaving sink cannot turn a
  * drift into a "Continue".
  *
- * <p>JS-SEC-117 (CWE-532, CWE-522): the {@code sessionId} argument is stored
- * in the {@link SessionStale} event exactly as it is passed in, and audit
- * sinks keep events verbatim (ring buffer, store-backed audit, integrity
- * chain). The <em>caller</em> therefore passes a non-secret reference, never a
- * credential: the REST filter hands over a truncated SHA-256 of whatever its
- * resolver supplied, because that is typically the bearer token.
+ * <p>JS-SEC-117 (CWE-532, CWE-522): audit sinks keep events verbatim (ring
+ * buffer, store-backed audit, integrity chain), so the {@link SessionStale}
+ * event never carries the {@code sessionId} argument itself but its
+ * {@link SessionRef} - the marker {@value SessionRef#PREFIX} and a truncated
+ * SHA-256. The reduction is idempotent: the REST filter already hands over a
+ * reference, which is stored unchanged. Until 00.84.00 the argument was stored
+ * as passed, and the servlet session id the Vaadin listener passes reached
+ * every sink but the logging one.
  */
 @ExperimentalJCustosApi
 public final class JCustosVersionEnforcer {
@@ -98,9 +101,9 @@ public final class JCustosVersionEnforcer {
    * @param snapshot  session's
    *                  {@link SessionRecord#securityVersionAtLogin() captured version};
    *                  non-null
-   * @param sessionId non-secret session reference for the audit event,
-   *                  stored verbatim — never a bearer token or another
-   *                  credential (JS-SEC-117); may be {@code null}
+   * @param sessionId session identifier or reference for the audit event;
+   *                  the event records its {@link SessionRef}, never the
+   *                  value itself (JS-SEC-117); may be {@code null}
    * @param route     navigation route / REST path for the audit event;
    *                  may be {@code null}
    * @return enforcement outcome
@@ -129,10 +132,12 @@ public final class JCustosVersionEnforcer {
                             String route,
                             JCustosVersionStatus.Drifted drifted) {
     try {
+      // JS-SEC-117 (CWE-532): the producer reduces, whatever the caller passed. The REST filter
+      // hands in a reference already (idempotent); the Vaadin listener the servlet session id.
       auditService.publish(new SessionStale(
           clock.instant(),
           subjectId.value(),
-          sessionId,
+          SessionRef.ofNullable(sessionId),
           route,
           drifted.snapshot().value(),
           drifted.current().value()));

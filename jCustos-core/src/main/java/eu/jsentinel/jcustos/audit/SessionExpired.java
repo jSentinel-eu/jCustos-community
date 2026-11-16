@@ -25,7 +25,10 @@ import java.util.Objects;
  *
  * @param timestamp UTC creation time, never {@code null}
  * @param subjectId subject identifier, never {@code null}
- * @param sessionId session identifier, or {@code null} if not tracked
+ * @param sessionId session identifier, or {@code null} if not tracked.
+ *                  JS-SEC-117 (CWE-532): producers record the
+ *                  {@link SessionRef} of the identifier, never the identifier
+ *                  itself
  * @param reason    {@link #REASON_IDLE_TIMEOUT} or
  *                  {@link #REASON_ABSOLUTE_LIFETIME}, never {@code null}
  */

@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.logout;
 
 import eu.jsentinel.jcustos.audit.LogoutPerformed;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 
@@ -135,8 +136,10 @@ public final class SubjectClearingLogoutService<U> implements LogoutService {
         ? auditService
         : JCustosServiceResolver.securityAuditService();
     try {
+      // JS-SEC-117 (CWE-532): listeners need the session id to end the session; the audit
+      // event gets its reference only.
       sink.publish(new LogoutPerformed(
-          Instant.now(Clock.systemUTC()), subjectId.value(), sessionId, scope));
+          Instant.now(Clock.systemUTC()), subjectId.value(), SessionRef.ofNullable(sessionId), scope));
     } catch (RuntimeException auditFailure) {
       // never block the logout because the audit sink failed
     }

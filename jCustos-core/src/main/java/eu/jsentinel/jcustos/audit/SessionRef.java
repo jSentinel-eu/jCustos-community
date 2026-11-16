@@ -37,9 +37,12 @@ import java.util.Objects;
  *
  * <p><strong>Why the marker.</strong> The {@code sessionId} component of the audit events
  * is a plain {@code String}, and it is filled by two kinds of producers: those that pass
- * the raw identifier and leave the reduction to the sink (the Vaadin adapter), and those
- * that reduce at the source because the raw value must not reach any sink (the REST
- * filters). A sink therefore has to tell the two apart. Without the marker it could not,
+ * the raw identifier and leave the reduction to the sink, and those that reduce at the
+ * source because the raw value must not reach any sink. Only the logging sink reduces;
+ * the ring buffer, store-backed audit and the integrity chain keep what they are given,
+ * so producers are expected to reduce - the REST filters, the session policy, the
+ * sweeping session store, the logout service and the security-version enforcer of the
+ * library do (JS-SEC-117). A sink still has to tell the two kinds apart. Without the marker it could not,
  * and {@code LoggingAuditSink} hashed a reference a second time: the log line then showed
  * a different value from the event it described. {@link #of(String)} is idempotent — a
  * value that already is a reference is returned as it is — so producer and sink can both

@@ -28,7 +28,9 @@ import java.util.Objects;
  * @param subjectId subject identifier, never {@code null}
  * @param sessionId session that was terminated, or {@code null} if not
  *                  tracked (e.g. {@link LogoutScope#CurrentSession} without
- *                  a known session id)
+ *                  a known session id). JS-SEC-117 (CWE-532): producers
+ *                  record the {@link SessionRef} of the identifier, never the
+ *                  identifier itself
  * @param scope     scope of the logout, never {@code null}
  */
 public record LogoutPerformed(

@@ -18,6 +18,7 @@ package eu.jsentinel.jcustos.session;
 
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.SessionExpired;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
@@ -99,7 +100,7 @@ class SweepingSessionStoreTest {
     assertEquals(1, audit.events.size(), "exactly one SessionExpired per transition");
     SessionExpired expired = (SessionExpired) audit.events.get(0);
     assertEquals("alice", expired.subjectId());
-    assertEquals("sid-stale", expired.sessionId());
+    assertEquals(SessionRef.of("sid-stale"), expired.sessionId(), "JS-SEC-117: the reference, never the key");
     assertEquals("AbsoluteLifetimeExceeded", expired.reason(),
         "absolute lifetime trumps idle timeout — TimeoutSessionPolicy precedence");
   }

@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.events.types;
  * #L%
  */
 
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.events.api.EventMetadata;
 import eu.jsentinel.jcustos.events.api.EventType;
@@ -37,7 +38,8 @@ import java.util.Objects;
  * A session expired by timeout (Konzept §246).
  *
  * @param metadata variable per-instance metadata
- * @param sessionId the expired session id
+ * @param sessionId the {@link SessionRef} of the expired session id, or {@code null};
+ *                  a raw identifier passed in is reduced to its reference
  * @since 00.75.00
  */
 @ExperimentalJCustosApi
@@ -48,6 +50,10 @@ public record SessionExpiredEvent(EventMetadata metadata, String sessionId)
 
   public SessionExpiredEvent {
     Objects.requireNonNull(metadata, "metadata");
+    // JS-SEC-117 (CWE-532, CWE-522): a session id is a credential, and this event is signed,
+    // stored, exported and forwarded (SIEM, webhook). It carries the reference only, whoever
+    // produced it; SessionRef.ofNullable is idempotent.
+    sessionId = SessionRef.ofNullable(sessionId);
   }
 
   @Override
