@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.bruteforce;
 
+import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore.AttemptLimits;
@@ -84,6 +85,7 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   private final TenantId tenant;
   private final Clock clock;
   private final SubjectKeyCanonicalizer canonicalizer;
+  private final JCustosAuditService auditService;
 
   /**
    * Builds a policy with {@link LoginAttemptConfiguration#defaults()}
@@ -130,6 +132,31 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
                                        TenantId tenant,
                                        Clock clock,
                                        SubjectKeyCanonicalizer canonicalizer) {
+    this(store, config, tenant, clock, canonicalizer, null);
+  }
+
+  /**
+   * Full constructor with an explicit audit service for the {@code LoginFailed} event of
+   * {@link #recordFailure(LoginAttemptContext)}.
+   *
+   * @param store         backing store; non-null
+   * @param config        thresholds; non-null
+   * @param tenant        tenant scope; {@code null} becomes
+   *                      {@link TenantId#DEFAULT}
+   * @param clock         time source; non-null
+   * @param canonicalizer maps a user name onto its throttle key; non-null
+   * @param auditService  audit sink, or {@code null} to resolve from
+   *                      {@link eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver}
+   *                      on each event
+   * @since 00.84.00
+   */
+  public StoreBackedLoginAttemptPolicy(LoginAttemptStore store,
+                                       LoginAttemptConfiguration config,
+                                       TenantId tenant,
+                                       Clock clock,
+                                       SubjectKeyCanonicalizer canonicalizer,
+                                       JCustosAuditService auditService) {
+    this.auditService = auditService;
     this.store = requireNonNull(store, "store must not be null");
     this.config = requireNonNull(config, "config must not be null");
     this.tenant = tenant == null ? TenantId.DEFAULT : tenant;
@@ -179,8 +206,21 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
 
   @Override
   public void recordFailure(LoginAttemptContext context) {
+    recordFailure(context, REASON_CREDENTIALS_REJECTED);
+  }
+
+  /**
+   * Counts the failure and publishes the one {@code LoginFailed} event of the rejected login
+   * (see {@link LoginAttemptPolicy#recordFailure(LoginAttemptContext)}). Until 00.84.00 this
+   * policy published nothing, and an adapter that left the event to the policy - the Vaadin
+   * {@code LoginView}, the REST handlers - audited no failed login behind it.
+   */
+  @Override
+  public void recordFailure(LoginAttemptContext context, String reason) {
     requireNonNull(context, "context must not be null");
-    store.completeFailure(key(context), clock.instant(), limits);
+    Instant now = clock.instant();
+    store.completeFailure(key(context), now, limits);
+    LoginFailureAudit.publish(auditService, now, context, reason);
   }
 
   @Override

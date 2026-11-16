@@ -103,12 +103,47 @@ public interface LoginAttemptPolicy {
   void recordSuccess(LoginAttemptContext context);
 
   /**
+   * The reason {@link #recordFailure(LoginAttemptContext)} records in the
+   * {@code LoginFailed} event.
+   *
+   * @since 00.84.00
+   */
+  String REASON_CREDENTIALS_REJECTED = "Credentials rejected";
+
+  /**
    * Records a failed attempt. Implementations typically increment a
    * per-key counter and may escalate the throttling decision.
+   * <p>
+   * <strong>The audit point of a rejected login.</strong> The shipped
+   * policies - {@link InMemoryLoginAttemptPolicy},
+   * {@link StoreBackedLoginAttemptPolicy} and {@link NoopLoginAttemptPolicy} -
+   * publish exactly one {@code LoginFailed} event per call, with the user
+   * name and client address of {@code context}. Code that reports a rejected
+   * login here therefore publishes no {@code LoginFailed} of its own; until
+   * 00.84.00 {@code StandaloneLoginFlow} did, and a rejected standalone login
+   * was audited twice. A policy written by an application publishes the event
+   * as well, or rejected logins behind it go unaudited.
    *
    * @param context attempt context
    */
   void recordFailure(LoginAttemptContext context);
+
+  /**
+   * Records a failed attempt with the reason the {@code LoginFailed} event
+   * carries, for a caller that knows more than "the credentials were
+   * rejected" - for example that the credentials were accepted but no
+   * subject could be loaded. The default ignores the reason and delegates to
+   * {@link #recordFailure(LoginAttemptContext)}; the shipped policies record
+   * it.
+   *
+   * @param context attempt context
+   * @param reason  reason for the audit event; {@code null} or blank means
+   *                {@link #REASON_CREDENTIALS_REJECTED}
+   * @since 00.84.00
+   */
+  default void recordFailure(LoginAttemptContext context, String reason) {
+    recordFailure(context);
+  }
 
   /**
    * Records a successful attempt and says whether the login may complete.

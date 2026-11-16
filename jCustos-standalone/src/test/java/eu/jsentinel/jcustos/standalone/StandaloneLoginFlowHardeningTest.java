@@ -26,9 +26,13 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptStore;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptConfiguration;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.StoreBackedLoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
 import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
@@ -99,6 +103,73 @@ class StandaloneLoginFlowHardeningTest {
     return SubjectStores.subjectStore().currentSubject(String.class);
   }
 
+  // ── one LoginFailed per rejected login (JS-SEC-123 follow-up) ───────
+
+  @Test
+  @DisplayName("every shipped policy: a rejected login leaves exactly one LoginFailed, with user name and reason")
+  void oneLoginFailedPerRejectedLogin() {
+    List<LoginAttemptPolicy> policies = List.of(
+        new InMemoryLoginAttemptPolicy(),
+        new StoreBackedLoginAttemptPolicy(new InMemoryLoginAttemptStore()),
+        NoopLoginAttemptPolicy.INSTANCE);
+    for (LoginAttemptPolicy policy : policies) {
+      audit.clear();
+      JCustosServiceResolver.setLoginAttemptPolicy(policy);
+      StandaloneLoginFlow<String, String> flow =
+          new StandaloneLoginFlow<>(new AcceptsOnly("Correct-Horse-1", true), Clock.systemUTC());
+
+      assertInstanceOf(StandaloneLoginFlow.LoginResult.Rejected.class, flow.login("wrong", "alice"));
+
+      String name = policy.getClass().getSimpleName();
+      assertEquals(1, audit.all(LoginFailed.class).size(), name + ": " + audit.events());
+      LoginFailed event = audit.single(LoginFailed.class);
+      assertEquals("alice", event.username(), name);
+      assertEquals(LoginAttemptPolicy.REASON_CREDENTIALS_REJECTED, event.reason(), name);
+    }
+  }
+
+  @Test
+  @DisplayName("every shipped policy: accepted credentials without a subject leave one LoginFailed with that reason")
+  void oneLoginFailedWithTheFlowsReason() {
+    List<LoginAttemptPolicy> policies = List.of(
+        new InMemoryLoginAttemptPolicy(),
+        new StoreBackedLoginAttemptPolicy(new InMemoryLoginAttemptStore()),
+        NoopLoginAttemptPolicy.INSTANCE);
+    for (LoginAttemptPolicy policy : policies) {
+      audit.clear();
+      JCustosServiceResolver.setLoginAttemptPolicy(policy);
+      StandaloneLoginFlow<String, String> flow =
+          new StandaloneLoginFlow<>(new AcceptsOnly("Correct-Horse-1", false), Clock.systemUTC());
+
+      assertInstanceOf(StandaloneLoginFlow.LoginResult.Rejected.class,
+          flow.login("Correct-Horse-1", "alice"));
+
+      String name = policy.getClass().getSimpleName();
+      assertEquals(1, audit.all(LoginFailed.class).size(), name + ": " + audit.events());
+      assertEquals(StandaloneLoginFlow.REASON_NO_SUBJECT, audit.single(LoginFailed.class).reason(), name);
+    }
+  }
+
+  /** Accepts one password; {@code withSubject == false} loads no subject for it. */
+  private record AcceptsOnly(String password, boolean withSubject)
+      implements AuthenticationService<String, String> {
+    @Override
+    public boolean checkCredentials(String credentials) {
+      return password.equals(credentials);
+    }
+
+    @Override
+    public String loadSubject(String credentials) {
+      return withSubject ? "alice" : null;
+    }
+
+    @Override
+    public Class<String> subjectType() {
+      return String.class;
+    }
+  }
+
+  // ── JS-SEC-126 ─────────────────────────────────────────────────────
   // ── JS-SEC-126 ─────────────────────────────────────────────────────
 
   @Test
@@ -153,8 +224,8 @@ class StandaloneLoginFlowHardeningTest {
       assertInstanceOf(StandaloneLoginFlow.LoginResult.Rejected.class,
           flow.login(new Login("victim", "wrong-" + i), "victim"));
     }
-    assertEquals(THRESHOLD, audit.all(LoginFailed.class).size() / 2,
-        "one LoginFailed from the flow and one from the policy per failure");
+    assertEquals(THRESHOLD, audit.all(LoginFailed.class).size(),
+        "exactly one LoginFailed per rejected login - the policy's, not a second one of the flow");
     assertInstanceOf(StandaloneLoginFlow.LoginResult.LockedOut.class,
         flow.login(new Login("victim", "Correct-Horse-1"), "victim"));
   }

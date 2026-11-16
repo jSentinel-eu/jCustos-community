@@ -82,7 +82,8 @@ import java.util.Objects;
  *
  * <ul>
  *   <li>{@link LoginFailed} on every
- *       {@link #recordFailure(LoginAttemptContext) recordFailure}</li>
+ *       {@link #recordFailure(LoginAttemptContext) recordFailure} - the one
+ *       event of a rejected login, see {@link LoginAttemptPolicy#recordFailure}</li>
  *   <li>{@link BruteForceLimitReached} the first time a key crosses the
  *       failure threshold</li>
  * </ul>
@@ -319,6 +320,11 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
 
   @Override
   public void recordFailure(LoginAttemptContext context) {
+    recordFailure(context, REASON_CREDENTIALS_REJECTED);
+  }
+
+  @Override
+  public void recordFailure(LoginAttemptContext context, String reason) {
     Objects.requireNonNull(context, "context");
     Instant now = Instant.now(clock);
     CombinedKey combinedKey = combinedKey(context);
@@ -335,7 +341,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       totalFailures = justLocked == null ? 0 : justLocked.totalFailuresObserved;
     }
 
-    auditLoginFailed(context);
+    LoginFailureAudit.publish(auditService, Instant.now(clock), context, reason);
     if (justLocked != null) {
       auditBruteForceLimitReached(context, lockedUntil, totalFailures, now);
     }
@@ -472,19 +478,6 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       return instant.plus(duration);
     } catch (DateTimeException | ArithmeticException overflow) {
       return Instant.MAX;
-    }
-  }
-
-  private void auditLoginFailed(LoginAttemptContext context) {
-    JCustosAuditService sink = sink();
-    try {
-      sink.publish(new LoginFailed(
-          Instant.now(clock),
-          context.username() == null ? "" : context.username(),
-          context.clientAddress(),
-          "Credentials rejected"));
-    } catch (RuntimeException auditFailure) {
-      // never block a security decision because the audit sink failed
     }
   }
 

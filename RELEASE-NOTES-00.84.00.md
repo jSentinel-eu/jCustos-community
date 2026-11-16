@@ -1786,6 +1786,21 @@ audit and bus events is a 21-character `sref-…` reference; compare with `Sessi
 consumer of `SessionRevokedEvent` that ends the session matches `SessionRef.of` of the sessions it
 holds.
 
+## A rejected login is audited once, by the login-attempt policy (addition to SA23 and SA24, JS-SEC-123, JS-SEC-124, CWE-778)
+
+`StandaloneLoginFlow` published `LoginFailed` after `policy.recordFailure(...)`, and
+`InMemoryLoginAttemptPolicy.recordFailure` published one as well, so every rejected standalone login
+was audited twice; behind `StoreBackedLoginAttemptPolicy` or `NoopLoginAttemptPolicy`, the Vaadin
+`LoginView` and the REST handlers, which leave the event to the policy, audited no rejected login at
+all. `recordFailure` is now the single audit point: all three shipped policies publish exactly one
+`LoginFailed` per call, with user name, client address and reason, and the new default method
+`recordFailure(context, reason)` carries the caller's reason
+(`LoginAttemptPolicy.REASON_CREDENTIALS_REJECTED`, `StandaloneLoginFlow.REASON_NO_SUBJECT`). The
+flow publishes `LoginFailed` only for a login the policy refuses after the check.
+`StoreBackedLoginAttemptPolicy` has a new constructor that takes the audit service. **Consumers:** a
+`LoginAttemptPolicy` of your own publishes `LoginFailed` in `recordFailure`, or rejected logins
+behind it go unaudited; `NoopLoginAttemptPolicy` now publishes `LoginFailed` too.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

@@ -16,8 +16,18 @@
  */
 package eu.jsentinel.jcustos.bruteforce;
 
+import java.time.Clock;
+import java.time.Instant;
+
 /**
- * {@link LoginAttemptPolicy} that never throttles and never records.
+ * {@link LoginAttemptPolicy} that never throttles and counts nothing.
+ * <p>
+ * It still publishes the {@code LoginFailed} event of a rejected login: the
+ * policy's {@link #recordFailure(LoginAttemptContext)} is the single audit point
+ * of a rejected login (see {@link LoginAttemptPolicy#recordFailure}), and
+ * switching throttling off must not switch the audit trail off with it. Until
+ * 00.84.00 a rejected login behind this policy was audited by the standalone
+ * login flow only.
  * <p>
  * JS-SEC-124 (CWE-1188): until 00.83.00 this was what the resolver handed
  * out when no policy was registered. The resolver default is now a
@@ -48,6 +58,12 @@ public final class NoopLoginAttemptPolicy implements LoginAttemptPolicy {
 
   @Override
   public void recordFailure(LoginAttemptContext context) {
-    // intentionally empty
+    recordFailure(context, REASON_CREDENTIALS_REJECTED);
+  }
+
+  @Override
+  public void recordFailure(LoginAttemptContext context, String reason) {
+    // Nothing is counted; the rejected login is audited.
+    LoginFailureAudit.publish(null, Instant.now(Clock.systemUTC()), context, reason);
   }
 }

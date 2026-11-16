@@ -37,6 +37,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -105,7 +106,7 @@ class StandaloneLoginFlowTest {
   // ── Wrong-credentials path ─────────────────────────────────────
 
   @Test
-  @DisplayName("Wrong password → Rejected, policy.recordFailure called, LoginFailed audited, no subject bound")
+  @DisplayName("Wrong password → Rejected, policy.recordFailure called with the reason, no LoginFailed of the flow's own, no subject bound")
   void rejectedPath() {
     StandaloneLoginFlow<String, String> flow =
         new StandaloneLoginFlow<>(auth, Clock.fixed(T0, ZoneOffset.UTC));
@@ -116,18 +117,18 @@ class StandaloneLoginFlowTest {
     assertEquals(0, policy.recordSuccessCalls);
     assertEquals(1, policy.recordFailureCalls,
         "failed login must call policy.recordFailure(...)");
-
-    LoginFailed ev = audit.single(LoginFailed.class);
-    assertEquals("alice", ev.username());
-    assertEquals("Credentials rejected", ev.reason(),
-        "audit reason must explain the rejection cause");
+    assertEquals(List.of("Credentials rejected"), policy.failureReasons,
+        "the policy receives the reason for its LoginFailed event");
+    // JS-SEC-123 follow-up: the policy's recordFailure is the audit point; this counting
+    // policy publishes nothing, so no LoginFailed may appear - the flow publishes none itself.
+    assertTrue(audit.all(LoginFailed.class).isEmpty(), audit.events().toString());
 
     assertFalse(SubjectStores.subjectStore().currentSubject(String.class).isPresent(),
         "no subject must be bound after a rejected login");
   }
 
   @Test
-  @DisplayName("loadSubject returning null surfaces as Rejected with reason 'Subject lookup returned null'")
+  @DisplayName("loadSubject returning null surfaces as Rejected; the policy receives the reason 'Subject lookup returned null'")
   void rejectedWhenLoadSubjectReturnsNull() {
     StubAuth nullLoader = new StubAuth() {
       @Override public String loadSubject(String credentials) { return null; }
@@ -138,10 +139,10 @@ class StandaloneLoginFlowTest {
     StandaloneLoginFlow.LoginResult<String> result = flow.login("alice", "alice");
 
     assertInstanceOf(StandaloneLoginFlow.LoginResult.Rejected.class, result);
-    LoginFailed ev = audit.single(LoginFailed.class);
-    assertEquals("Subject lookup returned null", ev.reason(),
+    assertEquals(List.of(StandaloneLoginFlow.REASON_NO_SUBJECT), policy.failureReasons,
         "null loadSubject(...) must be reported as a separate failure reason");
     assertEquals(1, policy.recordFailureCalls);
+    assertTrue(audit.all(LoginFailed.class).isEmpty(), audit.events().toString());
   }
 
   // ── Lockout short-circuit ──────────────────────────────────────
@@ -247,7 +248,14 @@ class StandaloneLoginFlowTest {
 
     @Override public LoginAttemptDecision beforeAttempt(LoginAttemptContext ctx) { return next; }
     @Override public void recordSuccess(LoginAttemptContext ctx) { recordSuccessCalls++; }
+    final List<String> failureReasons = new ArrayList<>();
+
     @Override public void recordFailure(LoginAttemptContext ctx) { recordFailureCalls++; }
+
+    @Override public void recordFailure(LoginAttemptContext ctx, String reason) {
+      failureReasons.add(reason);
+      recordFailure(ctx);
+    }
   }
 
   /** Tiny in-memory SubjectStore so tests don't rely on SPI resolution. */

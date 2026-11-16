@@ -53,8 +53,10 @@ import java.util.Objects;
  *       emit a {@link LoginSucceeded} audit event. If the policy answers
  *       that the key was locked in the meantime, the login is denied with
  *       {@link LoginResult#lockedOut} and no subject is bound.</li>
- *   <li>On failure — record the failure on the policy and emit a
- *       {@link LoginFailed} audit event.</li>
+ *   <li>On failure — record the failure on the policy, with the reason.
+ *       The policy publishes the one {@link LoginFailed} audit event of the
+ *       rejected login (see {@link LoginAttemptPolicy#recordFailure}); until
+ *       00.84.00 this flow published a second one.</li>
  *   <li>No verdict — the {@link AuthenticationService} threw, typically
  *       {@link CredentialVerificationUnavailableException} because the
  *       credential check was shed under load (JS-SEC-126). The attempt is
@@ -67,6 +69,23 @@ import java.util.Objects;
  * @param <U> the subject type
  */
 public final class StandaloneLoginFlow<T, U> {
+
+  /**
+   * Reason of the {@link LoginFailed} event when the {@link AuthenticationService} accepted
+   * the credentials but returned no subject.
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_NO_SUBJECT = "Subject lookup returned null";
+
+  /**
+   * Reason of the {@link LoginFailed} event this flow publishes itself: the key was locked
+   * while the credentials were being checked (JS-SEC-123). The policy reports nothing in that
+   * case, so the flow does.
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_LOCKED_IN_FLIGHT = "Locked out while the attempt was in flight";
 
   private final AuthenticationService<T, U> authenticationService;
   private final Clock clock;
@@ -130,21 +149,21 @@ public final class StandaloneLoginFlow<T, U> {
       throw noVerdict;
     }
 
+    // JS-SEC-123 follow-up: the policy's recordFailure is the audit point of a rejected login and
+    // publishes LoginFailed itself; a second event here audited every rejected login twice.
     if (!ok) {
-      policy.recordFailure(attempt);
-      audit(new LoginFailed(now(), username, null, "Credentials rejected"));
+      policy.recordFailure(attempt, LoginAttemptPolicy.REASON_CREDENTIALS_REJECTED);
       return LoginResult.rejected();
     }
     if (subject == null) {
-      policy.recordFailure(attempt);
-      audit(new LoginFailed(now(), username, null, "Subject lookup returned null"));
+      policy.recordFailure(attempt, REASON_NO_SUBJECT);
       return LoginResult.rejected();
     }
 
     // JS-SEC-123 (CWE-367, CWE-307): the key can have been locked while the credentials were
     // being checked. A correct password neither lifts that lockout nor passes it.
     if (policy.confirmSuccess(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
-      audit(new LoginFailed(now(), username, null, "Locked out while the attempt was in flight"));
+      audit(new LoginFailed(now(), username, null, REASON_LOCKED_IN_FLIGHT));
       return LoginResult.lockedOut(lockout);
     }
     SubjectStores.subjectStore().setCurrentSubject(subject, authenticationService.subjectType());
