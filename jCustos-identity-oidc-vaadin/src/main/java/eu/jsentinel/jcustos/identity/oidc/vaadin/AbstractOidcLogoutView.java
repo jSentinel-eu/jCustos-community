@@ -37,6 +37,7 @@ import com.vaadin.flow.component.html.Paragraph;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.BeforeEnterObserver;
 import com.vaadin.flow.router.RouteConfiguration;
+import com.vaadin.flow.server.VaadinRequest;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.WrappedSession;
 
@@ -94,10 +95,18 @@ import java.util.Optional;
  */
 public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterObserver, HasLogger {
 
-  /** Query parameter that carries the single-use logout token. */
+  /**
+   * Query parameter that carries the single-use logout token.
+   *
+   * @since 00.84.00
+   */
   public static final String LOGOUT_TOKEN_PARAMETER = "logout-token";
 
-  /** Element id of the confirmation button shown when no valid token arrived. */
+  /**
+   * Element id of the confirmation button shown when no valid token arrived.
+   *
+   * @since 00.84.00
+   */
   public static final String CONFIRM_BUTTON_ID = "oidc-logout-confirm";
 
   /** How many unused logout tokens a session keeps; the oldest is dropped beyond that. */
@@ -132,12 +141,23 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
    * is refused, the request cannot be built. The local session is ended in any case; this
    * only decides what the user sees afterwards.
    *
-   * @return a location for {@code Page.setLocation}; the default is the login route,
-   *     {@code "/" + JCustosServiceResolver.loginRouteName()}
+   * @return a location for {@code Page.setLocation}; the default is the login route below
+   *     the context path of the current request,
+   *     {@code contextPath + "/" + JCustosServiceResolver.loginRouteName()} - until the exit
+   *     review of 00.84.00 the context path was left out, and an application deployed under
+   *     one sent the user to a page outside it (XR09-4). An application whose Vaadin servlet
+   *     is not mapped to the root of its context overrides this method.
    * @since 00.84.00
    */
   protected String localLogoutTarget() {
-    return "/" + JCustosServiceResolver.loginRouteName();
+    return contextPath() + "/" + JCustosServiceResolver.loginRouteName();
+  }
+
+  /** @return the context path of the current request; empty at the root and without a request */
+  private static String contextPath() {
+    VaadinRequest request = VaadinRequest.getCurrent();
+    String contextPath = request == null ? null : request.getContextPath();
+    return contextPath == null ? "" : contextPath;
   }
 
   /** @return the text above the confirmation button. */

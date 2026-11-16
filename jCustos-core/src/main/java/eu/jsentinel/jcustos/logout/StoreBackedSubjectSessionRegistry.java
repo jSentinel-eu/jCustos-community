@@ -16,6 +16,8 @@
  */
 package eu.jsentinel.jcustos.logout;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.session.JCustosVersion;
@@ -51,6 +53,18 @@ import static java.util.Objects.requireNonNull;
  * existing session id refreshes the {@code lastActivityAt} via
  * upsert (idempotent in observable effect, as the contract
  * requires).
+ *
+ * <p><strong>A revoked id stays revoked (JS-SEC-131, CWE-613).</strong>
+ * {@code register} never turns a {@link SessionStatus#REVOKED} record back
+ * into an {@code ACTIVE} one: the record is what tells every node that the
+ * session is over, and a request of the revoked session that registers its
+ * id again would otherwise undo the revocation. Such a call leaves the
+ * record as it is and logs a warning; the adapters end the session on its
+ * next request. The mutating methods are serialised on the registry, so two
+ * registrations of one id cannot interleave. {@link SessionStore} offers no
+ * conditional write, though: a writer that bypasses this registry and marks
+ * the record {@code REVOKED} between the read and the write of a refresh can
+ * still be overwritten by it.
  *
  * <p>Bound to one {@link TenantId} at construction. Multi-tenant
  * deployments instantiate one registry per tenant.
@@ -120,17 +134,24 @@ public final class StoreBackedSubjectSessionRegistry implements SubjectSessionRe
   }
 
   @Override
-  public void register(SubjectId subjectId, String sessionId) {
+  public synchronized void register(SubjectId subjectId, String sessionId) {
     requireNonNull(subjectId, "subjectId must not be null");
     SessionId sid = sessionIdFrom(sessionId);
     java.time.Instant now = clock.instant();
     SessionRecord existing = store.findById(sid).orElse(null);
+    if (existing != null && existing.status() == SessionStatus.REVOKED) {
+      // JS-SEC-131 (CWE-613): a revocation is final for the id. Replacing the record would
+      // revive the session on every node that consults the store.
+      HasLogger.staticLogger().warn("Session registry: session {} is revoked; the registration is"
+          + " ignored and the record stays REVOKED", SessionRef.of(sessionId));
+      return;
+    }
     // JS-SEC-075 (CWE-613 / CWE-384): refresh only a record that is still this
     // subject's live session. A record bound to another subject (the container
-    // reused the id) or one that is EXPIRED / REVOKED is replaced by a fresh
-    // ACTIVE record with the new subject's own version snapshot — otherwise
-    // clearAll(A) would end B's session, sessionsOf(B) would not know it and
-    // drift detection would compare B against A's snapshot.
+    // reused the id) or one that is EXPIRED is replaced by a fresh ACTIVE record
+    // with the new subject's own version snapshot — otherwise clearAll(A) would
+    // end B's session, sessionsOf(B) would not know it and drift detection would
+    // compare B against A's snapshot.
     SessionRecord record = existing != null
         && existing.subjectId().equals(subjectId)
         && existing.status().isActive()
@@ -148,7 +169,7 @@ public final class StoreBackedSubjectSessionRegistry implements SubjectSessionRe
   }
 
   @Override
-  public void unregister(SubjectId subjectId, String sessionId) {
+  public synchronized void unregister(SubjectId subjectId, String sessionId) {
     requireNonNull(subjectId, "subjectId must not be null");
     SessionId sid = sessionIdFrom(sessionId);
     store.findById(sid).ifPresent(record -> {
@@ -172,7 +193,7 @@ public final class StoreBackedSubjectSessionRegistry implements SubjectSessionRe
   }
 
   @Override
-  public Collection<String> clearAll(SubjectId subjectId) {
+  public synchronized Collection<String> clearAll(SubjectId subjectId) {
     requireNonNull(subjectId, "subjectId must not be null");
     List<SessionRecord> records = store.findBySubject(tenant, subjectId);
     List<String> removed = new ArrayList<>(records.size());

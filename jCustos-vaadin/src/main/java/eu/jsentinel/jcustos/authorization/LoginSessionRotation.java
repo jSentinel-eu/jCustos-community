@@ -81,9 +81,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       {@link JCustosVersionStore} and a {@link SubjectIdResolver} are registered.</li>
  * </ol>
  *
+ * <p>Each step runs on its own (exit review XR09-2, CWE-384): the rotation comes first and
+ * depends on nothing else - a {@link SessionPolicy} that cannot be resolved or whose
+ * {@code onLogin} throws no longer prevents it, and the rotation audit and the hook run even
+ * when the policy failed. A failure is logged with its exception class only, never with its
+ * message, which may carry a session id (JS-SEC-117).
+ *
  * <p>The method never throws. Its {@link Outcome} says whether the id really changed, so the
- * caller decides what a failed rotation means: {@code LoginView} warns and continues, the
- * OAuth2 callback aborts the login.
+ * caller decides what a failed rotation means. Both callers of this release fail closed: when
+ * the session had an id and that id did not change, {@code LoginView} and the OAuth2 callback
+ * undo the login and end the session with the reason {@value #REASON_ROTATION_FAILED}.
  *
  * @since 00.84.00
  */
@@ -92,6 +99,15 @@ public final class LoginSessionRotation {
 
   /** Audit reason when the policy does not supply one. */
   public static final String DEFAULT_REASON = "RotationAfterLogin";
+
+  /**
+   * Audit reason of the {@code SessionInvalidated} event when a login is undone because the
+   * session id could not be rotated after it (JS-SEC-146, XR09-2, CWE-384). Used by
+   * {@code LoginView} and {@code AbstractOAuth2CallbackView}.
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_ROTATION_FAILED = "RotationAfterLoginFailed";
 
   /**
    * JS-SEC-027: warns once (not per login) when a JCustosVersionStore is
@@ -106,7 +122,10 @@ public final class LoginSessionRotation {
 
   /**
    * Receives the session ids of a rotation.
+   *
+   * @since 00.84.00
    */
+  @ExperimentalJCustosApi
   @FunctionalInterface
   public interface RotationHook {
 
@@ -130,7 +149,9 @@ public final class LoginSessionRotation {
    * @param previousSessionId the id before the call; {@code null} without a session
    * @param currentSessionId  the id after the call; equals {@code previousSessionId} when
    *                          the rotation did not happen
+   * @since 00.84.00
    */
+  @ExperimentalJCustosApi
   public record Outcome(boolean sessionBound, boolean rotated,
                         String previousSessionId, String currentSessionId) {
   }
@@ -158,42 +179,51 @@ public final class LoginSessionRotation {
   }
 
   private static Outcome rotateAndNotify(RotationHook hook) {
-    String previousSessionId = null;
-    String currentSessionId = null;
-    boolean sessionBound = false;
-    boolean rotated = false;
+    if (VaadinSession.getCurrent() == null) {
+      return new Outcome(false, false, null, null);
+    }
+    // JS-SEC-003 / JS-SEC-060 / JS-SEC-146 / XR09-2 (CWE-384): rotate the HTTP session id on
+    // every successful login, first and independently of everything else - until the exit
+    // review a SessionPolicy that could not be resolved left the id unchanged - and before
+    // the policy runs, so SessionCreated names the surviving id.
+    String previousSessionId = currentSessionId();
+    boolean rotated = rotateSessionId(previousSessionId);
+    String currentSessionId = rotated ? currentSessionId() : previousSessionId;
+    String reason = notifyPolicy();
+    if (rotated) {
+      // XR09-2: audited and reported even when the policy failed
+      auditRotation(previousSessionId, reason);
+      notifySessionRotated(hook, previousSessionId, currentSessionId);
+    }
+    return new Outcome(true, rotated, previousSessionId, currentSessionId);
+  }
+
+  /**
+   * Tells the {@link SessionPolicy} about the login, with the id that lives on.
+   *
+   * @return the audit reason of the rotation: the reason of an
+   *     {@link SessionDecision.Invalidate Invalidate} decision, otherwise - also when the
+   *     policy failed - {@value #DEFAULT_REASON}
+   */
+  private static String notifyPolicy() {
     try {
       SessionPolicy<Object> policy = JCustosServiceResolver.sessionPolicy();
-      Optional<SessionContext<Object>> beforeRotation = buildSessionContext();
-      if (beforeRotation.isEmpty()) {
-        return new Outcome(false, false, null, null);
+      Optional<SessionContext<Object>> context = buildSessionContext();
+      if (context.isEmpty()) {
+        return DEFAULT_REASON;
       }
-      sessionBound = true;
-      previousSessionId = beforeRotation.get().sessionId();
-      currentSessionId = previousSessionId;
-      // JS-SEC-003 / JS-SEC-060 / JS-SEC-146 (CWE-384): rotate the HTTP session id on every
-      // successful login, independently of the SessionPolicy decision, and do it before the
-      // policy runs so SessionCreated names the surviving id.
-      rotated = rotateSessionId(previousSessionId);
-      SessionContext<Object> context = rotated
-          ? buildSessionContext().orElse(beforeRotation.get())
-          : beforeRotation.get();
-      currentSessionId = context.sessionId();
       // JS-SEC-117 (CWE-532, CWE-522): the policy sees the reference. It emits SessionCreated
       // from it, and a policy is no place for the session cookie.
-      SessionDecision decision = policy.onLogin(withReference(context));
-      String reason = decision instanceof SessionDecision.Invalidate invalidate
+      SessionDecision decision = policy.onLogin(withReference(context.get()));
+      return decision instanceof SessionDecision.Invalidate invalidate
           ? invalidate.reason()
           : DEFAULT_REASON;
-      if (rotated) {
-        auditRotation(context, previousSessionId, reason);
-        notifySessionRotated(hook, previousSessionId, context.sessionId());
-      }
-    } catch (RuntimeException notifyFailure) {
+    } catch (RuntimeException policyFailure) {
+      // XR09-3 (CWE-532): the class only - the message of a failure may name the session
       HasLogger.staticLogger().warn("SessionPolicy.onLogin notification failed: {}",
-          notifyFailure.toString());
+          policyFailure.getClass().getName());
+      return DEFAULT_REASON;
     }
-    return new Outcome(sessionBound, rotated, previousSessionId, currentSessionId);
   }
 
   /**
@@ -222,8 +252,9 @@ public final class LoginSessionRotation {
         VaadinService.reinitializeSession(request);
       }
     } catch (RuntimeException rotationFailure) {
+      // XR09-3 (CWE-532): the class only - a container's message can carry the session id
       HasLogger.staticLogger().warn("Session id rotation after login failed: {}",
-          rotationFailure.toString());
+          rotationFailure.getClass().getName());
       return false;
     }
     String currentSessionId = currentSessionId();
@@ -238,9 +269,13 @@ public final class LoginSessionRotation {
   }
 
   private static String currentSessionId() {
-    VaadinSession vaadin = VaadinSession.getCurrent();
-    WrappedSession wrapped = vaadin == null ? null : vaadin.getSession();
-    return wrapped == null ? null : wrapped.getId();
+    try {
+      VaadinSession vaadin = VaadinSession.getCurrent();
+      WrappedSession wrapped = vaadin == null ? null : vaadin.getSession();
+      return wrapped == null ? null : wrapped.getId();
+    } catch (RuntimeException invalidated) {
+      return null;
+    }
   }
 
   private static void notifySessionRotated(RotationHook hook, String previousSessionId,
@@ -251,7 +286,9 @@ public final class LoginSessionRotation {
     try {
       hook.onSessionRotated(previousSessionId, currentSessionId);
     } catch (RuntimeException hookFailure) {
-      HasLogger.staticLogger().warn("onSessionRotated hook failed: {}", hookFailure.toString());
+      // XR09-3 (CWE-532): the hook works with the live ids; its message may carry them
+      HasLogger.staticLogger().warn("onSessionRotated hook failed: {}",
+          hookFailure.getClass().getName());
     }
   }
 
@@ -265,13 +302,13 @@ public final class LoginSessionRotation {
         context.attributes());
   }
 
-  private static void auditRotation(SessionContext<Object> context, String oldSessionId, String reason) {
+  private static void auditRotation(String oldSessionId, String reason) {
     try {
       JCustosAuditService sink = JCustosServiceResolver.securityAuditService();
       // JS-SEC-117: the retired id is still a credential until the container forgets it.
       sink.publish(new SessionInvalidated(
           Instant.now(),
-          subjectIdOf(context),
+          auditIdOf(currentSubject().orElse(null)),
           SessionRef.ofNullable(oldSessionId),
           reason == null ? DEFAULT_REASON : reason));
     } catch (RuntimeException auditFailure) {
@@ -284,7 +321,10 @@ public final class LoginSessionRotation {
   // security-relevant logic — never leak subject.toString() — is unit-tested
   // in isolation (through LoginView.subjectIdOf, which delegates here).
   static String subjectIdOf(SessionContext<Object> context) {
-    Object subject = context.subject();
+    return auditIdOf(context.subject());
+  }
+
+  private static String auditIdOf(Object subject) {
     if (subject == null) {
       return "";
     }

@@ -31,6 +31,7 @@ import com.vaadin.browserless.BrowserlessTest;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.textfield.PasswordField;
 import com.vaadin.flow.component.textfield.TextField;
+import com.vaadin.flow.internal.CurrentInstance;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.server.VaadinRequest;
 import org.junit.jupiter.api.AfterEach;
@@ -281,19 +282,77 @@ class LoginViewThrottlingBrowserlessTest extends BrowserlessTest {
   }
 
   @Test
-  @DisplayName("any other exception of the check: the attempt is abandoned and the exception reaches the caller")
-  void otherExceptionAbandonsAndPropagates() {
+  @DisplayName("XR09-6: any other exception of the check counts as a failed attempt and looks like wrong credentials")
+  void otherExceptionCountsAsAFailedAttempt() {
     RecordingPolicy policy = new RecordingPolicy();
     JCustosServiceResolver.setLoginAttemptPolicy(policy);
     PlainLoginView view = navigate(PlainLoginView.class);
     view.nextFailure = new IllegalStateException("user directory unreachable");
 
-    IllegalStateException thrown = assertThrows(IllegalStateException.class,
-        () -> submit("alice", PASSWORD));
+    submit("alice", PASSWORD);
 
-    assertEquals("user directory unreachable", thrown.getMessage());
-    assertEquals(List.of("beforeAttempt", "abandonAttempt"), policy.calls);
+    assertEquals(List.of("beforeAttempt", "recordFailure"), policy.calls,
+        "only CredentialVerificationUnavailableException means 'no verdict'");
+    assertEquals(1, view.failedReactions, "the user sees what wrong credentials show");
+    assertEquals(0, view.unavailableReactions);
+    assertFalse(view.navigated);
     assertEquals("", view.password(), "the password does not stay in the field");
+  }
+
+  @Test
+  @DisplayName("XR09-6: a check that can be made to throw buys no extra guesses - the real policy locks the account")
+  void throwingChecksLockTheAccount() {
+    PlainLoginView view = navigate(PlainLoginView.class);
+    int threshold = LoginAttemptConfiguration.defaults().failureThreshold();
+    for (int i = 0; i < threshold; i++) {
+      view.nextFailure = new IllegalArgumentException("unparsable input " + i);
+      submit("alice", "crafted input " + i);
+    }
+    view.nextFailure = null;
+    view.checks = 0;
+
+    submit("alice", PASSWORD);
+
+    assertEquals(0, view.checks, "the account is locked: the correct password is not even checked");
+    assertNotNull(view.lastLockout);
+    assertFalse(view.navigated);
+  }
+
+  @Test
+  @DisplayName("XR09-6: a check that bound the subject before it threw leaves no subject behind")
+  void throwingCheckDropsAPartiallyBoundSubject() {
+    PlainLoginView view = navigate(PlainLoginView.class);
+    view.bindBeforeFailure = true;
+    view.nextFailure = new IllegalStateException("profile lookup failed");
+
+    submit("alice", PASSWORD);
+
+    assertTrue(boundSubject().isEmpty(), "a login whose check failed must not leave a subject bound");
+    assertFalse(view.navigated);
+  }
+
+  // ── the session id cannot be rotated (XR09-2) ──
+
+  @Test
+  @DisplayName("XR09-2: fail closed - when the session id cannot be rotated the login is undone and the session ended")
+  void rotationImpossible_loginIsUndone() {
+    PlainLoginView view = navigate(PlainLoginView.class);
+    VaadinRequest request = VaadinRequest.getCurrent();
+    // no request is bound: there is nothing whose session id could be changed
+    CurrentInstance.set(VaadinRequest.class, null);
+    try {
+      submitEndingTheSession("alice", PASSWORD);
+    } finally {
+      CurrentInstance.set(VaadinRequest.class, request);
+    }
+
+    assertEquals(1, view.checks, "the credentials were correct and the subject was bound ...");
+    assertTrue(boundSubject().isEmpty(), "... and must not stay bound on the pre-login session id");
+    assertFalse(view.navigated, "the user must not reach the application");
+    assertEquals(1, view.failedReactions);
+    assertEquals(List.of(LoginSessionRotation.REASON_ROTATION_FAILED),
+        audit.events().stream().filter(SessionInvalidated.class::isInstance)
+            .map(e -> ((SessionInvalidated) e).reason()).toList());
   }
 
   // ── locked while the attempt was in flight (JS-SEC-123) ──
@@ -374,10 +433,14 @@ class LoginViewThrottlingBrowserlessTest extends BrowserlessTest {
     boolean navigated;
     LoginAttemptDecision.LockedOut lastLockout;
     RuntimeException nextFailure;
+    boolean bindBeforeFailure;
 
     @Override public boolean checkCredentials() {
       checks++;
       if (nextFailure != null) {
+        if (bindBeforeFailure) {
+          SubjectStores.subjectStore().setCurrentSubject(username(), String.class);
+        }
         throw nextFailure;
       }
       boolean ok = PASSWORD.equals(password());

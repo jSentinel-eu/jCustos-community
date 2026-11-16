@@ -81,8 +81,14 @@ import java.util.Optional;
 public abstract class AbstractOAuth2CallbackView extends Div
     implements BeforeEnterObserver, HasLogger {
 
-  /** Audit reason when the login is undone because the session id could not be rotated. */
-  public static final String REASON_ROTATION_FAILED = "RotationAfterLoginFailed";
+  /**
+   * Audit reason when the login is undone because the session id could not be rotated; the
+   * same value as {@link LoginSessionRotation#REASON_ROTATION_FAILED}, which {@code LoginView}
+   * uses.
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_ROTATION_FAILED = LoginSessionRotation.REASON_ROTATION_FAILED;
 
   /** @return the configured authorization-code flow (state store + token client). */
   protected abstract AuthorizationCodeFlow flow();

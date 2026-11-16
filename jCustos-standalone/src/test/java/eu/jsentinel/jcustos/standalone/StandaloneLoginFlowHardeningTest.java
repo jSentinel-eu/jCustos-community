@@ -231,21 +231,51 @@ class StandaloneLoginFlowHardeningTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-123: an exception from the AuthenticationService releases the reservation and counts nothing")
-  void exceptionReleasesTheReservation() {
+  @DisplayName("XR09-6: any other exception from the AuthenticationService is a failed attempt - the key locks after the threshold")
+  void otherExceptionCountsAsAFailedAttempt() {
+    AtomicInteger checks = new AtomicInteger();
     AuthenticationService<Login, String> broken = new PasswordAuthentication(
         new SemaphoreKdfExecutionLimiter(new KdfResourceBudget(1, Duration.ofMillis(50)))) {
       @Override
       public boolean checkCredentials(Login credentials) {
-        throw new IllegalStateException("user directory unreachable");
+        checks.incrementAndGet();
+        throw new IllegalStateException("cannot parse " + credentials.password());
       }
     };
     InMemoryLoginAttemptPolicy policy = new InMemoryLoginAttemptPolicy();
     JCustosServiceResolver.setLoginAttemptPolicy(policy);
     StandaloneLoginFlow<Login, String> flow = new StandaloneLoginFlow<>(broken, Clock.systemUTC());
 
+    for (int i = 0; i < THRESHOLD; i++) {
+      assertInstanceOf(StandaloneLoginFlow.LoginResult.Rejected.class,
+          flow.login(new Login("victim", "crafted-" + i), "victim"),
+          "the caller sees what wrong credentials show");
+    }
+    assertInstanceOf(StandaloneLoginFlow.LoginResult.LockedOut.class,
+        flow.login(new Login("victim", "crafted-again"), "victim"),
+        "a check that can be made to throw must not buy unlimited guesses");
+    assertEquals(THRESHOLD, checks.get(), "the locked attempt does not reach the service");
+    assertEquals(THRESHOLD, audit.all(LoginFailed.class).size());
+    assertTrue(audit.all(LoginFailed.class).stream()
+        .allMatch(event -> StandaloneLoginFlow.REASON_CHECK_FAILED.equals(event.reason())));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-123 / JS-SEC-126: CredentialVerificationUnavailableException releases the reservation and counts nothing")
+  void unavailableReleasesTheReservation() {
+    AuthenticationService<Login, String> shed = new PasswordAuthentication(
+        new SemaphoreKdfExecutionLimiter(new KdfResourceBudget(1, Duration.ofMillis(50)))) {
+      @Override
+      public boolean checkCredentials(Login credentials) {
+        throw new CredentialVerificationUnavailableException();
+      }
+    };
+    InMemoryLoginAttemptPolicy policy = new InMemoryLoginAttemptPolicy();
+    JCustosServiceResolver.setLoginAttemptPolicy(policy);
+    StandaloneLoginFlow<Login, String> flow = new StandaloneLoginFlow<>(shed, Clock.systemUTC());
+
     for (int i = 0; i < THRESHOLD * 4; i++) {
-      assertThrows(IllegalStateException.class,
+      assertThrows(CredentialVerificationUnavailableException.class,
           () -> flow.login(new Login("victim", "whatever"), "victim"),
           "attempt " + i + " must still reach the service - no reservation may be left behind");
     }

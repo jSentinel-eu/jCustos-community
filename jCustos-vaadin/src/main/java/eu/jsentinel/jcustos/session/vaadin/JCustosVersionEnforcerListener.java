@@ -69,7 +69,12 @@ import static java.util.Objects.requireNonNull;
  * the push channel with {@code Transport.WEBSOCKET}) the subject, the snapshot and a bound
  * token credential are dropped, the Vaadin session is closed, the HTTP session invalidated
  * and the message is <em>not</em> executed: the client receives Vaadin's session-expired
- * message (JS-SEC-155, CWE-613).
+ * message (JS-SEC-155, CWE-613). A download, an upload or a {@code StreamResource} request of
+ * a drifted session is ended the same way and answered with {@code 403} instead of being
+ * served (exit review XR03). Heartbeats, page loads and static resources are not checked.
+ * A check that throws stops an XHR request through Vaadin's error handling; on the push
+ * channel it ends the session, because the push handler would execute the message
+ * otherwise (exit review XR05).
  *
  * <p><strong>Registration.</strong> {@link #register(ServiceInitEvent)} wires all three
  * entry points. Applications that register by hand need the navigation listener on every
@@ -157,15 +162,16 @@ public final class JCustosVersionEnforcerListener
   }
 
   /**
-   * JS-SEC-082 / JS-SEC-155 (CWE-613, CWE-667): drift enforcement per UIDL request. A session
-   * whose roles were revoked kept working inside the current view because only navigations
-   * were checked. Applications register the same instance through
+   * JS-SEC-082 / JS-SEC-155 / XR03 (CWE-613, CWE-667): drift enforcement per request. A
+   * session whose roles were revoked kept working inside the current view because only
+   * navigations were checked, and kept downloading and uploading because only UIDL requests
+   * were. Applications register the same instance through
    * {@code ServiceInitEvent.addRequestHandler(listener)}; the handler then runs ahead of the
    * framework handlers. Vaadin calls it <em>without</em> the session lock, so it takes the
    * lock for the check. On drift it drops the subject, clears the snapshot, closes the
-   * Vaadin session, invalidates the HTTP session and <em>consumes</em> the request: the
-   * response is Vaadin's session-expired message and the RPC invocations of the request are
-   * never executed.
+   * Vaadin session, invalidates the HTTP session and <em>consumes</em> the request: a client
+   * message is answered with Vaadin's session-expired message and its RPC invocations are
+   * never executed; a download or upload is answered with {@code 403} and never served.
    *
    * @return {@code true} when the session was ended and the request answered
    * @since 00.84.00
@@ -173,7 +179,7 @@ public final class JCustosVersionEnforcerListener
   @Override
   public boolean handleRequest(VaadinSession session, VaadinRequest request, VaadinResponse response)
       throws IOException {
-    if (session == null || !SessionTermination.isUidlRequest(request)) {
+    if (session == null || !SessionTermination.isCheckedRequest(request)) {
       return false;
     }
     boolean ended = SessionTermination.underLock(session, Boolean.FALSE, locked -> {
@@ -186,35 +192,48 @@ public final class JCustosVersionEnforcerListener
     if (!ended) {
       return false;
     }
-    SessionTermination.writeSessionExpired(request, response);
+    SessionTermination.answerEnded(request, response);
     return true;
   }
 
   /**
    * JS-SEC-155 (CWE-613): drift enforcement for client messages that arrive through the push
    * channel ({@code Transport.WEBSOCKET}); these never reach a request handler. The session
-   * is ended before Vaadin's push handler looks it up, so the message is not executed.
+   * is ended before Vaadin's push handler looks it up, so the message is not executed. A
+   * check that fails with an exception ends the session the same way (exit review XR05).
    *
    * @since 00.84.00
    */
   @Override
   public void requestStart(VaadinRequest request, VaadinResponse response) {
+    Optional<VaadinSession> pushSession;
     try {
       if (request == null || !SessionTermination.isPushMessage(request)) {
         return;
       }
-      SessionTermination.sessionOf(request).ifPresent(session ->
-          SessionTermination.underLock(session, Boolean.FALSE, locked -> {
-            boolean stale = dropIdentityIfStale(locked);
-            if (stale) {
-              // the request will end without a session, so nobody else destroys this one
-              SessionTermination.closeInvalidateAndDestroy(locked);
-            }
-            return stale;
-          }));
-    } catch (RuntimeException checkFailure) {
-      logger().warn("Security-version check for a push message failed: {}", checkFailure.toString());
+      pushSession = SessionTermination.sessionOf(request);
+    } catch (RuntimeException unreadableRequest) {
+      logger().warn("Security-version check for a push message skipped, the request could not be "
+          + "read: {}", unreadableRequest.getClass().getName());
+      return;
     }
+    pushSession.ifPresent(session -> {
+      try {
+        SessionTermination.underLock(session, Boolean.FALSE, locked -> {
+          boolean stale = dropIdentityIfStale(locked);
+          if (stale) {
+            // the request will end without a session, so nobody else destroys this one
+            SessionTermination.closeInvalidateAndDestroy(locked);
+          }
+          return stale;
+        });
+      } catch (RuntimeException checkFailure) {
+        // XR05 (CWE-636): fail closed, as the XHR path does
+        logger().warn("Security-version check for a push message failed ({}); the session is ended",
+            checkFailure.getClass().getName());
+        SessionTermination.endAfterFailedCheck(session);
+      }
+    });
   }
 
   @Override

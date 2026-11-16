@@ -527,7 +527,10 @@ public final class EclipseStoreJCustosStorage implements AutoCloseable, HasLogge
 
   /**
    * Returns the Eclipse-Store-backed {@link SessionStore}. Bounded: at the
-   * bound the record stored first is dropped for a new session.
+   * bound a new session makes room by dropping the oldest expired record, or
+   * else the oldest active one; a revoked record is kept for 30 days, and a
+   * store full of such records refuses new sessions with
+   * {@code persistence/session-store-capacity-exceeded} (JS-SEC-131).
    *
    * @return session store
    */

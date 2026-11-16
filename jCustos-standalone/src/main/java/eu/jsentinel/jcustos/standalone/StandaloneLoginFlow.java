@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.standalone;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.LoginFailed;
 import eu.jsentinel.jcustos.audit.LoginSucceeded;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
@@ -57,12 +58,19 @@ import java.util.Objects;
  *       The policy publishes the one {@link LoginFailed} audit event of the
  *       rejected login (see {@link LoginAttemptPolicy#recordFailure}); until
  *       00.84.00 this flow published a second one.</li>
- *   <li>No verdict — the {@link AuthenticationService} threw, typically
+ *   <li>No verdict — the {@link AuthenticationService} threw
  *       {@link CredentialVerificationUnavailableException} because the
  *       credential check was shed under load (JS-SEC-126). The attempt is
  *       given back to the policy, nothing is counted, no
  *       {@link LoginFailed} is written, and the exception reaches the
  *       caller, who answers "try again later".</li>
+ *   <li>The check failed — the {@link AuthenticationService} threw any other
+ *       {@link RuntimeException} (exit review XR09-6, CWE-755). Until then this
+ *       counted as "no verdict" as well, so input that made the check throw
+ *       could be tried without limit. Now it is recorded as a failed attempt
+ *       with the reason {@link #REASON_CHECK_FAILED} and answered with
+ *       {@link LoginResult#rejected}, exactly like wrong credentials; the
+ *       exception is logged with its class only.</li>
  * </ol>
  *
  * @param <T> the credentials type
@@ -86,6 +94,15 @@ public final class StandaloneLoginFlow<T, U> {
    * @since 00.84.00
    */
   public static final String REASON_LOCKED_IN_FLIGHT = "Locked out while the attempt was in flight";
+
+  /**
+   * Reason of the failed attempt the policy records when the {@link AuthenticationService}
+   * threw anything but {@link CredentialVerificationUnavailableException} (exit review
+   * XR09-6, CWE-755). The caller sees {@link LoginResult.Rejected}, as for wrong credentials.
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_CHECK_FAILED = "Credential check failed";
 
   private final AuthenticationService<T, U> authenticationService;
   private final Clock clock;
@@ -122,8 +139,8 @@ public final class StandaloneLoginFlow<T, U> {
    *         nor a failed attempt: nothing was counted and no
    *         {@link LoginFailed} was written. Map it to "temporarily
    *         unavailable, try again" (HTTP 503 or 429). Any other
-   *         {@link RuntimeException} of the service passes through the same
-   *         way.
+   *         {@link RuntimeException} of the service is a failed attempt and
+   *         returns {@link LoginResult.Rejected} (exit review XR09-6).
    */
   public LoginResult<U> login(T credentials, String username) {
     LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
@@ -141,12 +158,21 @@ public final class StandaloneLoginFlow<T, U> {
       if (ok) {
         subject = authenticationService.loadSubject(credentials);
       }
-    } catch (RuntimeException noVerdict) {
+    } catch (CredentialVerificationUnavailableException noVerdict) {
       // JS-SEC-126 (CWE-703): "could not verify" is not "wrong". The reservation taken in
       // beforeAttempt is released (JS-SEC-123), no failure is recorded, no LoginFailed is
       // audited; the caller sees the exception as the third outcome.
       policy.abandonAttempt(attempt);
       throw noVerdict;
+    } catch (RuntimeException checkFailure) {
+      // XR09-6 (CWE-755): only the exception above means "no verdict". Anything else counts as
+      // a failed attempt - otherwise input that makes the check throw would buy unlimited
+      // guesses - and looks like wrong credentials. The class only: the message may carry
+      // what was entered.
+      HasLogger.staticLogger().warn("Login check failed with {}; counted as a failed attempt",
+          checkFailure.getClass().getName());
+      policy.recordFailure(attempt, REASON_CHECK_FAILED);
+      return LoginResult.rejected();
     }
 
     // JS-SEC-123 follow-up: the policy's recordFailure is the audit point of a rejected login and

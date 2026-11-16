@@ -131,8 +131,9 @@ class VaadinSessionRevocationPipelineTest {
     assertEquals(Optional.of("alice"), subjects.currentSubject(String.class),
         "the administrator must not be logged out by revoking somebody else");
     assertEquals(VaadinSessionState.OPEN, adminSession.getState());
-    assertTrue(store.findById(bobRecord.sessionId()).isEmpty(), "the record is removed");
-    assertTrue(store.findById(adminRecord.sessionId()).isPresent());
+    assertEquals(SessionStatus.REVOKED, store.findById(bobRecord.sessionId()).orElseThrow().status(),
+        "the record is kept as REVOKED, so every other node refuses the session (XR09-1)");
+    assertEquals(SessionStatus.ACTIVE, store.findById(adminRecord.sessionId()).orElseThrow().status());
 
     // bob's session is gone without any request of bob
     CurrentInstance.clearAll();
@@ -183,6 +184,56 @@ class VaadinSessionRevocationPipelineTest {
     assertTrue(refused.sessionExpired(), refused.body());
     assertEquals(0, UserView.ACTIONS.get());
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, audit.single(SessionInvalidated.class).reason());
+  }
+
+  @Test
+  @DisplayName("XR09-1: a session revoked on another node before its first request is refused on that request")
+  void revokedElsewhereBeforeTheFirstRequest_firstRequestIsRefused() {
+    // bob has logged in and his record exists, but no request has consulted it on this node
+    // yet. The administrator works on another node: there the revoke finds no live session.
+    VaadinSessionRevocation.untrack(bobSession);
+    pipeline.releaseLock();
+    try {
+      CurrentInstance.clearAll();
+      assertFalse(VaadinSessionRevocation.revoke(bobRecord), "bob's session does not live on the other node");
+    } finally {
+      CurrentInstance.clearAll();
+      pipeline.reacquireLock();
+      VaadinSession.setCurrent(bobSession);
+      VaadinSessionRevocation.track(bobSession);
+    }
+
+    Exchange refused = pipeline.fire(view, "work");
+
+    assertTrue(refused.sessionExpired(), "the first request after the revoke must be refused: " + refused.body());
+    assertEquals(0, UserView.ACTIONS.get(), "the revoked user's RPC must not run");
+    assertEquals(VaadinSessionRevocation.REASON_REVOKED, audit.single(SessionInvalidated.class).reason());
+    assertNotEquals(VaadinSessionState.OPEN, bobSession.getState());
+    assertEquals(Optional.of(SessionStatus.REVOKED),
+        store.findById(bobRecord.sessionId()).map(SessionRecord::status));
+  }
+
+  @Test
+  @DisplayName("XR09-1: revoke keeps a record the store no longer holds as a REVOKED record")
+  void revokeOfAMissingRecord_writesTheRevocation() {
+    store.delete(bobRecord.sessionId());
+    VaadinSessionRevocation.untrack(bobSession);
+    pipeline.releaseLock();
+    try {
+      CurrentInstance.clearAll();
+      VaadinSessionRevocation.revoke(bobRecord);
+    } finally {
+      CurrentInstance.clearAll();
+      pipeline.reacquireLock();
+      VaadinSession.setCurrent(bobSession);
+      VaadinSessionRevocation.track(bobSession);
+    }
+
+    assertTrue(pipeline.fire(view, "work").sessionExpired(),
+        "a revoke must leave a revocation behind, even for a record the store had lost");
+    SessionRecord kept = store.findById(bobRecord.sessionId()).orElseThrow();
+    assertEquals(SessionStatus.REVOKED, kept.status());
+    assertEquals(bobRecord.subjectId(), kept.subjectId());
   }
 
   @Test
@@ -251,7 +302,8 @@ class VaadinSessionRevocationPipelineTest {
     boolean live = VaadinSessionRevocation.revoke(byReference);
 
     assertTrue(live, "the session is found by the reference of its live id");
-    assertTrue(store.findById(byReference.sessionId()).isEmpty(), "the record is removed");
+    assertEquals(SessionStatus.REVOKED, store.findById(byReference.sessionId()).orElseThrow().status(),
+        "the record is kept as REVOKED (XR09-1)");
     assertEquals(Optional.of("alice"), subjects.currentSubject(String.class));
     CurrentInstance.clearAll();
     pipeline.reacquireLock();

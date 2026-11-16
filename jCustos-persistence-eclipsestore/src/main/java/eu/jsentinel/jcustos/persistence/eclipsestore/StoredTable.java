@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * A persistent map whose mutations write the changed part only (JS-SEC-125,
@@ -116,6 +117,7 @@ final class StoredTable<K, V> {
   private transient Instant noDeadlineBefore;
   private transient long evictions;
   private transient boolean evictionLogDue;
+  private transient long refusals;
 
   @SuppressWarnings("unchecked")
   StoredTable() {
@@ -346,20 +348,59 @@ final class StoredTable<K, V> {
    * @return number of entries that were evicted although they were not dead
    */
   int makeRoomFor(K incoming, int maxEntries, Instant now) {
-    if (index.size() < maxEntries || index.containsKey(incoming)) {
+    if (hasRoomFor(incoming, maxEntries)) {
       return 0;
     }
     dropDead(now);
+    int evicted = evictEldest(incoming, maxEntries, value -> true);
+    recordEvictions(evicted);
+    return evicted;
+  }
+
+  /**
+   * @return {@code true} when {@code key} can be stored in a table bounded to
+   *     {@code maxEntries}: the key is known, or the table is below the bound
+   */
+  boolean hasRoomFor(K key, int maxEntries) {
+    return index.size() < maxEntries || index.containsKey(key);
+  }
+
+  /**
+   * Makes room for {@code incoming} in a table whose entries are not all equally expendable
+   * (JS-SEC-131, CWE-613): nothing happens for a known key or below the bound; otherwise the
+   * entries {@code evictable} accepts are evicted from the head of the iteration order until
+   * the table is below the bound. An entry the predicate refuses is never evicted, so the table
+   * can stay full - {@link #hasRoomFor} tells the caller, who has to refuse the new key then.
+   * The evictions are not counted; report them with {@link #recordEvictions(int)}.
+   *
+   * @return number of entries evicted
+   */
+  int evictEldest(K incoming, int maxEntries, Predicate<? super V> evictable) {
     int evicted = 0;
-    while (index.size() >= maxEntries) {
-      remove(eldestKey());
-      evicted++;
+    Iterator<Map.Entry<K, Slot<V>>> entries = index.entrySet().iterator();
+    while (!hasRoomFor(incoming, maxEntries) && entries.hasNext()) {
+      Map.Entry<K, Slot<V>> entry = entries.next();
+      Slot<V> slot = entry.getValue();
+      if (evictable.test(slot.value)) {
+        entries.remove();
+        HashMap<K, Slot<V>> segment = segment(slot.segment);
+        segment.remove(entry.getKey());
+        changed.accept(segment);
+        evicted++;
+      }
     }
+    return evicted;
+  }
+
+  /**
+   * Counts {@code evicted} entries that were evicted although they were not dead and decides
+   * {@link #evictionLogDue()} for the operation that evicted them.
+   */
+  void recordEvictions(int evicted) {
     long before = evictions;
     evictions += evicted;
     evictionLogDue = evicted > 0
         && (before == 0 || before / EVICTIONS_PER_LOG_LINE != evictions / EVICTIONS_PER_LOG_LINE);
-    return evicted;
   }
 
   /**
@@ -369,5 +410,16 @@ final class StoredTable<K, V> {
    */
   boolean evictionLogDue() {
     return evictionLogDue;
+  }
+
+  /**
+   * Counts a new key the caller refused because the table is full of entries it must keep.
+   *
+   * @return {@code true} for the first refusal since the storage was opened and for every
+   *     further {@value #EVICTIONS_PER_LOG_LINE}th - the moments at which the caller logs
+   */
+  boolean recordRefusal() {
+    refusals++;
+    return refusals == 1 || refusals % EVICTIONS_PER_LOG_LINE == 0;
   }
 }

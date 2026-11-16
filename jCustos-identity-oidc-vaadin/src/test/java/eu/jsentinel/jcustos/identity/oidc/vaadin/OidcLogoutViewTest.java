@@ -35,6 +35,7 @@ import eu.jsentinel.jcustos.test.FakeAuthenticationService;
 import eu.jsentinel.jcustos.test.RecordingAuditSink;
 import com.vaadin.browserless.internal.MockVaadin;
 import com.vaadin.browserless.internal.Routes;
+import com.vaadin.browserless.mocks.MockRequest;
 import com.vaadin.browserless.mocks.MockService;
 import com.vaadin.browserless.mocks.MockVaadinServlet;
 import com.vaadin.browserless.mocks.MockedUI;
@@ -43,13 +44,17 @@ import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.component.internal.PendingJavaScriptInvocation;
 import com.vaadin.flow.function.DeploymentConfiguration;
+import com.vaadin.flow.internal.CurrentInstance;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.server.ServiceException;
 import com.vaadin.flow.server.VaadinRequest;
 import com.vaadin.flow.server.VaadinServletContext;
+import com.vaadin.flow.server.VaadinServletRequest;
 import com.vaadin.flow.server.VaadinServletService;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.VaadinSessionState;
+import com.vaadin.flow.server.WrappedHttpSession;
+import jakarta.servlet.http.HttpSession;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -178,6 +183,27 @@ class OidcLogoutViewTest {
     assertLoggedOutLocally();
     assertEquals("/login", redirectLocation(), "the default local target is the login route");
     assertEquals("alice", audit.single(LogoutPerformed.class).subjectId());
+  }
+
+  @Test
+  @DisplayName("XR09-4: an application under a context path is sent to its own login route")
+  void defaultLocalTarget_carriesTheContextPath() {
+    LogoutView.endSessionEndpoint = () -> {
+      throw new IllegalStateException("the provider publishes no end_session_endpoint");
+    };
+    VaadinRequest request = VaadinRequest.getCurrent();
+    HttpSession httpSession = ((WrappedHttpSession) session.getSession()).getHttpSession();
+    CurrentInstance.set(VaadinRequest.class, new VaadinServletRequest(
+        new ContextPathRequest(httpSession, "/shop"), (VaadinServletService) session.getService()));
+    try {
+      ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+    } finally {
+      CurrentInstance.set(VaadinRequest.class, request);
+    }
+
+    assertLoggedOutLocally();
+    assertEquals("/shop/login", redirectLocation(),
+        "the login route lives below the context path the application is deployed under");
   }
 
   @Test
@@ -377,6 +403,20 @@ class OidcLogoutViewTest {
 
   @Route("sa47/home")
   public static class HomeView extends Div {
+  }
+
+  /** The servlet request of an application deployed under a context path. */
+  private static final class ContextPathRequest extends MockRequest {
+    private final String contextPath;
+
+    ContextPathRequest(HttpSession session, String contextPath) {
+      super(session);
+      this.contextPath = contextPath;
+    }
+
+    @Override public String getContextPath() {
+      return contextPath;
+    }
   }
 
   /** The real servlet service, creating plain sessions instead of self-recreating ones. */

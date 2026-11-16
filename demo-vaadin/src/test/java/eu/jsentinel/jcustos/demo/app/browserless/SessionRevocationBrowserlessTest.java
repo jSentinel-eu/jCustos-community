@@ -158,8 +158,9 @@ class SessionRevocationBrowserlessTest extends BrowserlessTest {
         "Revoke must end the live session at once, not on its next request");
     assertNull(inSession(bobSession, () -> bobSession.getAttribute(MyUser.class)),
         "bob's subject is dropped");
-    assertTrue(DemoSessionStoreProvider.sessionStore().findAll().isEmpty(),
-        "the record is removed, so every other node refuses the session on its next request");
+    assertEquals(List.of(SessionStatus.REVOKED),
+        DemoSessionStoreProvider.sessionStore().findAll().stream().map(r -> r.status()).toList(),
+        "the record is kept as REVOKED, so every other node refuses the session on its next request");
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
     assertEquals("7", invalidated.subjectId(), "the audit names the revoked subject");

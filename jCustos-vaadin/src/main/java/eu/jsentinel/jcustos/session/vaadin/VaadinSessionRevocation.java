@@ -62,11 +62,19 @@ import static java.util.Objects.requireNonNull;
  *       with a request is ended as soon as that request releases the session lock.</li>
  *   <li><strong>On every other node, on the next request.</strong> When a store is
  *       registered through {@link #useSessionStore(SessionStore)}, the listener looks up the
- *       record of the current session on every client message and navigation. A record with
- *       the status {@link SessionStatus#REVOKED}, or a record that was there on an earlier
- *       request and is gone now, ends the session in the same way and the request is
- *       answered with Vaadin's session-expired message.</li>
+ *       record of the current session on every client message, download, upload and
+ *       navigation. A record with the status {@link SessionStatus#REVOKED}, or a record that
+ *       was there on an earlier request and is gone now, ends the session in the same way and
+ *       the request is answered with Vaadin's session-expired message.</li>
  * </ul>
+ *
+ * <p><strong>A revocation is a record, not a deletion (JS-SEC-131, CWE-613).</strong>
+ * {@link #revoke(SessionRecord)} marks the record {@link SessionStatus#REVOKED} and keeps it.
+ * Until the exit review of 00.84.00 it deleted the record, and a missing record ends a session
+ * only on a node that saw the record on an earlier request: a session revoked before its first
+ * request on another node, or after that node restarted, lived on. The {@link SessionStore}
+ * contract keeps terminal records until their retention ends, and the stores of this release
+ * do not evict a revoked record to make room for a new session.
  *
  * <p><strong>Records under a reference (JS-SEC-117, CWE-522).</strong> The HTTP session id is
  * the session cookie; a store should not hold it. Record sessions under
@@ -136,25 +144,59 @@ public final class VaadinSessionRevocation {
     return Optional.ofNullable(STORE.get());
   }
 
-  /** Test helper: forgets the registered store and every tracked session. */
-  public static void reset() {
+  /**
+   * Test helper of this package: forgets the registered store and every tracked session.
+   * Package-private since the exit review of 00.84.00 (XR09-5) - as a public method it let
+   * any code switch the check off for the whole process. Tests elsewhere call
+   * {@link #useSessionStore(SessionStore) useSessionStore(null)}.
+   */
+  static void reset() {
     STORE.set(null);
     LIVE.clear();
   }
 
   /**
-   * Revokes the session a record describes: removes the record from the registered store, so
-   * other nodes refuse the session on its next request, and ends the live session on this
-   * node. This is the default revoke of the session-management route.
+   * Revokes the session a record describes: marks the record {@link SessionStatus#REVOKED} in
+   * the registered store, so every other node refuses the session on its next request - also
+   * on its first - and ends the live session on this node. The record that is kept is the one
+   * the store holds under the id, or {@code record} when the store holds none; its
+   * {@link SessionRecord#lastActivityAt() last activity} becomes the instant of the
+   * revocation, which anchors the retention of the terminal record. The live session on this
+   * node is ended even when the store fails; the store's exception is rethrown afterwards.
    *
    * @param record the session to revoke; non-null
    * @return {@code true} when a live session on this node was found and its termination
    *     scheduled
+   * @throws RuntimeException the exception of the store, after the live session was ended
    */
   public static boolean revoke(SessionRecord record) {
     requireNonNull(record, "record must not be null");
-    findSessionStore().ifPresent(store -> store.delete(record.sessionId()));
-    return terminate(record.sessionId(), record.subjectId().value());
+    RuntimeException storeFailure = null;
+    try {
+      findSessionStore().ifPresent(store -> markRevoked(store, record));
+    } catch (RuntimeException failure) {
+      storeFailure = failure;
+    }
+    boolean live = terminate(record.sessionId(), record.subjectId().value());
+    if (storeFailure != null) {
+      // JS-SEC-117 (CWE-532): the message of a store exception can name the key it was asked for
+      HasLogger.staticLogger().warn("Session revocation: the SessionStore could not mark session {}"
+          + " as revoked ({}); other nodes keep serving it until it ends", SessionRef.of(
+          record.sessionId().value()), storeFailure.getClass().getName());
+      throw storeFailure;
+    }
+    return live;
+  }
+
+  /** JS-SEC-131 (CWE-613): the store side of a revocation - a REVOKED record, never a gap. */
+  private static void markRevoked(SessionStore store, SessionRecord record) {
+    SessionRecord current = store.findById(record.sessionId()).orElse(record);
+    Instant now = Instant.now();
+    SessionRecord revoked = current.withStatus(SessionStatus.REVOKED);
+    if (now.isAfter(revoked.lastActivityAt())) {
+      revoked = revoked.withLastActivityAt(now);
+    }
+    store.save(revoked);
   }
 
   /**
@@ -274,8 +316,9 @@ public final class VaadinSessionRevocation {
       }
     } catch (RuntimeException storeFailure) {
       // An unreachable store must not log every user out; lifetime and drift checks still run.
+      // JS-SEC-117 (CWE-532): the class only - the message can name the id the store was asked for.
       HasLogger.staticLogger().warn("Session revocation check skipped, the SessionStore failed: {}",
-          storeFailure.toString());
+          storeFailure.getClass().getName());
       return false;
     }
     if (record.isPresent()) {

@@ -84,8 +84,22 @@ import java.time.LocalDateTime;
  * session id is <em>always</em> rotated (session-fixation mitigation, secure by default —
  * JS-SEC-003 / CWE-384), the configured {@link SessionPolicy} observes the login with the id
  * that lives on (JS-SEC-060), the rotation is audited, {@link #onSessionRotated(String, String)}
- * is called and the security-version snapshot is recorded. Failures, a missing Vaadin
- * session or a missing SPI are logged and never block the login flow.
+ * is called and the security-version snapshot is recorded. Failures of the policy, the hook,
+ * the audit or a missing SPI are logged and do not block the login. A session id that cannot
+ * be rotated does (exit review XR09-2, CWE-384): when the session has an HTTP session id and
+ * that id did not change, the login is undone - subject, snapshot and token credential
+ * cleared, {@code SessionInvalidated} audited with the reason
+ * {@link LoginSessionRotation#REASON_ROTATION_FAILED}, the session closed and the HTTP session
+ * invalidated - and {@link #reactOnFailedLogin()} is called. Until then the view warned and
+ * continued on the pre-login id. A login sent over a WebSocket-only push channel
+ * ({@code Transport.WEBSOCKET}) cannot rotate the id and is therefore refused; use
+ * {@code Transport.WEBSOCKET_XHR}, the Vaadin default.
+ * <p>
+ * <strong>A failing credential check (exit review XR09-6, CWE-755).</strong> Only
+ * {@link CredentialVerificationUnavailableException} means "no verdict": the attempt is given
+ * back and the user is asked to try again. Any other exception of {@link #checkCredentials()}
+ * counts as a failed attempt and is answered exactly like wrong credentials, so a check that
+ * can be made to throw cannot be used for unlimited guesses.
  */
 public abstract class LoginView
     extends Composite<HorizontalLayout>
@@ -245,11 +259,21 @@ public abstract class LoginView
       logger().warn("Login could not be checked right now .. {}", LocalDateTime.now());
       reactOnVerificationUnavailable();
       return;
-    } catch (RuntimeException noVerdict) {
-      // Any other exception says nothing about the credentials either: release the
-      // reservation (JS-SEC-123) and let Vaadin's error handler see the exception.
-      abandon(policy, attempt);
-      throw noVerdict;
+    } catch (RuntimeException checkFailure) {
+      // XR09-6 (CWE-755): only the exception above means "no verdict". Anything else counts
+      // as a failed attempt - otherwise input that makes the check throw would buy unlimited
+      // guesses - and the user sees what wrong credentials show. The class only: the message
+      // may carry what was entered.
+      logger().warn("Login check failed with {}; counted as a failed attempt",
+          checkFailure.getClass().getName());
+      // a check that threw half-way may have bound the subject already
+      try {
+        clearBoundIdentity();
+      } catch (RuntimeException clearFailure) {
+        logger().warn("The identity of a failed login check could not be cleared: {}",
+            clearFailure.getClass().getName());
+      }
+      isValid = false;
     }
 
     if (!isValid) {
@@ -293,8 +317,24 @@ public abstract class LoginView
     // JS-SEC-003 / JS-SEC-060 / JS-SEC-146 (CWE-384): the post-login sequence - session id
     // rotation, SessionPolicy.onLogin, rotation audit, onSessionRotated hook, security
     // version snapshot - lives in LoginSessionRotation, shared with the OAuth2 callback.
-    // A rotation the transport refuses is logged there and the login continues.
-    LoginSessionRotation.afterLogin(this::onSessionRotated);
+    LoginSessionRotation.Outcome rotation = LoginSessionRotation.afterLogin(this::onSessionRotated);
+    if (rotation.previousSessionId() != null && !rotation.rotated()) {
+      // XR09-2 (CWE-384): fail closed, as the OAuth2 callback does - a subject bound to a
+      // session id an attacker may have planted is worse than a failed login. A Vaadin
+      // session without an HTTP session id has no id that could have been planted.
+      logger().warn("Login refused: the session id could not be rotated after the login, so the "
+          + "login would have stayed on its pre-login session id.");
+      VaadinSessionRevocation.endCurrentSession(LoginSessionRotation.REASON_ROTATION_FAILED);
+      try {
+        reactOnFailedLogin();
+      } catch (RuntimeException reactionFailure) {
+        // the session of this UI has just been ended; a reaction that cannot render in it
+        // must not turn the refusal into an error page
+        logger().warn("reactOnFailedLogin failed after the login was undone: {}",
+            reactionFailure.getClass().getName());
+      }
+      return;
+    }
     navigateToApp();
   }
 
@@ -334,18 +374,23 @@ public abstract class LoginView
       if (VaadinSessionRevocation.endCurrentSession(REASON_LOGIN_NOT_CONFIRMED)) {
         return;
       }
-      Class<?> subjectType = JCustosServiceResolver
-          .<Object, Object>authenticationService()
-          .subjectType();
-      if (subjectType != null) {
-        SubjectStores.findSubjectStore()
-            .ifPresent(store -> store.deleteCurrentSubject(subjectType));
-      }
-      JCustosServiceResolver.findTokenCredentialStore().ifPresent(TokenCredentialStore::clear);
+      clearBoundIdentity();
     } catch (RuntimeException undoFailure) {
       logger().warn("A login refused by the LoginAttemptPolicy could not be undone "
           + "completely: {}", undoFailure.toString());
     }
+  }
+
+  /** Removes the subject and the token credential bound to the current session or thread. */
+  private static void clearBoundIdentity() {
+    Class<?> subjectType = JCustosServiceResolver
+        .<Object, Object>authenticationService()
+        .subjectType();
+    if (subjectType != null) {
+      SubjectStores.findSubjectStore()
+          .ifPresent(store -> store.deleteCurrentSubject(subjectType));
+    }
+    JCustosServiceResolver.findTokenCredentialStore().ifPresent(TokenCredentialStore::clear);
   }
 
   /**

@@ -65,11 +65,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ul>
  *   <li>as a {@link BeforeEnterListener} on every navigation - this covers page loads;</li>
  *   <li>as a {@link RequestHandler} on every UIDL request sent over XHR - button clicks,
- *       grid paging, {@code @ClientCallable} (JS-SEC-082, CWE-613);</li>
+ *       grid paging, {@code @ClientCallable} (JS-SEC-082, CWE-613) - and on every download,
+ *       upload and {@code StreamResource} request ({@code DownloadHandler},
+ *       {@code UploadHandler}, {@code StreamResource}, {@code StreamReceiver}; exit review
+ *       XR03). Heartbeats, page loads and static resources are not checked;</li>
  *   <li>as a {@link VaadinRequestInterceptor} on every client message that travels through
  *       the push channel, which is how {@code Transport.WEBSOCKET} delivers them and which
  *       never reaches a request handler (JS-SEC-155, CWE-613).</li>
  * </ul>
+ *
+ * <p>A request handler an application registers itself through
+ * {@code ServiceInitEvent.addRequestHandler} runs <em>before</em> this one when it is added
+ * later, and a plain request outside the stream paths is not checked; such a handler checks
+ * the session itself.
  *
  * <p>The navigation listener runs at {@link Integer#MAX_VALUE} priority so it fires
  * <em>before</em> the
@@ -100,7 +108,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * previous value, so a polling view no longer keeps an unattended session alive. Vaadin's
  * {@link VaadinSession#getLastRequestTimestamp() last request timestamp} is not used: it is
  * stamped for polls as well. A message that carries a poll <em>and</em> a user interaction
- * counts as a poll; the next interaction advances the activity again.
+ * counts as a poll; the next interaction advances the activity again. A download or upload is
+ * checked but does not advance the activity either: an image or a chart served as a
+ * {@code StreamResource} is fetched by the browser on its own, after every poll that
+ * refreshes it.
+ *
+ * <p><strong>Failures (exit review XR05, CWE-636).</strong> A check that throws on the XHR
+ * path stops the request: the exception reaches Vaadin's error handling and the RPC is not
+ * executed. On the push channel the interceptor would let the message through, so there the
+ * session is ended instead. A {@code SessionStore} that cannot be read is the documented
+ * exception: the revocation check is skipped with a warning and the lifetime check still
+ * runs (JS-SEC-131).
  *
  * <p>The listener is loaded via
  * {@code META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener}.
@@ -177,7 +195,7 @@ public class SessionLifetimeListener
     if (session == null) {
       return;
     }
-    endIfDue(session, VaadinRequest.getCurrent()).ifPresent(ending -> {
+    endIfDue(session, VaadinRequest.getCurrent(), true).ifPresent(ending -> {
       if (ending.revoked()) {
         // JS-SEC-131 (CWE-613): a revoked session does not live on as an anonymous one.
         SessionTermination.closeAndInvalidate(session);
@@ -187,15 +205,17 @@ public class SessionLifetimeListener
   }
 
   /**
-   * JS-SEC-082 / JS-SEC-155 (CWE-613, CWE-667): enforcement per UIDL request. Button clicks,
-   * grid paging and {@code @ClientCallable} calls travel through the UIDL handler and never
-   * reach {@link #beforeEnter(BeforeEnterEvent)}. This handler is registered through
+   * JS-SEC-082 / JS-SEC-155 / XR03 (CWE-613, CWE-667): enforcement per request. Button
+   * clicks, grid paging and {@code @ClientCallable} calls travel through the UIDL handler,
+   * downloads and uploads through Vaadin's stream handler; neither reaches
+   * {@link #beforeEnter(BeforeEnterEvent)}. This handler is registered through
    * {@link ServiceInitEvent#addRequestHandler} and therefore runs ahead of the framework
    * handlers. Vaadin calls it <em>without</em> the session lock, so it takes the lock for
    * the check. For an expired or revoked session it drops the subject, audits, closes the
-   * Vaadin session, invalidates the HTTP session and <em>consumes</em> the request: the
-   * response is Vaadin's session-expired message and the UIDL handler never executes the
-   * RPC invocations the request carries.
+   * Vaadin session, invalidates the HTTP session and <em>consumes</em> the request: a client
+   * message is answered with Vaadin's session-expired message and its RPC invocations are
+   * never executed; a download or upload is answered with {@code 403} and never served.
+   * Heartbeats, page loads and static resources pass unchecked.
    *
    * @return {@code true} when the session was ended and the request answered
    * @since 00.84.00
@@ -203,18 +223,20 @@ public class SessionLifetimeListener
   @Override
   public boolean handleRequest(VaadinSession session, VaadinRequest request, VaadinResponse response)
       throws IOException {
-    if (session == null || !SessionTermination.isUidlRequest(request)) {
+    if (session == null || !SessionTermination.isCheckedRequest(request)) {
       return false;
     }
+    // XR03: a download or upload is checked, but it is no user activity (see the class doc)
+    boolean activity = !SessionTermination.isStreamRequest(request);
     boolean ended = SessionTermination.underLock(session, Boolean.FALSE, locked -> {
-      Optional<Ending> ending = endIfDue(locked, request);
+      Optional<Ending> ending = endIfDue(locked, request, activity);
       ending.ifPresent(due -> SessionTermination.closeInvalidateAndDestroy(locked));
       return ending.isPresent();
     });
     if (!ended) {
       return false;
     }
-    SessionTermination.writeSessionExpired(request, response);
+    SessionTermination.answerEnded(request, response);
     return true;
   }
 
@@ -225,26 +247,40 @@ public class SessionLifetimeListener
    * but {@code VaadinService.requestStart} - and with it every request interceptor - is. For
    * an expired or revoked session the interceptor ends the session before the push handler
    * looks it up, so the handler finds none, sends the session-expired message and drops the
-   * RPC invocations.
+   * RPC invocations. A check that fails with an exception ends the session the same way
+   * (exit review XR05): the push handler would otherwise execute the message.
    *
    * @since 00.84.00
    */
   @Override
   public void requestStart(VaadinRequest request, VaadinResponse response) {
+    Optional<VaadinSession> pushSession;
     try {
       if (request == null || !SessionTermination.isPushMessage(request)) {
         return;
       }
-      SessionTermination.sessionOf(request).ifPresent(session ->
-          SessionTermination.underLock(session, Boolean.FALSE, locked -> {
-            Optional<Ending> ending = endIfDue(locked, request);
-            // the request will end without a session, so nobody else destroys this one
-            ending.ifPresent(due -> SessionTermination.closeInvalidateAndDestroy(locked));
-            return ending.isPresent();
-          }));
-    } catch (RuntimeException checkFailure) {
-      logger().warn("Session check for a push message failed: {}", checkFailure.toString());
+      pushSession = SessionTermination.sessionOf(request);
+    } catch (RuntimeException unreadableRequest) {
+      logger().warn("Session check for a push message skipped, the request could not be read: {}",
+          unreadableRequest.getClass().getName());
+      return;
     }
+    pushSession.ifPresent(session -> {
+      try {
+        SessionTermination.underLock(session, Boolean.FALSE, locked -> {
+          Optional<Ending> ending = endIfDue(locked, request, true);
+          // the request will end without a session, so nobody else destroys this one
+          ending.ifPresent(due -> SessionTermination.closeInvalidateAndDestroy(locked));
+          return ending.isPresent();
+        });
+      } catch (RuntimeException checkFailure) {
+        // XR05 (CWE-636): fail closed, as the XHR path does - the class only, the message may
+        // carry what the failing component was asked for
+        logger().warn("Session check for a push message failed ({}); the session is ended",
+            checkFailure.getClass().getName());
+        SessionTermination.endAfterFailedCheck(session);
+      }
+    });
   }
 
   @Override
@@ -263,8 +299,8 @@ public class SessionLifetimeListener
    * store says the session is over. Closing the session is left to the caller, because it
    * differs between the entry points.
    */
-  private Optional<Ending> endIfDue(VaadinSession session, VaadinRequest request) {
-    Optional<Ending> ending = check(session, request);
+  private Optional<Ending> endIfDue(VaadinSession session, VaadinRequest request, boolean activity) {
+    Optional<Ending> ending = check(session, request, activity);
     ending.ifPresent(due -> enforce(session, due));
     return ending;
   }
@@ -285,10 +321,10 @@ public class SessionLifetimeListener
 
   /**
    * Evaluates revocation and lifetime for the bound subject. Advances the last-activity
-   * attribute for an active session and returns empty; returns the ending to enforce
-   * otherwise. The caller holds the session lock.
+   * attribute for an active session - unless {@code activity} is {@code false} - and returns
+   * empty; returns the ending to enforce otherwise. The caller holds the session lock.
    */
-  private Optional<Ending> check(VaadinSession session, VaadinRequest request) {
+  private Optional<Ending> check(VaadinSession session, VaadinRequest request, boolean activity) {
     Optional<SubjectStore> store = SubjectStores.findSubjectStore();
     if (store.isEmpty()) {
       return Optional.empty();
@@ -299,7 +335,9 @@ public class SessionLifetimeListener
     if (currentSubject.isEmpty()) {
       // Nothing to expire, but the round-trip is activity: a login later in this session
       // must not inherit a stamp from before the anonymous browsing.
-      recordActivity(session, request, now);
+      if (activity) {
+        recordActivity(session, request, now);
+      }
       return Optional.empty();
     }
     String subjectId = subjectIdOf(currentSubject.get());
@@ -332,7 +370,9 @@ public class SessionLifetimeListener
 
     return switch (decision) {
       case SessionPolicyDecision.Active ignored -> {
-        recordActivity(session, request, now);
+        if (activity) {
+          recordActivity(session, request, now);
+        }
         yield Optional.empty();
       }
       case SessionPolicyDecision.IdleTimeout ignored ->
@@ -406,8 +446,9 @@ public class SessionLifetimeListener
    * JS-SEC-155 (CWE-384): start-up diagnostic for {@code @Push(transport = Transport.WEBSOCKET)}.
    * The lifetime, revocation and drift checks run for WebSocket messages through the request
    * interceptor, but an HTTP session id cannot be rotated over a WebSocket frame - there is
-   * no response that could carry {@code Set-Cookie}. A login that arrives through the push
-   * channel keeps its pre-login session id.
+   * no response that could carry {@code Set-Cookie}. {@code LoginView} and the OAuth2
+   * callback therefore refuse a login that arrives through the push channel (exit review
+   * XR09-2); until then it kept its pre-login session id.
    *
    * @return {@code true} when the transport is WebSocket-only
    */
@@ -419,9 +460,9 @@ public class SessionLifetimeListener
       logger().warn("Push transport WEBSOCKET is active. Session lifetime, revocation and "
           + "security-version checks run per client message through the request interceptor, but "
           + "the HTTP session id cannot be rotated over a WebSocket frame (no Set-Cookie): a login "
-          + "that arrives through the push channel keeps its pre-login session id and loses the "
-          + "session-fixation protection. Use Transport.WEBSOCKET_XHR (the Vaadin default), which "
-          + "sends client messages over XHR.");
+          + "that arrives through the push channel is refused, because it would keep its pre-login "
+          + "session id. Use Transport.WEBSOCKET_XHR (the Vaadin default), which sends client "
+          + "messages over XHR.");
     }
     return true;
   }

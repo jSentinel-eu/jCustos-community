@@ -54,11 +54,13 @@ import static java.util.Objects.requireNonNull;
  *
  * <p><strong>What Revoke does (JS-SEC-131, CWE-613).</strong> The view
  * only calls the callback; whether the session ends is the callback's
- * business. Use {@code VaadinSessionRevocation::revoke}: it removes the
- * record from the store registered with
+ * business. Use {@code VaadinSessionRevocation::revoke}: it marks the
+ * record {@code REVOKED} in the store registered with
  * {@code VaadinSessionRevocation.useSessionStore(...)}, ends the live
  * session on this node at once and lets every other node refuse the
- * session on its next request. A callback that only edits the store ends
+ * session on its next request - also on its first. The row stays in the
+ * grid with the status {@code REVOKED} until the store's retention
+ * removes it. A callback that only edits the store ends
  * nothing unless that store is registered there. Do <em>not</em> wire
  * {@code LogoutService.logout(subjectId, CurrentSession)}: "current
  * session" is the session of whoever clicks, so it logs the administrator

@@ -359,11 +359,12 @@ ended B's session, `sessionsOf(B)` did not know it, and drift detection compared
 `JCustosVersion`.
 
 `register` now refreshes only a record that is still the same subject's `ACTIVE` session.
-Anything else — another subject, or a record that is `EXPIRED` or `REVOKED` — is replaced by a
+Anything else — another subject, or a record that is `EXPIRED` — is replaced by a
 fresh `ACTIVE` record for the registering subject with its own version snapshot. Verified:
 after `register(A, sid)` and `register(B, sid)`, `sessionsOf(B)` lists the id, `sessionsOf(A)`
 does not, the record carries B's version and `clearAll(A)` leaves B's session alone; a record
-saved as `EXPIRED` or `REVOKED` is `ACTIVE` and listed again after the next `register`.
+saved as `EXPIRED` is `ACTIVE` and listed again after the next `register`; a `REVOKED` record stays
+`REVOKED` (exit review XR09-7).
 
 ## A compromised credential cannot return to ACTIVE without a new secret (ER09, JS-SEC-076, CWE-284)
 
@@ -1082,8 +1083,8 @@ login. The post-login sequence — id rotation, `SessionPolicy.onLogin`, rotatio
 `LoginSessionRotation.afterLogin(...)`, which `LoginView` and the callback view both call. The
 callback view fails closed: if the id cannot be rotated, the login is undone, `SessionInvalidated`
 is audited with the reason `RotationAfterLoginFailed`, the session is ended and the view forwards to
-its error target. `LoginView` keeps its "warn and continue" behaviour, with one correction: a
-rotation that leaves the id unchanged is no longer reported and audited as a rotation.
+its error target. `LoginView` fails closed in the same way and calls `reactOnFailedLogin()` (exit review XR09-2); a
+rotation that leaves the id unchanged is not reported and audited as a rotation.
 **Consumers:** callback views that do not extend the base class must call
 `LoginSessionRotation.afterLogin()` themselves.
 
@@ -1455,8 +1456,11 @@ operation is one transaction. The same 2 000 failed logins write under 1 MB, 10 
 
 The stores that are filled by requests are bounded to 100 000 entries each
 (`EclipseStoreJCustosStorage.DEFAULT_MAX_ENTRIES_PER_STORE`, configurable through `openAt(Path,
-int)` and `JCustosStorageFactory.openAt(Path, StorageLayout, int)`): sessions, remember-me tokens
-and refresh tokens drop expired entries first and then the entry stored first; password-reset and
+int)` and `JCustosStorageFactory.openAt(Path, StorageLayout, int)`): remember-me tokens and
+refresh tokens drop expired entries first and then the entry stored first; sessions drop the oldest
+record that is `EXPIRED` or was revoked more than 30 days ago, then the oldest `ACTIVE` one, never a
+record revoked within those 30 days — a store full of those refuses `save` with
+`persistence/session-store-capacity-exceeded` (exit review XR01); password-reset and
 email-verification tokens drop consumed and expired records and then refuse `save` with
 `…-token-store-capacity-exceeded`, like their in-memory counterparts; rate-limit keys drop buckets
 that left every window applied to them and then the key used least recently. Not bounded, by intent:
@@ -1467,8 +1471,9 @@ states, API keys and the refresh-token "invalid before" marks.
 build is converted when it is first opened (`persistence/storage-layout-migrated` in the log) and
 keeps every record; afterwards a release before 00.84.00 can no longer open it — back up the
 directory before the upgrade. Installations with more than 100 000 concurrent sessions or live
-tokens raise the bound; at the bound the oldest session record is dropped, which the Vaadin
-revocation check treats as a revoked session.
+tokens raise the bound; at the bound the oldest expired, otherwise the oldest active session record
+is dropped (the Vaadin revocation check treats a dropped record it had seen as a revoked session);
+revoked records are kept for 30 days.
 
 ## Backups and existing storage directories are owner-only; a foreign storage is refused instead of replaced (SA36, JS-SEC-136, CWE-276, CWE-530, CWE-732, CWE-665, CWE-754)
 
@@ -1849,6 +1854,78 @@ skill's POM snippet carries the same Jetty stanza. **Consumers:** start `demo-va
 switch to get the old demo accounts, or create the administrator through `/setup`; pass
 `-Djcustos.demo.http.host` to reach a demo from another machine; the alias `-Djetty.port` no longer
 sets the port.
+
+## The Eclipse-Store session store keeps revoked sessions at its bound (addition to SA31, JS-SEC-131, CWE-613, CWE-770)
+
+At its bound of 100 000 records the store dropped the record stored first, whatever its status, and
+it never dropped expired records first. A revoked session whose record was the oldest therefore came
+back on every node that had not seen the record, after a restart above all. A new session now makes
+room by dropping the oldest record that is `EXPIRED`, or that was revoked more than 30 days ago, and
+only then the oldest `ACTIVE` one. A revoked record within those 30 days is never dropped; a store
+full of them refuses the new session with `persistence/session-store-capacity-exceeded` and logs an
+error. **Consumers:** a `SessionStore.save` of a new session can now throw `IllegalStateException`
+when the store is full of recent revocations; raise the bound or let a `SweepingSessionStore` retire
+old records.
+
+## Downloads, uploads and stream resources are checked like every other request (addition to SA31 and SA55, JS-SEC-131, JS-SEC-155, CWE-613)
+
+The per-request checks of `SessionLifetimeListener` and `JCustosVersionEnforcerListener` returned
+early for everything but UIDL requests, so a `DownloadHandler`, `UploadHandler` or `StreamResource`
+kept serving a session past its idle timeout, a session revoked on another node and a session whose
+roles had been withdrawn. Every request for a path of Vaadin's stream handler is now checked,
+whatever request type it names, and so is every other typed request except heartbeat, bootstrap,
+push (checked by the interceptor) and static files. An ended session's download or upload is
+answered with `403 Session expired`, uncached, and the handler never runs. **Consumers:** downloads
+do not count as activity for the idle timeout; request handlers an application registers itself
+still check the session themselves.
+
+## A failing check on the push channel ends the session (addition to SA31 and SA55, JS-SEC-131, JS-SEC-155, CWE-636)
+
+On the push channel the lifetime and drift checks run in a request interceptor; a check that threw
+was logged and the message was executed, while the same exception stops an XHR request. Now the
+identity is cleared and the session closed, invalidated and destroyed, so the push handler drops the
+message. A `SessionStore` that cannot be read still only skips the revocation check, as before.
+**Consumers:** a broken session policy or security-version store logs out WebSocket-only push users
+at their next message.
+
+## Revoke leaves a revoked record, and registering cannot revive it (addition to SA31, JS-SEC-131, CWE-613, CWE-367)
+
+`VaadinSessionRevocation.revoke` deleted the record, and a missing record ends a session only on a
+node that saw it earlier, so a session revoked before its first request on another node lived on.
+`revoke` now marks the record `REVOKED`, with the revocation instant as its last activity, and ends
+the local session even when the store fails; `SessionManagementContext` revokes the same way.
+`StoreBackedSubjectSessionRegistry.register` no longer turns a `REVOKED` record back into an
+`ACTIVE` one, and its mutating methods are serialised. `VaadinSessionRevocation.reset()` is no
+longer public. **Consumers:** revoked rows stay visible in `SessionManagementView` as `REVOKED`
+until retention removes them; tests outside the package call `useSessionStore(null)` instead of
+`reset()`.
+
+## A login whose session id cannot be rotated is refused; rotation failures log no session id (addition to SA46 and SA17, JS-SEC-146, JS-SEC-117, CWE-384, CWE-532)
+
+`LoginSessionRotation` resolved the session policy, rotated, notified the policy, audited and called
+the hook in one `try`: a policy that could not be resolved prevented the rotation, and a throwing
+`onLogin` suppressed the audit and the hook. The rotation now runs first and on its own, and audit
+and hook run whatever the policy does. `LoginView`, like the OAuth2 callback, now undoes a login
+whose session id did not change: `SessionInvalidated(RotationAfterLoginFailed)`, then
+`reactOnFailedLogin()`. Failures are logged with their exception class only. **Consumers:** logins
+over a WebSocket-only push channel (`Transport.WEBSOCKET`) are refused; use `WEBSOCKET_XHR`.
+
+## The OIDC logout fallback honours the context path (addition to SA47, JS-SEC-147, CWE-684)
+
+`AbstractOidcLogoutView.localLogoutTarget()` returned `"/" + loginRouteName()`, which sends an
+application deployed under a context path out of its context. It now prefixes the context path of
+the current request. **Consumers:** an application whose Vaadin servlet is not mapped to the context
+root overrides `localLogoutTarget()`.
+
+## A credential check that throws is a failed attempt (addition to SA26, JS-SEC-126, CWE-307, CWE-755)
+
+`LoginView` and `StandaloneLoginFlow` treated every `RuntimeException` of the credential check as
+"no verdict": the attempt was given back and nothing was counted, so input that made the check throw
+could be guessed without limit. Only `CredentialVerificationUnavailableException` keeps that meaning
+now; any other exception is recorded as a failed attempt (`StandaloneLoginFlow.REASON_CHECK_FAILED`)
+and answered like wrong credentials, and `LoginView` also clears a subject the check had already
+bound. **Consumers:** `StandaloneLoginFlow.login` returns `Rejected` instead of rethrowing such
+exceptions.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

@@ -142,7 +142,8 @@ class SessionManagementRevokeBrowserlessTest extends BrowserlessTest {
     assertNotEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState),
         "Revoke must end the live session, not only edit the store");
     assertNull(inSession(bobSession, () -> bobSession.getAttribute(String.class)), "the subject is dropped");
-    assertTrue(store.findById(bobRecord.sessionId()).isEmpty(), "the record is removed");
+    assertEquals(SessionStatus.REVOKED, store.findById(bobRecord.sessionId()).orElseThrow().status(),
+        "the record is kept as REVOKED, so a node that has not seen it yet refuses the session (XR09-1)");
     SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
     assertEquals("bob", invalidated.subjectId(), "the audit names the revoked subject");
     assertEquals(SessionRef.of(bobRecord.sessionId().value()), invalidated.sessionId(),
@@ -196,7 +197,8 @@ class SessionManagementRevokeBrowserlessTest extends BrowserlessTest {
 
     assertNotEquals(VaadinSessionState.OPEN, inSession(bobSession, bobSession::getState),
         "the record names the session by reference; the live session must still be found");
-    assertTrue(store.findById(byReference.sessionId()).isEmpty(), "the record is removed");
+    assertEquals(SessionStatus.REVOKED, store.findById(byReference.sessionId()).orElseThrow().status(),
+        "the record is kept as REVOKED (XR09-1)");
     assertEquals(byReference.sessionId().value(), audit.single(SessionInvalidated.class).sessionId());
     assertEquals(VaadinSessionState.OPEN, adminSession.getState());
   }

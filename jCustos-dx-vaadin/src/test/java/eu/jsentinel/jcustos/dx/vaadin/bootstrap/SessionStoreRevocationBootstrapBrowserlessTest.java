@@ -68,7 +68,7 @@ class SessionStoreRevocationBootstrapBrowserlessTest extends BrowserlessTest {
   void reset() {
     JCustosServiceResolver.resetAll();
     SessionManagementContext.reset();
-    VaadinSessionRevocation.reset();
+    VaadinSessionRevocation.useSessionStore(null);
     SubjectStores.reset();
   }
 

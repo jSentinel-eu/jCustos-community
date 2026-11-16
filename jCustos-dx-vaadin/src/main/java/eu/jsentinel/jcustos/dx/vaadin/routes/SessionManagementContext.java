@@ -67,8 +67,8 @@ public final class SessionManagementContext {
    * {@link SessionManagementRoute} should consume.
    *
    * @param store  the configured SessionStore; never {@code null}
-   * @param revoke revoke handler; {@code null} → the default, which removes the
-   *               record and ends the session (see {@link #revoke()})
+   * @param revoke revoke handler; {@code null} → the default, which marks the
+   *               record revoked and ends the session (see {@link #revoke()})
    */
   public static void publish(SessionStore store, Consumer<SessionRecord> revoke) {
     publish(store, revoke, null);
@@ -79,8 +79,8 @@ public final class SessionManagementContext {
    * access requirement that {@link SessionManagementRoute} enforces.
    *
    * @param store       the configured SessionStore; never {@code null}
-   * @param revoke      revoke handler; {@code null} → the default, which removes
-   *                    the record and ends the session (see {@link #revoke()})
+   * @param revoke      revoke handler; {@code null} → the default, which marks
+   *                    the record revoked and ends the session (see {@link #revoke()})
    * @param requirement roles and permissions a subject needs to open the
    *                    route and to revoke; {@code null} or empty publishes
    *                    no requirement, and the route then denies every
@@ -121,13 +121,16 @@ public final class SessionManagementContext {
   /**
    * The revoke handler {@link SessionManagementRoute} runs for a row.
    *
-   * <p>Without a registered handler this is a real termination (JS-SEC-131, CWE-613): the
-   * record is removed from the published store and the live session with that id is ended
-   * on this node at once - subject, security-version snapshot and token credential cleared,
+   * <p>Without a registered handler this is a real termination (JS-SEC-131, CWE-613):
+   * {@link VaadinSessionRevocation#revoke(SessionRecord)} marks the record
+   * {@code REVOKED} in the published store and ends the live session with that id on this
+   * node at once - subject, security-version snapshot and token credential cleared,
    * {@code SessionInvalidated} audited, Vaadin session closed, HTTP session invalidated.
    * On any other node the per-request check of {@code SessionLifetimeListener} finds the
-   * record gone and ends the session on its next request. Until 00.84.00 the default only
-   * deleted the record and the revoked user kept working.
+   * revoked record and ends the session on its next request, also on its first (exit review
+   * XR09-1: until then the default deleted the record, and a node that had not seen it yet
+   * let the session live on). Until 00.84.00 the default only deleted the record and the
+   * revoked user kept working.
    */
   static Consumer<SessionRecord> revoke() {
     Consumer<SessionRecord> registered = REVOKE.get();
@@ -135,7 +138,7 @@ public final class SessionManagementContext {
   }
 
   private static void revokeAndTerminate(SessionRecord record) {
-    store().ifPresent(s -> s.delete(record.sessionId()));
-    VaadinSessionRevocation.terminate(record.sessionId(), record.subjectId().value());
+    // the published store is the one VaadinSessionRevocation writes to (see publish)
+    VaadinSessionRevocation.revoke(record);
   }
 }

@@ -228,8 +228,13 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
         .orElseThrow(() -> new AssertionError("expected one SessionInvalidated event; got: " + audit.events()));
     assertEquals(SessionRef.of(oldSessionId), invalidated.sessionId(),
         "SessionInvalidated must carry the reference of the retired id");
-    assertTrue(audit.events().stream().map(String::valueOf)
-            .noneMatch(e -> e.contains(oldSessionId) || e.contains(newSessionId)),
+    // compared on the session field itself: the browserless session ids are small integers,
+    // which also occur in timestamps and references
+    assertTrue(audit.events().stream()
+            .map(e -> e instanceof SessionCreated c ? c.sessionId()
+                : e instanceof SessionInvalidated i ? i.sessionId() : null)
+            .filter(java.util.Objects::nonNull)
+            .noneMatch(id -> id.equals(oldSessionId) || id.equals(newSessionId)),
         "no audit event may carry a session id (JS-SEC-117): " + audit.events());
     assertEquals("Session rotated after login", invalidated.reason(),
         "the reason comes from TimeoutSessionPolicy's Invalidate decision");
@@ -242,6 +247,44 @@ class B3SessionRotationIntegrationTest extends BrowserlessTest {
     // ── the hook saw both ids ──
     assertEquals(oldSessionId, B3FixtureLoginView.rotatedFrom, "onSessionRotated must receive the retired id");
     assertEquals(newSessionId, B3FixtureLoginView.rotatedTo, "onSessionRotated must receive the surviving id");
+  }
+
+  @Test
+  @DisplayName("XR09-2: a SessionPolicy whose onLogin throws no longer suppresses the rotation audit and the hook")
+  void failingPolicy_rotationIsStillAuditedAndReported() {
+    JCustosServiceResolver.setSessionPolicy(new FailingOnLoginPolicy());
+    navigate(B3FixtureLoginView.class);
+    String oldSessionId = VaadinSession.getCurrent().getSession().getId();
+
+    test($view(TextField.class).id(LoginView.TF_USERNAME_ID)).setValue("alice");
+    test($view(PasswordField.class).id(LoginView.PF_PASSWORD_ID)).setValue("alice");
+    test($view(Button.class).id(LoginView.BTN_LOGIN_ID)).click();
+
+    String newSessionId = VaadinSession.getCurrent().getSession().getId();
+    assertFalse(oldSessionId.equals(newSessionId), "the rotation does not depend on the policy");
+    SessionInvalidated invalidated = audit.events().stream()
+        .filter(SessionInvalidated.class::isInstance)
+        .map(SessionInvalidated.class::cast)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError(
+            "the rotation must be audited although the policy failed; got: " + audit.events()));
+    assertEquals(SessionRef.of(oldSessionId), invalidated.sessionId());
+    assertEquals(LoginSessionRotation.DEFAULT_REASON, invalidated.reason());
+    assertEquals(oldSessionId, B3FixtureLoginView.rotatedFrom,
+        "onSessionRotated must run although the policy failed - records keyed by the id follow it");
+    assertEquals(newSessionId, B3FixtureLoginView.rotatedTo);
+    assertTrue(B3FixtureLoginView.lastNavigateToAppCalled, "a failing policy does not block the login");
+  }
+
+  /** A policy whose login notification fails - the stand-in for a policy whose backend is down. */
+  static final class FailingOnLoginPolicy implements SessionPolicy<Object> {
+    @Override public SessionDecision onLogin(SessionContext<Object> context) {
+      throw new IllegalStateException("policy backend unreachable");
+    }
+
+    @Override public SessionDecision beforeNavigation(SessionContext<Object> context) {
+      return SessionDecision.Continue.INSTANCE;
+    }
   }
 
   /** Test-only LoginView whose checkCredentials always succeeds. */

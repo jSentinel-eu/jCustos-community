@@ -185,6 +185,26 @@ final class RequestPipeline implements AutoCloseable {
     return send(raw, true);
   }
 
+  /**
+   * Fetches a dynamic resource - a {@code DownloadHandler} or {@code StreamResource} URL as a
+   * component renders it, e.g. {@code Anchor.getHref()} - through the real pipeline, the way
+   * the browser does when the user follows a download link: a {@code GET} for the path,
+   * without a request type.
+   */
+  Exchange download(String href) {
+    return download(href, null);
+  }
+
+  /** As {@link #download(String)}, with the request-type parameter {@code v-r} set to {@code requestType}. */
+  Exchange download(String href, String requestType) {
+    reacquireLock();
+    BodyRequest raw = new BodyRequest(httpSession, "GET", "", "/" + href);
+    if (requestType != null) {
+      raw.setParameter("v-r", requestType);
+    }
+    return send(raw, true);
+  }
+
   /** Sends the keep-alive request the client sends while a tab is open. */
   Exchange heartbeat() {
     reacquireLock();
@@ -249,7 +269,8 @@ final class RequestPipeline implements AutoCloseable {
     if (keepLockAfterwards) {
       reacquireLock();
     }
-    return new Exchange(rawResponse.body(), failure.get());
+    return new Exchange(rawResponse.body(), failure.get(), rawResponse.getStatus(),
+        rawResponse.errorMessage);
   }
 
   private static void runOnRequestThread(Runnable request) {
@@ -281,8 +302,13 @@ final class RequestPipeline implements AutoCloseable {
     MockVaadin.tearDown();
   }
 
-  /** What a request produced. */
-  record Exchange(String body, Throwable failure) {
+  /**
+   * What a request produced.
+   *
+   * @param status       the HTTP status the response carries
+   * @param errorMessage the message of {@code sendError}, {@code null} when none was sent
+   */
+  record Exchange(String body, Throwable failure, int status, String errorMessage) {
     boolean sessionExpired() {
       return body.contains("\"sessionExpired\":true");
     }
@@ -359,19 +385,29 @@ final class RequestPipeline implements AutoCloseable {
         });
   }
 
-  /** A servlet request with a method and a body. */
+  /** A servlet request with a method, a body and optionally a path info. */
   private static final class BodyRequest extends MockRequest {
     private final String method;
     private final String body;
+    private final String pathInfo;
 
     BodyRequest(HttpSession session, String method, String body) {
+      this(session, method, body, null);
+    }
+
+    BodyRequest(HttpSession session, String method, String body, String pathInfo) {
       super(session);
       this.method = method;
       this.body = body;
+      this.pathInfo = pathInfo;
     }
 
     @Override public String getMethod() {
       return method;
+    }
+
+    @Override public String getPathInfo() {
+      return pathInfo;
     }
 
     @Override public BufferedReader getReader() {
@@ -387,9 +423,19 @@ final class RequestPipeline implements AutoCloseable {
     }
   }
 
-  /** A servlet response that keeps what was written. */
+  /** A servlet response that keeps what was written, the status and an error message. */
   private static final class CapturingResponse extends MockResponse {
     private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    private String errorMessage;
+
+    @Override public void sendError(int status, String message) {
+      setStatus(status);
+      this.errorMessage = message;
+    }
+
+    @Override public void sendError(int status) {
+      sendError(status, null);
+    }
 
     @Override public ServletOutputStream getOutputStream() {
       return new ServletOutputStream() {

@@ -22,7 +22,9 @@ import eu.jsentinel.jcustos.session.InMemorySessionStore;
 import eu.jsentinel.jcustos.session.JCustosVersion;
 import eu.jsentinel.jcustos.session.JCustosVersionKey;
 import eu.jsentinel.jcustos.session.SessionId;
+import eu.jsentinel.jcustos.session.SessionRecord;
 import eu.jsentinel.jcustos.session.SessionStatus;
+import eu.jsentinel.jcustos.session.SessionStore;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -30,6 +32,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -202,8 +210,8 @@ class StoreBackedSubjectSessionRegistryTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-075: registering over an EXPIRED or REVOKED record revives the session as ACTIVE")
-  void registerRevivesInactiveRecord() {
+  @DisplayName("JS-SEC-075: registering over an EXPIRED record revives the session as ACTIVE")
+  void registerRevivesExpiredRecord() {
     InMemorySessionStore sessionStore = new InMemorySessionStore();
     StoreBackedSubjectSessionRegistry registry =
         new StoreBackedSubjectSessionRegistry(sessionStore, TenantId.DEFAULT, fixed(T0));
@@ -216,10 +224,100 @@ class StoreBackedSubjectSessionRegistryTest {
 
     assertTrue(registry.sessionsOf(ALICE).contains("sid-1"), "a new login over a dead id is a live session again");
     assertEquals(SessionStatus.ACTIVE, sessionStore.findById(sid).orElseThrow().status());
+  }
 
-    sessionStore.save(sessionStore.findById(sid).orElseThrow().withStatus(SessionStatus.REVOKED));
+  @Test
+  @DisplayName("XR09-7 / JS-SEC-131: registering a REVOKED id - by the same or another subject - keeps it REVOKED")
+  void registerKeepsRevokedRecord() {
+    InMemorySessionStore sessionStore = new InMemorySessionStore();
+    StoreBackedSubjectSessionRegistry registry =
+        new StoreBackedSubjectSessionRegistry(sessionStore, TenantId.DEFAULT, fixed(T0));
     registry.register(ALICE, "sid-1");
-    assertEquals(SessionStatus.ACTIVE, sessionStore.findById(sid).orElseThrow().status());
+    SessionId sid = new SessionId("sid-1");
+    SessionRecord revoked = sessionStore.findById(sid).orElseThrow().withStatus(SessionStatus.REVOKED);
+    sessionStore.save(revoked);
+
+    registry.register(ALICE, "sid-1");
+    registry.register(BOB, "sid-1");
+
+    assertEquals(revoked, sessionStore.findById(sid).orElseThrow(),
+        "a revocation is final for the id: neither a request of the revoked session nor a reused id revives it");
+    assertTrue(registry.sessionsOf(ALICE).isEmpty());
+    assertTrue(registry.sessionsOf(BOB).isEmpty());
+  }
+
+  @Test
+  @DisplayName("XR09-7: two registrations of one id do not interleave between the read and the write")
+  void registrationsAreSerialised() throws InterruptedException {
+    GatedSessionStore gated = new GatedSessionStore();
+    StoreBackedSubjectSessionRegistry registry =
+        new StoreBackedSubjectSessionRegistry(gated, TenantId.DEFAULT, fixed(T0));
+    Thread first = new Thread(() -> registry.register(ALICE, "sid-1"), "first-registration");
+    Thread second = new Thread(() -> registry.register(ALICE, "sid-1"), "second-registration");
+    try {
+      first.start();
+      assertTrue(gated.firstSaveEntered.await(5, TimeUnit.SECONDS), "the first registration reaches save");
+      second.start();
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (second.getState() != Thread.State.BLOCKED && gated.readsDuringSave.get() == 0
+          && System.nanoTime() < deadline) {
+        Thread.onSpinWait();
+      }
+
+      assertEquals(0, gated.readsDuringSave.get(),
+          "the second registration must not read the record while the first is still writing it");
+      assertEquals(Thread.State.BLOCKED, second.getState());
+    } finally {
+      gated.releaseFirstSave.countDown();
+      first.join(5_000);
+      second.join(5_000);
+    }
+    assertEquals(SessionStatus.ACTIVE, gated.findById(new SessionId("sid-1")).orElseThrow().status());
+  }
+
+  /** A real in-memory store whose first {@code save} waits until the test releases it. */
+  private static final class GatedSessionStore implements SessionStore {
+    private final InMemorySessionStore delegate = new InMemorySessionStore();
+    private final CountDownLatch firstSaveEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseFirstSave = new CountDownLatch(1);
+    private final AtomicBoolean saving = new AtomicBoolean();
+    private final AtomicBoolean firstSaveDone = new AtomicBoolean();
+    private final AtomicInteger readsDuringSave = new AtomicInteger();
+
+    @Override public void save(SessionRecord session) {
+      if (firstSaveDone.compareAndSet(false, true)) {
+        saving.set(true);
+        firstSaveEntered.countDown();
+        try {
+          if (!releaseFirstSave.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("the test did not release the first save");
+          }
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(interrupted);
+        } finally {
+          delegate.save(session);
+          saving.set(false);
+        }
+        return;
+      }
+      delegate.save(session);
+    }
+
+    @Override public Optional<SessionRecord> findById(SessionId sessionId) {
+      if (saving.get()) {
+        readsDuringSave.incrementAndGet();
+      }
+      return delegate.findById(sessionId);
+    }
+
+    @Override public List<SessionRecord> findBySubject(TenantId tenant, SubjectId subjectId) {
+      return delegate.findBySubject(tenant, subjectId);
+    }
+
+    @Override public boolean delete(SessionId sessionId) {
+      return delegate.delete(sessionId);
+    }
   }
 
   @Test

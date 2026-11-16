@@ -127,7 +127,8 @@ class SessionManagementRouteBrowserlessTest extends BrowserlessTest {
     assertEquals("Revoke", revoke.getText());
     test(revoke).click();
 
-    assertTrue(store.findAll().isEmpty(), "the default revoke drops the record from the store");
+    assertEquals(List.of(SessionStatus.REVOKED), store.findAll().stream().map(SessionRecord::status).toList(),
+        "the default revoke keeps the record and marks it REVOKED (XR09-1)");
     assertTrue(audit.all(AccessDenied.class).isEmpty(), "an admitted revoke is not a denial");
   }
 }
