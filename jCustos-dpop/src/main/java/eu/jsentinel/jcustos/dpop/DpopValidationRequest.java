@@ -120,4 +120,19 @@ public record DpopValidationRequest(
     return new DpopValidationRequest(
         proofCompact, httpMethod, httpUri, Optional.of(accessToken), Optional.empty());
   }
+
+  /**
+   * Masks the proof and the access token (JS-SEC-127, CWE-532): the generated
+   * {@code toString()} printed the bearer token and a proof that is valid for this method and
+   * URI into any log line or exception message that stringified the request.
+   *
+   * @return a description without proof and token
+   */
+  @Override
+  public String toString() {
+    return "DpopValidationRequest[proofCompact=***, httpMethod=" + httpMethod
+        + ", httpUri=" + httpUri
+        + ", accessToken=" + (accessToken.isPresent() ? "***" : "<none>")
+        + ", expectedJkt=" + expectedJkt.map(JwkThumbprint::value).orElse("<none>") + "]";
+  }
 }

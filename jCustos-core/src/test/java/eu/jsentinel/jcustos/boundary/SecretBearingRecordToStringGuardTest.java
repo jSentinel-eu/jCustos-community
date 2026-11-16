@@ -33,6 +33,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Stream;
@@ -48,10 +49,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>The test walks the compiled main classes of the module, so a record added
  * later is covered without anyone remembering this test. A component counts as
- * secret-bearing when its name is one of {@link #SECRET_NAMES}; in the packages
- * of {@link #VALUE_PACKAGES} a component called {@code value} counts as well,
- * because there it holds the token itself ({@code HeaderValue.value},
- * {@code BootstrapToken.value}).</p>
+ * secret-bearing when its name is one of {@link #SECRET_NAMES}, or one of
+ * {@link #PACKAGE_NAMES} in the packages listed there: a component called
+ * {@code value} holds the token itself in the credential packages
+ * ({@code HeaderValue.value}, {@code BootstrapToken.value}), {@code code} the
+ * authorisation code in the OAuth2 and OIDC packages, {@code body} the
+ * response of a token endpoint.</p>
+ *
+ * <p>Every other library module runs a copy of this guard with the same naming
+ * rule (SA27 follow-up); a module cannot see another module's test classes. A
+ * change of the rule belongs into every copy.</p>
  *
  * <p>A component whose <em>type</em> masks itself is not a leak: a
  * {@code SecretValue} or a {@code SelectorVerifierToken} prints
@@ -63,17 +70,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("JS-SEC-127 — secret-bearing records override toString")
 class SecretBearingRecordToStringGuardTest {
 
-  /** Component names (lower case) that hold a plaintext secret. */
+  /** Component names (lower case) that hold a plaintext secret, in every package. */
   private static final Set<String> SECRET_NAMES = Set.of(
       "token", "tokenplain", "plaintoken", "secret", "password",
-      "refreshtoken", "accesstoken", "bootstraptoken");
+      "refreshtoken", "accesstoken", "bootstraptoken", "idtoken", "idtokenhint",
+      "accesstokenforathash", "privatekey", "clientsecret", "pkceverifier", "codeverifier",
+      "proofcompact");
 
-  /** Packages (and their sub-packages) in which a component named {@code value} is a secret. */
-  private static final List<String> VALUE_PACKAGES = List.of(
-      "eu.jsentinel.jcustos.authentication",
-      "eu.jsentinel.jcustos.credential",
-      "eu.jsentinel.jcustos.accountlifecycle",
-      "eu.jsentinel.jcustos.bootstrap");
+  /**
+   * Further secret names in the packages (and sub-packages) given: the token itself in a
+   * {@code value}, the authorisation code, and the body of a token-endpoint response.
+   */
+  private static final Map<String, Set<String>> PACKAGE_NAMES = Map.of(
+      "eu.jsentinel.jcustos.authentication", Set.of("value"),
+      "eu.jsentinel.jcustos.credential", Set.of("value"),
+      "eu.jsentinel.jcustos.accountlifecycle", Set.of("value"),
+      "eu.jsentinel.jcustos.bootstrap", Set.of("value"),
+      "eu.jsentinel.jcustos.oauth2", Set.of("code", "codeforchash", "body"),
+      "eu.jsentinel.jcustos.oidc", Set.of("code", "codeforchash"),
+      "eu.jsentinel.jcustos.propagation", Set.of("body"));
 
   private static final String MODULE_PACKAGE = "eu.jsentinel.jcustos";
 
@@ -140,18 +155,24 @@ class SecretBearingRecordToStringGuardTest {
             "eu.jsentinel.jcustos.accountlifecycle.PasswordResetService$IssuedToken",
             "eu.jsentinel.jcustos.accountlifecycle.EmailVerificationService$IssuedToken",
             "eu.jsentinel.jcustos.bootstrap.CreateInitialAdminCommand",
-            "eu.jsentinel.jcustos.bootstrap.BootstrapToken")),
+            "eu.jsentinel.jcustos.bootstrap.BootstrapToken",
+            "eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow$CallbackParams",
+            "eu.jsentinel.jcustos.oauth2.api.StateEntry",
+            "eu.jsentinel.jcustos.oidc.api.IdTokenExpectations")),
         "the naming rule no longer recognises a known secret-bearing record: " + guarded);
   }
 
   private static List<String> secretComponents(Class<?> record) throws IOException {
-    boolean valuePackage = VALUE_PACKAGES.stream().anyMatch(
-        p -> record.getPackageName().equals(p) || record.getPackageName().startsWith(p + "."));
+    Set<String> packageNames = new TreeSet<>();
+    PACKAGE_NAMES.forEach((pkg, names) -> {
+      if (record.getPackageName().equals(pkg) || record.getPackageName().startsWith(pkg + ".")) {
+        packageNames.addAll(names);
+      }
+    });
     List<String> found = new ArrayList<>();
     for (RecordComponent component : record.getRecordComponents()) {
       String name = component.getName().toLowerCase(Locale.ROOT);
-      boolean secretName = SECRET_NAMES.contains(name)
-          || (valuePackage && name.equals("value"));
+      boolean secretName = SECRET_NAMES.contains(name) || packageNames.contains(name);
       if (secretName && !masksItself(component.getType())) {
         found.add(component.getName());
       }

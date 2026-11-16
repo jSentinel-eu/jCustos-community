@@ -185,4 +185,29 @@ class SecretRecordToStringTest {
     assertTrue(text.contains("root-admin"), text);
     assertTrue(text.contains("root@example.org"), text);
   }
+
+  @Test
+  @DisplayName("SA27 follow-up: CallbackParams masks the authorisation code")
+  void callbackParams() {
+    String text = new eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow.CallbackParams(
+        Optional.of("SplxlOBeZQQYbYS6WxSbIA"), "state-42", Optional.empty(), Optional.empty(),
+        Optional.of("https://idp.example.org")).toString();
+    assertFalse(text.contains("SplxlOBeZQQYbYS6WxSbIA"), text);
+    assertTrue(text.contains("state=state-42"), text);
+    assertTrue(text.contains("iss=https://idp.example.org"), text);
+  }
+
+  @Test
+  @DisplayName("SA27 follow-up: IdTokenExpectations masks access token, code and nonce")
+  void idTokenExpectations() {
+    String text = new eu.jsentinel.jcustos.oidc.api.IdTokenExpectations(
+        "https://idp.example.org", "client-1", Optional.of("n-0S6_WzA2Mj"),
+        Optional.of("access-token-xyz"), Optional.of("code-abc"), Optional.empty(),
+        java.util.Set.of("urn:acr:2"), Duration.ofSeconds(30)).toString();
+    for (String secret : List.of("n-0S6_WzA2Mj", "access-token-xyz", "code-abc")) {
+      assertFalse(text.contains(secret), text);
+    }
+    assertTrue(text.contains("expectedIssuer=https://idp.example.org"), text);
+    assertTrue(text.contains("expectedAudience=client-1"), text);
+  }
 }

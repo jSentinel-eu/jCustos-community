@@ -55,4 +55,16 @@ public record SigningKeySnapshot(KeyId keyId, SignatureAlgorithm algorithm,
     Objects.requireNonNull(algorithm, "algorithm");
     Objects.requireNonNull(privateKey, "privateKey");
   }
+
+  /**
+   * Masks the private key (JS-SEC-127, CWE-532): the generated {@code toString()} delegated
+   * to the key's own, which for some providers prints key material.
+   *
+   * @return a description with key id, algorithm and the key's algorithm name only
+   */
+  @Override
+  public String toString() {
+    return "SigningKeySnapshot[keyId=" + keyId + ", algorithm=" + algorithm
+        + ", privateKey=*** (" + privateKey.getAlgorithm() + ")]";
+  }
 }

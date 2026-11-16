@@ -74,6 +74,18 @@ public final class OAuth2FormPost {
 
   /** A completed HTTP exchange. */
   public record Outcome(int status, String body) {
+
+    /**
+     * Shows the length of the body, not the body (JS-SEC-127, CWE-532): an introspection
+     * response names the token's subject and scopes, a token response carries tokens.
+     *
+     * @return a description without the body
+     */
+    @Override
+    public String toString() {
+      return "Outcome[status=" + status + ", body=<"
+          + (body == null ? 0 : body.length()) + " chars>]";
+    }
   }
 
   private OAuth2FormPost() {

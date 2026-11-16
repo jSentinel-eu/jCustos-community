@@ -77,4 +77,16 @@ public record MutualTlsClientConfig(KeyStore keyStore, char[] password, String a
   public char[] password() {
     return password.clone();
   }
+
+  /**
+   * Masks the key-store password (JS-SEC-127, CWE-532): no description of the configuration
+   * carries it, whatever a later change does to the component's type.
+   *
+   * @return a description with the key-store type and the alias
+   */
+  @Override
+  public String toString() {
+    return "MutualTlsClientConfig[keyStore=" + keyStore.getType() + ", password=***, alias="
+        + alias + "]";
+  }
 }

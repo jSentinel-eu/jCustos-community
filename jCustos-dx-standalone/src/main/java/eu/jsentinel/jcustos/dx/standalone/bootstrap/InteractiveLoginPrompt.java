@@ -59,5 +59,16 @@ public interface InteractiveLoginPrompt {
         throw new IllegalArgumentException("secret must not be null");
       }
     }
+
+    /**
+     * Masks the secret (JS-SEC-127, CWE-532): no description of the credentials carries it,
+     * whatever a later change does to the component's type.
+     *
+     * @return a description without the secret
+     */
+    @Override
+    public String toString() {
+      return "Credentials[username=" + username + ", secret=***]";
+    }
   }
 }

@@ -124,5 +124,21 @@ public interface AuthorizationCodeFlow {
         Optional<String> errorDescription) {
       this(code, state, error, errorDescription, Optional.empty());
     }
+
+    /**
+     * Masks the authorisation code (JS-SEC-127, CWE-532): until it is redeemed it buys
+     * tokens, and the generated {@code toString()} printed it into any log line or exception
+     * message that stringified the parameters.
+     *
+     * @return a description without the code
+     */
+    @Override
+    public String toString() {
+      return "CallbackParams[code=" + (code.isPresent() ? "***" : "<none>")
+          + ", state=" + state
+          + ", error=" + error.orElse("<none>")
+          + ", errorDescription=" + errorDescription.orElse("<none>")
+          + ", iss=" + iss.orElse("<none>") + "]";
+    }
   }
 }

@@ -1758,6 +1758,19 @@ hint that fails is logged (`credential/rehash-hint-failed`) and ignored. **Consu
 `term=1` to hand-assembled defaults is no longer required; providers of your own can report
 weaknesses only they know.
 
+## Every library module guards its secret-bearing records (addition to SA27, JS-SEC-127, CWE-532)
+
+The structural test for records with a secret-bearing component covered `jCustos-core` only. Every
+library module now runs the same guard, with a wider naming rule (private keys, client secrets, PKCE
+verifiers, DPoP proofs, ID-token hints, the authorisation code and token-endpoint response bodies in
+the OAuth2/OIDC packages). It found ten records, which now mask the secret:
+`AuthorizationCodeFlow.CallbackParams` (code) and `IdTokenExpectations` (access token, code, nonce)
+in core, `InteractiveLoginPrompt.Credentials`, `SigningKeySnapshot` (private key),
+`MutualTlsClientConfig` (key-store password), `OAuth2FormPost.Outcome` (response body),
+`DpopValidationRequest` (proof and access token), `TokenExchangeCache.CachedEntry` (access token)
+and `BoundedTokenHttp.Response` (response body). **Consumers:** the string form of these records no
+longer shows the secret; equality is unchanged.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

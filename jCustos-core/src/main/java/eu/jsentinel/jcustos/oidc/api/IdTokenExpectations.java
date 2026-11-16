@@ -66,4 +66,27 @@ public record IdTokenExpectations(
     return new IdTokenExpectations(issuer, audience, nonce, Optional.empty(), Optional.empty(),
         Optional.empty(), Set.of(), DEFAULT_CLOCK_SKEW);
   }
+
+  /**
+   * Masks the access token and the authorisation code (JS-SEC-127, CWE-532): the
+   * generated {@code toString()} printed both into any log line or exception message that
+   * stringified the expectations. The nonce is shown only as present or absent.
+   *
+   * @return a description without token, code or nonce
+   */
+  @Override
+  public String toString() {
+    return "IdTokenExpectations[expectedIssuer=" + expectedIssuer
+        + ", expectedAudience=" + expectedAudience
+        + ", expectedNonce=" + masked(expectedNonce)
+        + ", accessTokenForAtHash=" + masked(accessTokenForAtHash)
+        + ", codeForCHash=" + masked(codeForCHash)
+        + ", maxAge=" + maxAge.map(Duration::toString).orElse("<none>")
+        + ", requestedAcr=" + requestedAcr
+        + ", clockSkew=" + clockSkew + "]";
+  }
+
+  private static String masked(Optional<String> value) {
+    return value.isPresent() ? "***" : "<none>";
+  }
 }

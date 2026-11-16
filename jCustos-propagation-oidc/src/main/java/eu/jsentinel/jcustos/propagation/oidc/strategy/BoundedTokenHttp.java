@@ -63,5 +63,17 @@ final class BoundedTokenHttp {
 
   /** Status + fully-read (bounded) body, mirroring {@code HttpResponse} accessors. */
   record Response(int statusCode, String body) {
+
+    /**
+     * Shows the length of the body, not the body (JS-SEC-127, CWE-532): a token-endpoint
+     * response carries the exchanged tokens.
+     *
+     * @return a description without the body
+     */
+    @Override
+    public String toString() {
+      return "Response[statusCode=" + statusCode + ", body=<"
+          + (body == null ? 0 : body.length()) + " chars>]";
+    }
   }
 }

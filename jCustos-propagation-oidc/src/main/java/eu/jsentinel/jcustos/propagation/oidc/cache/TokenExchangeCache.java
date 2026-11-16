@@ -55,5 +55,15 @@ public interface TokenExchangeCache {
 
   /** Cached token-endpoint response. */
   record CachedEntry(String accessToken, Instant expiresAt) {
+
+    /**
+     * Masks the access token (JS-SEC-127, CWE-532).
+     *
+     * @return a description with the expiry only
+     */
+    @Override
+    public String toString() {
+      return "CachedEntry[accessToken=***, expiresAt=" + expiresAt + "]";
+    }
   }
 }
