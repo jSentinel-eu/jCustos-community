@@ -113,10 +113,11 @@ Each released library jar carries:
   before the bundle for Maven Central is written, by
   `scripts/deploy-jsentinel.sh` on the files it fetches back from
   `repo.jsentinel.eu` after the upload.
-  The fingerprint of that key is published in `SECURITY.md` and in
-  [`../../release-verification.md`](../../release-verification.md); earlier
-  versions of this page named `gpg.svenruppert.com`, a host that does not
-  exist.
+  The fingerprint of that key is to be published in `SECURITY.md` and in
+  [`../../release-verification.md`](../../release-verification.md); it is not
+  decided yet, and the release scripts refuse to release until it is
+  configured. Earlier versions of this page named `gpg.svenruppert.com`, a
+  host that does not exist.
 - Maven Central metadata — checksums, GAV, timestamps.
 - A release manifest (`central-bundle.manifest.txt`) written by
   `scripts/clean-bundle-for-central.sh`: tag, commit, JDK and Maven version

@@ -44,7 +44,7 @@ here; this repository never references it.
 | `jCustos-processor` | `jCustos-processor` | Compile-time annotation processor: generates `<Type>Secured` subclasses for `@Secured`-annotated concrete classes. Wire as `<annotationProcessorPath>`, not as a regular dependency |
 | `jCustos-persistence-testkit` | `jCustos-persistence-testkit` | Contract test suites for every persistence-store SPI in `jCustos-core` — `@Test default`-method interfaces a custom store adapter implements to be vetted against the library's persistence contract. Persistence-tech-agnostic |
 | `jCustos-persistence-eclipsestore` | `jCustos-persistence-eclipsestore` | Eclipse-Store (`org.eclipse.store:storage-embedded`) reference impl of every persistence-store SPI; passes the same 95+ contract suite as the in-memory defaults. Drop-in for apps that want durable persistence |
-| `jCustos-crypto-bc` | `jCustos-crypto-bc` | V00.71 optional opt-in module: Argon2id, bcrypt and scrypt password hash providers via BouncyCastle (`bcprov-jdk18on:1.78.1`). `BouncyCastleHashingServices.modern()` wires the modern profile. The core stays JDK-only when this module is absent |
+| `jCustos-crypto-bc` | `jCustos-crypto-bc` | V00.71 optional opt-in module: Argon2id, bcrypt and scrypt password hash providers via BouncyCastle (`bcprov-jdk18on:1.86`). `BouncyCastleHashingServices.modern()` wires the modern profile. The core stays JDK-only when this module is absent |
 | `jCustos-credentials-hibp` | `jCustos-credentials-hibp` | V00.71 optional opt-in module: HaveIBeenPwned k-anonymity compromised-password checker. Uses JDK `HttpClient` only — no extra runtime dependencies. Plaintext never leaves the JVM (only the SHA-1 first-5-hex prefix is transmitted) |
 | `demo-rest-shared` | `demo-rest-shared` | Transport-level constants + tiny JSON helper, shared between the REST server and any client |
 | `demo-vaadin` | `demo-vaadin` | Standalone Vaadin demo (WAR) — auth runs in-JVM |
@@ -60,11 +60,11 @@ jCustos-vaadin                     -> jCustos-core
 jCustos-rest                       -> jCustos-core
 jCustos-standalone                 -> jCustos-core
 jCustos-test                       -> jCustos-core (compile; the test extension implements JUnit lifecycle types)
-jCustos-processor                  -> jCustos-core, com.svenruppert:proxybuilder:00.11.00, com.svenruppert:proxybuilder-annotations:00.11.00
+jCustos-processor                  -> jCustos-core, com.svenruppert:proxybuilder:00.11.01, com.svenruppert:proxybuilder-annotations:00.11.01
 jCustos-persistence-testkit        -> jCustos-core (compile; suites use ServiceLoader-free wiring)
 jCustos-persistence-eclipsestore   -> jCustos-core, org.eclipse.store:storage-embedded:4.1.0
                                        (test scope: jCustos-persistence-testkit)
-jCustos-crypto-bc                  -> jCustos-core, org.bouncycastle:bcprov-jdk18on:1.78.1
+jCustos-crypto-bc                  -> jCustos-core, org.bouncycastle:bcprov-jdk18on:1.86
                                        (V00.71 optional opt-in)
 jCustos-credentials-hibp           -> jCustos-core (JDK HttpClient only;
                                        V00.71 optional opt-in)
@@ -118,7 +118,7 @@ codebase.
 
 ### One sentence per skill
 
-- **`jcustos-vaadin`** — `VaadinSecurity.bootstrap()` + `@JCustosAutoService` Authn/Authz + pre-seeded `admin/admin` & `user/user` + `LoginView` + AppLayout `MainLayout` hosting a public `PublicHomeView` and a `@VisibleFor(USER)` `DashboardView` + filterable audit grid + session inventory + role admin. **Also exports** the project-local `BootstrapExtension` SPI plus the `BootstrapBuilder` helper that loads every registered extension via `ServiceLoader` — the seam through which layer 2 and layer 3 plug in additively.
+- **`jcustos-vaadin`** — `VaadinSecurity.bootstrap()` + `@JCustosAutoService` Authn/Authz + in-memory `admin/admin` & `user/user` demo accounts (created only with the development switch `-Djcustos.demo.insecureDemoAccounts=true`) + `LoginView` + AppLayout `MainLayout` hosting a public `PublicHomeView` and a `@VisibleFor(USER)` `DashboardView` + filterable audit grid + session inventory + role admin. **Also exports** the project-local `BootstrapExtension` SPI plus the `BootstrapBuilder` helper that loads every registered extension via `ServiceLoader` — the seam through which layer 2 and layer 3 plug in additively.
 - **`jcustos-vaadin-persistence`** — Eclipse-Store-backed audit + session + bootstrap stores, plus the V00.70 token-based first-admin flow (`SetupView` → `InitialAdminBootstrapService`); the plaintext `admin/admin` seed is replaced. **Plugs in** as a `PersistenceBootstrapExtension` (`order=10`) — no overwrite of the layer-1 entry-point listener.
 - **`jcustos-vaadin-hardening`** — `BouncyCastleHashingServices.modern()` (Argon2id) replaces PBKDF2, optional HIBP password-leak check, and Phase-4c drift detection (`JCustosVersionEnforcerListener` + `VersionBumper.bump(user)` after every role mutation) — a revoked role reroutes the affected user to login on their next click. **Plugs in** as a `HardeningBootstrapExtension` (`order=20`); composes additively with persistence.
 - **`jcustos-rest`** — `RestSecurity.bootstrap()` + Bearer-token `TokenStore` + JDK-`HttpServer`-based Router with `POST /api/auth/login` + `whoami` + audit + sessions + users endpoints, gated by `@RequiresPermission` semantics. Same `BootstrapExtension` SPI surface as the Vaadin variant.
@@ -331,9 +331,11 @@ cd demo-vaadin && mvn jetty:run
 ```
 
 First run shows the bootstrap setup (the demo prints a token to the
-console). After setup, log in as the chosen admin. Demo users
-`user/user` and `demo/demo` are pre-populated; `admin` is created via
-the bootstrap flow. Walkthrough: [`docs/demo-vaadin.md`](docs/v00.50.00/demo-vaadin.md).
+console). After setup, log in as the chosen admin; `admin` is always
+created via the bootstrap flow. The fixed-password demo users
+`user/user` and `demo/demo` exist only when the demo is started with the
+development switch `-Djcustos.demo.insecureDemoAccounts=true` — never on
+an instance others can reach. Walkthrough: [`docs/demo-vaadin.md`](docs/v00.50.00/demo-vaadin.md).
 
 ### `demo-rest` — REST server + CLI
 
@@ -349,9 +351,14 @@ mvn -pl :demo-rest exec:java \
 # Then `login admin <new-password>` and play with `operations` / `call …`.
 ```
 
-Demo users: `editor/editor`, `viewer/viewer`. `admin` is created via
-the bootstrap flow; with `-Dsecurity.bootstrap.mode=DISABLED` the
-default `admin/admin` is pre-populated instead. Walkthrough:
+The server listens on the loopback interface only and starts without
+any account: `admin` is created via the bootstrap flow. For a throw-away
+local instance, the development switch
+`-Djcustos.demo.insecure-seed-accounts=true` adds the fixed-password
+users `editor/editor` and `viewer/viewer`, and together with
+`-Dsecurity.bootstrap.mode=DISABLED` also `admin/admin`. Bootstrap mode
+`DISABLED` without the switch refuses to start, because nothing could
+create an administrator. Walkthrough:
 [`docs/demo-rest.md`](docs/v00.50.00/demo-rest.md).
 
 ### `demo-vaadin-rest-client` — Vaadin UI + REST backend
@@ -377,11 +384,15 @@ Walkthrough: [`docs/demo-vaadin-rest-client.md`](docs/v00.50.00/demo-vaadin-rest
 
 ```bash
 mvn -pl demo-standalone exec:java \
-    -Dexec.mainClass=eu.jsentinel.jcustos.demo.standalone.DemoApp
+    -Dexec.mainClass=eu.jsentinel.jcustos.demo.standalone.DemoApp \
+    -Djcustos.demo.insecure-seed-accounts=true
 ```
 
-Demo users are seeded: `admin/admin`, `librarian/librarian`,
-`alice/alice`. The CLI exposes **both** enforcement paths side by
+With the development switch `-Djcustos.demo.insecure-seed-accounts=true`
+(accepted in `DEVELOPMENT` mode only, the demo's mode) the demo seeds
+`admin/admin`, `librarian/librarian` and `alice/alice`; without it, it
+starts without users. Passwords are hashed through the credential
+pipeline. The CLI exposes **both** enforcement paths side by
 side:
 
 - **Runtime / dynamic-proxy** — book commands (`list`, `borrow`,
@@ -450,9 +461,9 @@ For a Vaadin Flow application:
 
 ```xml
 <dependency>
-  <groupId>com.svenruppert</groupId>
+  <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-vaadin</artifactId>
-  <version>00.70.00</version>
+  <version>00.84.00</version>
 </dependency>
 ```
 
@@ -460,9 +471,9 @@ For a REST handler / servlet application:
 
 ```xml
 <dependency>
-  <groupId>com.svenruppert</groupId>
+  <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-rest</artifactId>
-  <version>00.70.00</version>
+  <version>00.84.00</version>
 </dependency>
 ```
 
@@ -470,9 +481,9 @@ For a plain-Java / desktop / CLI application:
 
 ```xml
 <dependency>
-  <groupId>com.svenruppert</groupId>
+  <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-standalone</artifactId>
-  <version>00.70.00</version>
+  <version>00.84.00</version>
 </dependency>
 ```
 
@@ -685,17 +696,29 @@ RestAuthorizationFilter filter =
     new RestAuthorizationFilter(new MyRestSubjectResolver());
 
 filter.authorizeAndHandle(
-    request, response, handlers::delete, handlerMethod);
+    request, response, handlers::delete, handlerMethod, DocumentHandlers.class);
 ```
+
+Pass the handler class as well (the overload exists since 00.84.00): a
+`Method` names the class that declares it, so for a method the handler
+class inherits only this overload sees the restriction on the handler
+class. The overloads without it remain for handlers whose methods are all
+declared on the handler class itself.
 
 The filter:
 
 1. Resolves the subject from the request.
-2. Scans the handler method/class for a security annotation.
+2. Scans the handler method/class for a security annotation — the
+   restriction on the method, otherwise the one on the handler class,
+   otherwise one on a declaration the method overrides.
 3. Builds an `AccessContext` with `resourceType="rest-endpoint"`.
 4. Runs the matching `AuthorizationEvaluator`.
-5. Maps the decision: `Granted` runs the handler; `Unauthenticated` → `401`;
-   `Forbidden` → `403`. Error bodies are short and generic — no internals leak.
+5. Maps the decision through the configured decision mapper: `Granted`
+   runs the handler; `Unauthenticated` → `401` with
+   `WWW-Authenticate: Bearer`; `Forbidden` → `403`. Error bodies are short
+   and generic — no internals leak — unless the bootstrap configured
+   another body strategy (for example problem+json via
+   `.errorBodies(...)`).
 
 ### 5. Authenticated-only endpoints
 
@@ -706,7 +729,28 @@ your own subject check:
 ```java
 RestAuthenticationFilter authFilter = new RestAuthenticationFilter(resolver);
 authFilter.requireAuthenticated(request, response, handlers::me);
-// 401 with body "Unauthorized" if no subject; delegates otherwise
+// no subject: 401 with WWW-Authenticate: Bearer, AccessDenied audited;
+// delegates otherwise
+```
+
+Since 00.84.00 every `401` of the three REST filters —
+`RestAuthenticationFilter`, `RestAuthorizationFilter` and
+`RestJCustosVersionFilter` — goes through the decision mapper the
+bootstrap published (`.errorBodies(...)`, `.decisionMapper(...)`), falling
+back to `HttpStatusDecisionMapper`. It carries the challenge
+`WWW-Authenticate: Bearer` (the version filter replaces it with its
+`SessionStale` challenge) and leaves an audit event: `AccessDenied` with
+a reason `Unauthenticated:…` for an anonymous request (from the
+authentication filter `Unauthenticated:no-subject`),
+`SessionExpired` for an expired session, `SessionInvalidated` for a
+revoked one, `SessionStale` on drift. The mapper sets the body, not the
+`Content-Type` header — that stays with your response adapter. A refusal
+your own handler writes — a login handler's 401, for instance — goes
+through the same seam:
+
+```java
+RestDecisionContext.mapperOrDefault()
+    .apply(AuthorizationDecision.unauthenticated("bad-credentials"), response);
 ```
 
 ### 6. (Optional) Operation discovery filtered server-side
@@ -733,7 +777,8 @@ the Vaadin and REST adapters.
   instantiate the generated `<Type>Secured` subclass (compile-time).
 
 A complete runnable reference lives in `demo-standalone`: an
-interactive library-borrowing CLI with three seeded users that
+interactive library-borrowing CLI with three demo users (seeded only
+behind a development switch, see *Quick Start*) that
 exercises **both** paths — `LibraryService` (interface) via
 `SecuredProxy`, `MemberDirectory` (concrete class) via the
 processor-generated `MemberDirectorySecured`.
@@ -819,8 +864,14 @@ switch (result) {
 The flow consults `LoginAttemptPolicy.beforeAttempt(...)` first, then
 calls the SPI-registered `AuthenticationService.checkCredentials` /
 `loadSubject`, binds the subject through the active `SubjectStore`,
-records success/failure on the policy, and publishes `LoginSucceeded` /
-`LoginFailed` to the `JCustosAuditService`. `flow.logout()` clears the
+reports the outcome to the policy, and publishes `LoginSucceeded` to the
+`JCustosAuditService`. Since 00.84.00 a rejected login is audited exactly
+once, by the policy: `recordFailure` publishes `LoginFailed` in all three
+shipped policies, and the flow publishes it itself only for a login the
+policy refuses after the check (the key was locked meanwhile). A
+verification the KDF limiter shed is no verdict: the flow gives the
+attempt back and lets `CredentialVerificationUnavailableException` reach
+the caller, who answers "try again later". `flow.logout()` clears the
 SubjectStore for the current thread.
 
 ### 4. SubjectStore — ThreadLocal by default
@@ -853,7 +904,8 @@ Adapters map these to framework-specific behavior:
   to step-up, or reroute to error. `JCustosVersionEnforcerListener`
   reroutes drifted sessions to the configured login view.
 - `jCustos-rest` → HTTP status: `200`/handler, `401`, `403`, or
-  `401 + WWW-Authenticate: StepUp` / `SessionStale` (RFC 7235).
+  `401 + WWW-Authenticate: StepUp` / `SessionStale` (RFC 7235); every
+  other `Unauthenticated` 401 carries `WWW-Authenticate: Bearer`.
 
 ## Annotation-Driven Protection
 
@@ -872,6 +924,12 @@ Generic annotations (in `jCustos-core`):
 - `@Secured` (class-level, source-retention) → not an evaluator; **trigger for the compile-time annotation processor** in `jCustos-processor`
 
 Project-specific annotations are encouraged for Vaadin views (e.g. `@VisibleFor`).
+Since 00.84.00 a restriction declared on an annotation type —
+`@RequiresRole("ADMIN") @interface AdminOnly` — takes effect where that
+annotation is used (one level deep, in every adapter and in the
+`@Secured` processor), and the Vaadin navigation listener also enforces
+the restrictions of every router layout in a route's chain;
+`@PublicRoute` on a view does not lift the restriction of its layout.
 
 ## Method Security — runtime vs. compile-time
 
@@ -882,7 +940,7 @@ classes) the framework offers two paths, both routed through the same
 | Path | Target | Wiring | When to choose |
 |---|---|---|---|
 | Runtime / JDK Dynamic Proxy | Java **interface** | `SecuredProxy.wrap(MyService.class, impl)` (in `jCustos-standalone`) | The service has a clean interface; you're happy paying a per-call reflection check. Works for callbacks / lambdas via `SecuredProxy.requireAllowed(Class, methodName)`. |
-| Compile-time / Annotation Processor | **Concrete class** annotated with `@Secured` | `<annotationProcessorPath>` for `jCustos-processor`; instantiate the generated `<Type>Secured` subclass | The class has no interface, or you want a stable stacktrace / no per-call reflection. Method-security annotations on `final`, `private` or `static` methods raise compile errors. Underlying generator: `com.svenruppert:proxybuilder:00.11.00` + `proxybuilder-annotations:00.11.00`. |
+| Compile-time / Annotation Processor | **Concrete class** annotated with `@Secured` | `<annotationProcessorPath>` for `jCustos-processor`; instantiate the generated `<Type>Secured` subclass | The class has no interface, or you want a stable stacktrace / no per-call reflection. A restriction on a method the wrapper cannot override (`final`, `private`, `static`, `protected` or package-private) is a compile error (`processing/unenforceable-security-annotation`). Underlying generator: `com.svenruppert:proxybuilder:00.11.01` + `proxybuilder-annotations:00.11.01`. |
 
 Both paths land in the same `JCustosEnforcer.require…(…)` helpers,
 so a permission rule applies identically regardless of which path
@@ -897,9 +955,9 @@ expressed it. `demo-standalone` exercises both side by side
 | Type | Module / package | Purpose |
 |---|---|---|
 | `JCustosServiceResolver` | `jCustos-core/.../authorization/api` | Central SPI cache. Strict accessors throw `IllegalStateException`; `find…()` returns `Optional`; `set…(…)` is a programmatic test seam. Covers Authentication / Authorization / Audit / Action / LoginAttempt / Session / PasswordHasher / Logout / RoleHierarchy / ResourceResolver / JCustosVersionStore / SubjectIdResolver / Step-Up route. |
-| `JCustosEnforcer` | `jCustos-core/.../authorization/api` | Central enforcement entry point. Generic `enforce(Method, Class)` for the runtime/dynamic-proxy path; explicit `requirePermission` / `requireAllPermissions` / `requireAnyPermission` / `requireRole` / `requireAnyRole` / `requirePolicy` for the compile-time/annotation-processor path. Throws `AccessDeniedException` on deny. |
+| `JCustosEnforcer` | `jCustos-core/.../authorization/api` | Central enforcement entry point. Generic `enforce(Method, Class)` for the runtime/dynamic-proxy path; explicit `requirePermission` / `requireAllPermissions` / `requireAnyPermission` / `requireRole` / `requireAnyRole` / `requirePolicy` for the compile-time/annotation-processor path. Throws `AccessDeniedException` on deny. 00.84.00: under deny-by-default an element without a restriction is denied unless it or its class carries `@PublicRoute` (JS-SEC-081); `requirePolicy` needs a bound subject unless the policy allows anonymous calls (`PolicyBuilder.allowAnonymous()`, JS-SEC-157). |
 | `SecuredProxy` | `jCustos-standalone` | `SecuredProxy.wrap(Interface, impl)` returns a JDK dynamic proxy that routes every call through `JCustosEnforcer.enforce(method, declaringClass)`. `requireAllowed(Class, methodName)` is the single-shot variant for callbacks / lambdas. |
-| `SecuredAnnotationProcessor` | `jCustos-processor` | Compile-time annotation processor. For each `@Secured` concrete class it emits `<Type>Secured extends <Type>` and rewrites every annotated method as `JCustosEnforcer.require…(…)` + `super.<method>(…)`. Built on `com.svenruppert:proxybuilder:00.11.00` (+ `proxybuilder-annotations:00.11.00`). |
+| `SecuredAnnotationProcessor` | `jCustos-processor` | Compile-time annotation processor. For each `@Secured` concrete class it emits `<Type>Secured extends <Type>` and rewrites every annotated method as `JCustosEnforcer.require…(…)` + `super.<method>(…)`. Since 00.84.00 everything the native mapping does not cover — `@ProtectedBy`, custom and composed restrictions, restrictions inherited from supertypes, and un-annotated methods under deny-by-default — goes through `JCustosEnforcer.enforce(Method, Class)`, as `SecuredProxy` does. Built on `com.svenruppert:proxybuilder:00.11.01` (+ `proxybuilder-annotations:00.11.01`). |
 | `PermissionGuard` | `jCustos-core/.../authorization/api` | Stateless `hasPermission` / `requirePermission` (and role variants) on any `HasPermissions`/`HasRoles`. |
 | `SubjectIdResolver<U>` | `jCustos-core/.../authorization/api` | Phase 4c-Followup. Maps a typed user to `SubjectId` (+ optional `TenantId`). Apps register to unlock Vaadin's automatic JCustosVersion-snapshot capture in `LoginView`. |
 
@@ -911,6 +969,7 @@ expressed it. `demo-standalone` exercises both side by side
 | `AuditEventStore` + `InMemoryAuditEventStore` | `jCustos-core/.../audit` | Persistence SPI for audit events (Phase 2). Eclipse-Store impl available. |
 | `RingBufferAuditSink`, `LoggingAuditSink`, `CompositeAuditService`, `DefaultCompositeAuditService` | `jCustos-core/.../audit` | Default sinks; the RingBuffer backs the Vaadin `/audit`-route and the REST `GET /api/audit` endpoint. |
 | `StoreBackedJCustosAuditService` | `jCustos-core/.../audit` | `JCustosAuditService` over `AuditEventStore` (Phase 4b). Tenant-scoped, swallows store failures so audit cannot break the security flow. |
+| `SessionRef` | `jCustos-core/.../audit` | 00.84.00 (JS-SEC-117, CWE-532). `SessionRef.of(id)` is the session reference — `sref-` followed by the first 16 hex characters of the SHA-256 — that session audit events, the `LoggingAuditSink` line and session records carry instead of the live session id or token; a value of that form is returned unchanged. |
 
 ### Authentication, sessions, drift detection
 
@@ -918,16 +977,16 @@ expressed it. `demo-standalone` exercises both side by side
 |---|---|---|
 | `AuthenticationService<T,U>` | `jCustos-core/.../authentication` | SPI: credential validation + subject loading. |
 | `PasswordHasher`, `PasswordHash`, `Pbkdf2PasswordHasher` | `jCustos-core/.../authentication` | Hash + verify + `needsRehash` (drift detection). 00.84.00 (JS-SEC-072): default 600 000 iterations, stored parameters validated before derivation. |
-| `LoginAttemptPolicy` + `InMemoryLoginAttemptPolicy` + `StoreBackedLoginAttemptPolicy` | `jCustos-core/.../bruteforce` | Login throttling. `LoginAttemptDecision = Allowed \| LockedOut(Duration, int)`. Store-backed variant uses `LoginAttemptStore` (Phase 4b). |
+| `LoginAttemptPolicy` + `InMemoryLoginAttemptPolicy` + `StoreBackedLoginAttemptPolicy` | `jCustos-core/.../bruteforce` | Login throttling. `LoginAttemptDecision = Allowed \| LockedOut(Duration, int)`. Store-backed variant uses `LoginAttemptStore` (Phase 4b). 00.84.00: the resolver default is `InMemoryLoginAttemptPolicy` (five failures in fifteen minutes lock the key for fifteen minutes, doubling up to four hours), not the Noop (JS-SEC-124); an allowed `beforeAttempt` reserves the attempt and is followed by exactly one of `confirmSuccess`/`recordSuccess`, `recordFailure` or `abandonAttempt`, and `recordFailure` publishes `LoginFailed` (JS-SEC-123). Keys go through `SubjectKeyCanonicalizer`, so `alice` and `ALICE` are one account. |
 | `ClientAddressResolver` + `DefaultClientAddressResolver` + `TrustedProxyClientAddressResolver` | `jCustos-core/.../net` | 00.84.00 (JS-SEC-061, CWE-348). Decides which address keys throttling and audit lines. Default: the connection peer, no header. `trustedProxies(...)` honours `X-Forwarded-For` from configured proxies only. Adapters `VaadinClientAddress`, `RestClientAddress`; DX `.clientAddress(...)`. See `docs/security/deployment/reverse-proxy.md`. |
 | `SessionPolicy<U>` + `TimeoutSessionPolicy` | `jCustos-core/.../session` | Idle/absolute lifetime checks. |
 | `SessionStore`, `SessionRecord`, `JCustosVersion`, `JCustosVersionKey`, `JCustosVersionStore` | `jCustos-core/.../session` | Persistent session records + monotonic per-subject security version (Phase 2 + 4a). `SessionStore.findAll()` lists every session for an admin view. |
 | `JCustosVersionCheck`, sealed `JCustosVersionStatus`, `JCustosVersionEnforcer`, sealed `EnforcementOutcome` | `jCustos-core/.../session` | Phase 4c drift detection. Adapter-neutral check + enforcer; publishes `SessionStale` audit on drift. |
 | `LogoutService`, `SubjectClearingLogoutService`, `SubjectSessionRegistry` + `StoreBackedSubjectSessionRegistry` | `jCustos-core/.../logout` | `logout(SubjectId, LogoutScope)` SPI with multi-session logout via store-backed registry. Vaadin-side: `VaadinLogoutService` rotates HTTP session. |
 | `StandaloneLoginFlow`, `LoginResult` | `jCustos-standalone` | CLI/Desktop login driver — consults policy, calls `AuthenticationService`, binds subject, audits. |
-| `RememberMeTokenStore` + `StoreBackedRememberMeService` | `jCustos-core/.../authentication` | Phase 2c + 4b. Hash-only persistent-login tokens, tenant-scoped issue/validate/revoke. |
+| `RememberMeTokenStore` + `StoreBackedRememberMeService` | `jCustos-core/.../authentication` | Phase 2c + 4b. Hash-only persistent-login tokens, tenant-scoped issue/validate/revoke. 00.84.00 (JS-SEC-128): `rotate` exchanges the token on every use; an exchanged token presented again revokes all remember-me tokens of the subject and audits `SessionInvalidated` with the reason `RememberMeTokenReplay`. |
 | `ApiKeyStore`, `ApiKeyRecord`, `ApiKeyAuthenticationService` | `jCustos-core/.../authentication` | Phase 2d + 7b. Hash-only API keys with scopes; `ApiKeyAuthenticationService.authenticate` returns the active record or empty with a `ApiKeyDenied` audit reason. |
-| `RefreshTokenStore`, `RefreshTokenRecord`, `TokenService` | `jCustos-core/.../authentication` | Phase 2d + 7b. Rotating refresh tokens with replay defense via `markReplaced`; access tokens are returned to the caller without server-side persistence. Emits `TokenRotated`. 00.84.00 (JS-SEC-071): rotation claims the old token atomically before issuing; a replayed token revokes its family and is audited. |
+| `RefreshTokenStore`, `RefreshTokenRecord`, `TokenService` | `jCustos-core/.../authentication` | Phase 2d + 7b. Rotating refresh tokens with replay defense via `markReplaced`; access tokens are returned to the caller without server-side persistence. Emits `TokenRotated`. 00.84.00 (JS-SEC-071, JS-SEC-129): rotation claims the old token and stores its successor in one atomic `RefreshTokenStore.rotate(...)`; a replayed token revokes its family and is audited, and a revocation during the rotation is no longer lost. |
 
 ### Account lifecycle + notifications
 
@@ -952,26 +1011,30 @@ expressed it. `demo-standalone` exercises both side by side
 
 | Type | Module / package | Purpose |
 |---|---|---|
-| `RateLimitStore`, `RateLimitKey` | `jCustos-core/.../ratelimiting` | Phase 2d. Event-based sliding-window persistence (records timestamps, the policy decides the window). |
-| `RateLimitPolicy` + `InMemoryRateLimitPolicy`, sealed `RateLimitDecision` | `jCustos-core/.../ratelimiting` | Phase 7c. Pluggable per-scope rate-limit policy (separate from `LoginAttemptPolicy`). Sliding-window default; `Throttled` carries `retryAfter` for the HTTP header. |
+| `RateLimitStore`, `RateLimitKey` | `jCustos-core/.../ratelimiting` | Phase 2d. Event-based sliding-window persistence (records timestamps, the policy decides the window). 00.84.00 (JS-SEC-078, JS-SEC-118): `tryAdmit(key, at, since, limit)` checks and records in one step — atomically in the in-memory and the Eclipse-Store store, with events at the same instant counted separately. Both stores are bounded, evict the key used least recently and hold at most 10 000 events per key (`InMemoryRateLimitStore.DEFAULT_MAX_EVENTS_PER_KEY`), at which `tryAdmit` refuses. A third-party store should override `tryAdmit` atomically. |
+| `RateLimitPolicy` + `InMemoryRateLimitPolicy`, sealed `RateLimitDecision` | `jCustos-core/.../ratelimiting` | Phase 7c. Pluggable per-scope rate-limit policy (separate from `LoginAttemptPolicy`). Sliding-window default that admits exactly `limit` requests per window, also under concurrent calls; `Throttled` carries `retryAfter` for the HTTP header. |
 
 ### Vaadin adapter
 
 | Type | Module / package | Purpose |
 |---|---|---|
-| `LoginView`, `LoginListener<U>`, `AuthorizationListener`, `SessionLifetimeListener`, `VaadinLogoutService` | `jCustos-vaadin` | Annotation-driven view protection + Vaadin session/lifecycle integration. `LoginView.captureJCustosVersionSnapshot()` automatically records the Phase-4c snapshot when `JCustosVersionStore` and `SubjectIdResolver` are wired. |
-| `VaadinJCustosVersionContext`, `JCustosVersionEnforcerListener` | `jCustos-vaadin/session/vaadin` | Phase 4c. Per-VaadinSession snapshot carrier + `@ListenerPriority(Integer.MAX_VALUE)` BeforeEnterListener that reroutes drifted sessions to the configured login view. |
-| `SecuredButton`, `SecuredRouterLink`, `SecuredMenuItem`, `SecuredVisibility`, `SecuredVisibilityMode`, `SessionManagementView` | `jCustos-vaadin/components` | Phase 8a/8b. Permission-aware UI components (HIDE vs DISABLE on denial) and a reusable session-management Composite. |
+| `LoginView`, `LoginListener<U>`, `AuthorizationListener`, `SessionLifetimeListener`, `VaadinLogoutService` | `jCustos-vaadin` | Annotation-driven view protection + Vaadin session/lifecycle integration. `LoginView.captureJCustosVersionSnapshot()` automatically records the Phase-4c snapshot when `JCustosVersionStore` and `SubjectIdResolver` are wired. 00.84.00: `LoginView` runs the protocol of the registered `LoginAttemptPolicy` around `checkCredentials()` (JS-SEC-124); `SessionLifetimeListener` checks lifetime and revocation on every client message under the session lock (JS-SEC-155, JS-SEC-131). |
+| `LoginSessionRotation`, `VaadinSessionRevocation` | `jCustos-vaadin` | 00.84.00. `LoginSessionRotation.afterLogin(...)` is the shared post-login sequence (session id rotation, `SessionPolicy.onLogin`, rotation audit, `onSessionRotated`, version snapshot) of `LoginView` and the OAuth2 callback view (JS-SEC-146). `VaadinSessionRevocation.revoke` / `terminate` end a live session at once; with a registered `SessionStore` a record that is `REVOKED`, or that was seen and then removed, ends the session on its next request (JS-SEC-131). |
+| `VaadinJCustosVersionContext`, `JCustosVersionEnforcerListener` | `jCustos-vaadin/session/vaadin` | Phase 4c. Per-VaadinSession snapshot carrier + `@ListenerPriority(Integer.MAX_VALUE)` BeforeEnterListener that reroutes drifted sessions to the configured login view. 00.84.00 (JS-SEC-082, JS-SEC-155): the listener also enforces drift on every client message; wire it with `register(ServiceInitEvent)`. |
+| `SecuredButton`, `SecuredRouterLink`, `SecuredMenuItem`, `SecuredVisibility`, `SecuredVisibilityMode`, `SessionManagementView` | `jCustos-vaadin/components` | Phase 8a/8b. Permission-aware UI components (HIDE vs DISABLE on denial) and a reusable session-management Composite. 00.84.00: without a bound subject every requirement is denied, an empty role or permission list is rejected (JS-SEC-135), a denied component without `HasEnabled` is really hidden (JS-SEC-153), and `SessionManagementView` with `VaadinSessionRevocation::revoke` ends a session at the click and shows `SessionRef` references instead of session ids (JS-SEC-131). |
 
 ### REST adapter
 
 | Type | Module / package | Purpose |
 |---|---|---|
-| `RestHeaders`, `BearerTokenExtractor` | `jCustos-rest` | Case-insensitive header lookup and Bearer-token parsing. |
-| `RestAuthenticationFilter`, `RestAuthorizationFilter` | `jCustos-rest` | 401/403 filters; the authorization filter additionally consults `SessionPolicy.evaluate(...)` when subject-resolved metadata is available. |
+| `RestHeaders`, `BearerTokenExtractor` | `jCustos-rest` | Case-insensitive header lookup and Bearer-token parsing. 00.84.00 (JS-SEC-113): no token when `Authorization` arrives twice. |
+| `RestHeaderLines` | `jCustos-rest` | 00.84.00 (JS-SEC-113). For adapters: `joined(...)` builds `RestRequest.headers()` with repeated list headers joined by `", "`, `rejectDuplicates(...)` answers a repeated `Authorization`, `X-Api-Key` or `Cookie` header with `400`; `RestRequest.headerValues(...)` exposes every line. |
+| `RestAuthenticationFilter`, `RestAuthorizationFilter` | `jCustos-rest` | 401/403 filters; both consult `SessionPolicy.evaluate(...)` when subject-resolved metadata is available. Every 401 goes through the decision mapper with `WWW-Authenticate: Bearer` and an audit event (JS-SEC-086). The authorization filter takes the handler class in an overload of `authorizeAndHandle` (JS-SEC-114). |
+| `RestDecisionContext` | `jCustos-rest` | Holds the decision mapper the bootstrap published. 00.84.00: `mapperOrDefault()` is public — the seam for refusals a handler writes itself. |
+| `RestSessionRevocation` | `jCustos-rest` | 00.84.00 (JS-SEC-131). With a `SessionStore` registered (`.sessions(s -> s.storeBacked(...))` or `useSessionStore(...)`) and a resolver implementing `RestSubjectResolver.resolveSessionId`, all three filters refuse a session whose record is `REVOKED`, or was seen and then removed, with a 401 and a `SessionInvalidated(Revoked)` event. Record sessions under `SessionRef.of(token)`, never under the token; for several nodes switch on `requireRecord(true)`. |
 | `BodyRestRequest` | `jCustos-rest` | Body-capable `RestRequest`. |
 | `BootstrapRestStatusMapper` | `jCustos-rest` | `InitialAdminCreationResult` → HTTP status code + stable error code. |
-| `RestJCustosVersionContext`, `RestJCustosVersionFilter` | `jCustos-rest` | Phase 4c. Drift filter that returns `401 + WWW-Authenticate: SessionStale` (RFC 7235) on a stale session. |
+| `RestJCustosVersionContext`, `RestJCustosVersionFilter` | `jCustos-rest` | Phase 4c. Drift filter that returns `401 + WWW-Authenticate: SessionStale` (RFC 7235) on a stale session. 00.84.00: runs the revocation check first (JS-SEC-131) and records `sessionReference(sessionId)`, never the bearer token, in `SessionStale` (JS-SEC-117). |
 | `OpenApiJCustosMetadataGenerator`, `JCustosRequirement`, `HandlerJCustosMetadata` | `jCustos-rest/openapi` | Phase 8d. Extracts the five framework `@Requires…`-annotations from a handler class as a JSON-free structured tree apps merge into their own OpenAPI builder. |
 
 ### Bootstrap
@@ -979,7 +1042,7 @@ expressed it. `demo-standalone` exercises both side by side
 | Type | Module / package | Purpose |
 |---|---|---|
 | `BootstrapConfigurationLoader`, `BootstrapStatus` | `jCustos-core/.../bootstrap` | Centralised sysprop+env+default loading with TTL parsing; leak-safe status snapshot. |
-| `AdministratorAccountStore`, `BootstrapTokenStore`, `BootstrapTokenOutput`, `InitialAdminBootstrapService` | `jCustos-core/.../bootstrap` | First-run admin creation flow; modes `PERSISTENT_FILE` / `TRANSIENT_CONSOLE` / `DISABLED`. |
+| `AdministratorAccountStore`, `BootstrapTokenStore`, `BootstrapTokenOutput`, `InitialAdminBootstrapService` | `jCustos-core/.../bootstrap` | First-run admin creation flow; modes `PERSISTENT_FILE` / `TRANSIENT_CONSOLE` / `DISABLED`. 00.84.00 (JS-SEC-130): `FileBootstrapTokenStore` adopts only a token file it can have written itself (on POSIX owned by the process user, no access for group or others) and otherwise generates a fresh token. |
 
 ### Multi-tenancy
 
@@ -1090,8 +1153,8 @@ Headlines:
   bootstrap and demo-rest wired through the new
   `PasswordHashingService`.
 - **Phase 1b** – Optional `jCustos-crypto-bc` module adds Argon2id,
-  bcrypt and scrypt providers (BouncyCastle 1.78.1, no JCA mutation,
-  per-algorithm parameter validators). The modern profile is opt-in
+  bcrypt and scrypt providers (BouncyCastle, 1.86 since 00.84.00; no JCA
+  mutation, per-algorithm parameter validators). The modern profile is opt-in
   and fails fast when requested without the module on the classpath.
 - **Phase 2** – `SecretValue` (`AutoCloseable`), `PasswordInputPolicy`
   with Unicode normalisation, post-KDF HMAC-SHA-256 pepper with

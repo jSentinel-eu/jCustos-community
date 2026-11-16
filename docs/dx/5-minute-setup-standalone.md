@@ -117,8 +117,14 @@ produces an entry for `MemberDirectorySecured`.
 
 `mode(STRICT)` breaks on the three V00.72-to-V00.73 promotions and the
 new V00.73 sub-builder validation codes (`audit/missing-service`,
-`credentials/modern-without-bc`, …). `.sessions(...)` on Standalone
-records INFO only and never blocks the bootstrap.
+`credentials/modern-without-bc`, …). Since 00.84.00 it also refuses to
+boot without `.denyByDefault(true)` (`authorization/allow-by-omission`),
+without an audit service (`audit/noop-fallback`) and without a
+`LogoutService` (`logout/missing-service`); an `AuthenticationService`
+or `AuthorizationService` registered through `META-INF/services` (as
+`@JCustosAutoService` does) counts and is listed as `spi-registered`.
+`.sessions(...)` on Standalone records INFO only and never blocks the
+bootstrap.
 
 ## Programmatic health (V00.74.10)
 

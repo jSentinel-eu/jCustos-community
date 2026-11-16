@@ -52,12 +52,12 @@ running.
 | `BootstrapConfigurationLoader` | Loads config from sysprops + env vars (centralized) |
 | `BootstrapStatus` | Adapter-neutral, leak-safe status snapshot (never carries the token) |
 | `BootstrapToken`, `BootstrapTokenGenerator` | Token model + `SecureRandom` generator (XXXX-XXXX-XXXX-XXXX-XXXX, ~100 bits, no `O 0 I 1`) |
-| `BootstrapTokenStore`, `InMemoryBootstrapTokenStore`, `FileBootstrapTokenStore` | Token persistence |
+| `BootstrapTokenStore`, `InMemoryBootstrapTokenStore`, `FileBootstrapTokenStore` | Token persistence; since 00.84.00 `FileBootstrapTokenStore` adopts only a file it can have written itself (on POSIX a regular file of the process user without access for group or others, token in the generator's format) and otherwise generates a fresh token (JS-SEC-130) |
 | `BootstrapTokenOutput`, `ConsoleBootstrapTokenOutput`, `FileBootstrapTokenOutput` | Operator-facing banner emitter |
 | `BootstrapStateService` | Tells whether bootstrap is required |
 | `BootstrapStartup` | One-shot init on server boot |
 | `AdministratorAccountStore`, `NewAdministrator` | App-side seam |
-| `PasswordHasher`, `Pbkdf2PasswordHasher` | Password hashing (PBKDF2-HMAC-SHA256, 120 000 iterations) |
+| `PasswordHasher`, `Pbkdf2PasswordHasher` | Password hashing (PBKDF2-HMAC-SHA256; 600 000 iterations since 00.84.00, previously 120 000 — older hashes still verify and report `needsRehash`) |
 | `PasswordPolicy`, `MinimumLengthPasswordPolicy` | Password validation |
 | `CreateInitialAdminCommand`, `InitialAdminCreationResult` | Service contract |
 | `InitialAdminBootstrapService` | Orchestrator: validate → check race → hash → create → invalidate token, all under a single `ReentrantLock` |

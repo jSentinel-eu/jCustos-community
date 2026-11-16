@@ -24,7 +24,7 @@ under `JSentinelAuditService`. The review covers:
 | `CredentialStatusChanged`          | Bulk transitions; presence of an incident id in `reason` field. |
 | `PasswordResetRequested` / `PasswordResetCompleted` | Volume; per-user cardinality. |
 | `RateLimitExceeded`                | Scope distribution; sustained vs burst patterns.       |
-| `LoginSucceeded` / `LoginFailed`   | Failure rate baseline shift; new client-address surfaces. |
+| `LoginSucceeded` / `LoginFailed`   | Failure rate baseline shift; new client-address surfaces. Since V00.84.00 the login-attempt policy audits every rejected login exactly once (before, `StandaloneLoginFlow` audited it twice and the store-backed and Noop policies not at all) — do not compare a baseline across that upgrade. |
 | `BruteForceLimitReached`           | Affected accounts; lockout durations.                  |
 
 ## Review steps

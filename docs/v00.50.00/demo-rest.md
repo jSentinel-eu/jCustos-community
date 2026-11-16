@@ -78,12 +78,24 @@ registry, bootstrap configuration loading — lives in `jSentinel-core` /
 
 These are **demo credentials only**. Do not reuse in production.
 
-When the bootstrap mechanism is enabled
-(`-Dsecurity.bootstrap.mode=TRANSIENT_CONSOLE` or
-`-Dsecurity.bootstrap.mode=PERSISTENT_FILE`), the `admin` user is **not**
-pre-populated. The first administrator must be created via the bootstrap
-token — see [`docs/bootstrap.md`](bootstrap.md) and the new CLI command
-`init-admin`.
+Since 00.84.00 (JS-SEC-137) the server listens on the loopback interface
+only and creates **none** of these accounts by default. They exist only
+when the server is started with the development switch
+`-Djcustos.demo.insecure-seed-accounts=true` — for a throw-away local
+instance, never for one others can reach:
+
+- with the bootstrap mechanism enabled
+  (`-Dsecurity.bootstrap.mode=TRANSIENT_CONSOLE`, the default, or
+  `-Dsecurity.bootstrap.mode=PERSISTENT_FILE`) the switch adds `editor`
+  and `viewer`; `admin` is **not** pre-populated;
+- with `-Dsecurity.bootstrap.mode=DISABLED` it adds `admin` as well.
+  Bootstrap mode `DISABLED` without the switch refuses to start, because
+  nothing could create an administrator.
+
+Without the switch the first administrator must be created via the
+bootstrap token — see [`docs/bootstrap.md`](bootstrap.md) and the CLI
+command `init-admin`. The example sessions below assume the switch (and,
+for `login admin admin`, bootstrap mode `DISABLED`).
 
 ## Demo permissions and role mapping
 

@@ -152,8 +152,11 @@ warning. Switch to `VaadinJCustosStarter.productionDefaults()` (or
 three V00.72-to-V00.73 promoted codes
 (`secure-route/unknown-policy`,
 `session-management-view-without-session-store`,
-`security-version-without-subject-id-resolver`) — clean those up before
-flipping the mode.
+`security-version-without-subject-id-resolver`) and, since 00.84.00, on
+`authorization/allow-by-omission` (no `.denyByDefault(true)`),
+`audit/noop-fallback` (no `.audit(...)` and no registered audit
+service), `logout/missing-service` and `vaadin/login-route-unresolved` —
+clean those up before flipping the mode.
 
 Since 00.84.00 the session-management route also needs an access
 requirement: call `.sessionManagementView(SecuredVisibility.Requirement

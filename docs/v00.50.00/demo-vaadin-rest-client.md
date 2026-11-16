@@ -112,13 +112,19 @@ Oder per Env-Var: `DEMO_BACKEND_URL=http://localhost:9000`.
 
 ## Mit anderen Demo-Usern testen
 
-Wenn das Backend mit `SECURITY_BOOTSTRAP_MODE=DISABLED` startet, sind
-die vorpopulierten User (`admin/admin`, `editor/editor`, `viewer/viewer`)
-direkt einsetzbar — der Setup-Flow entfällt:
+Demo-User mit festen Passwörtern legt das Backend seit 00.84.00
+(JS-SEC-137) nur mit dem Entwicklungsschalter
+`-Djcustos.demo.insecure-seed-accounts=true` an — ausschließlich für eine
+lokale Wegwerf-Instanz, nie für eine, die andere erreichen. Mit dem
+Schalter entstehen `editor/editor` und `viewer/viewer`; startet das Backend
+zusätzlich mit `SECURITY_BOOTSTRAP_MODE=DISABLED`, auch `admin/admin`, und
+der Setup-Flow entfällt. Ohne den Schalter verweigert der Modus `DISABLED`
+den Start, weil dann niemand einen Administrator anlegen könnte.
 
 ```bash
-# Backend
-mvn -pl :demo-rest exec:java -Dsecurity.bootstrap.mode=DISABLED
+# Backend (nur lokal: feste, öffentlich bekannte Passwörter)
+mvn -pl :demo-rest exec:java -Dsecurity.bootstrap.mode=DISABLED \
+    -Djcustos.demo.insecure-seed-accounts=true
 
 # Frontend (anderes Terminal)
 mvn -pl :demo-vaadin-rest-client jetty:run
@@ -155,6 +161,7 @@ Backend-seitig (gilt für `demo-rest`, nicht für den Client):
 | `security.bootstrap.mode` | `SECURITY_BOOTSTRAP_MODE` | `TRANSIENT_CONSOLE` |
 | `security.bootstrap.token.file` | `SECURITY_BOOTSTRAP_TOKEN_FILE` | `./data/bootstrap.token` |
 | `security.bootstrap.token.ttl` | `SECURITY_BOOTSTRAP_TOKEN_TTL` | `PT24H` |
+| `jcustos.demo.insecure-seed-accounts` | — | `false` (Demo-User mit festen Passwörtern, nur lokal) |
 
 ## Bekannte Limitierungen
 

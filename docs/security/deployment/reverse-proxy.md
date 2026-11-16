@@ -16,7 +16,7 @@ SPI (`eu.jsentinel.jcustos.net`) instead of calling `getRemoteAddr()` itself:
 
 | Adapter | Entry point | Feeds |
 |---|---|---|
-| Vaadin | `VaadinClientAddress.current()` (used by `LoginView`) | `SessionContext.clientAddress`, login throttles in the demos |
+| Vaadin | `VaadinClientAddress.current()` (used by `LoginView`) | `SessionContext.clientAddress`, the login-attempt policy `LoginView` runs (JS-SEC-124) |
 | REST | `RestClientAddress.resolve(request)`, `RestAccessContextFactory` attribute `clientAddress` | authorisation context, audit route |
 | Standalone (CLI) | — | no network, no client address |
 
@@ -195,5 +195,6 @@ curl -H 'Authorization: Bearer a' -H 'Authorization: Bearer b' https://app.examp
 - `FEATURES.md` — SPI table entry `ClientAddressResolver`.
 - `RELEASE-NOTES-00.84.00.md` — section "Client address behind a reverse proxy
   (R2, JS-SEC-061, CWE-348)".
-- Session cookie attributes and other embedded-Jetty deployment settings are
-  covered by the deployment guide added with R9 of 00.84.00.
+- Session cookie attributes: `docs/dx/5-minute-setup-vaadin.md`, section 3
+  ("Session cookie"); every Vaadin demo's `web.xml` sets an application-specific
+  name, `HttpOnly`, `Secure` and `SameSite=Lax`.

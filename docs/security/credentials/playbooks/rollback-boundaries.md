@@ -20,7 +20,7 @@ what is permanently one-way.
 | `AbuseDecision.Block` throttle      | Wait for the window to expire, or restart with a tighter window.        |
 | Policy version increment            | Decrement (deploy the previous policy) — old envelopes still verify under it. |
 | Provider downgrade (pin previous version) | Re-pin the affected dependency; SBOM diff verifies the change.    |
-| `MUST_CHANGE` status flip           | Operator-issued `CredentialLifecycleService` transition back to `ACTIVE`. Rare; needs an audit-recorded justification. |
+| `MUST_CHANGE` status flip           | Operator-issued `CredentialLifecycleService` transition back to `ACTIVE`. Rare; needs an audit-recorded justification. Never for a credential that was `COMPROMISED`: since V00.84.00 `COMPROMISED` cannot return to `ACTIVE` without a new secret (JS-SEC-076), and a detour through `MUST_CHANGE` would accept the compromised secret again. |
 
 ## Conditionally reversible
 
@@ -32,6 +32,7 @@ no downstream operation has consumed the new state.
 | Pepper key rotation          | Until **any** credential has been rehashed under the new key. After the first rehash, the old key cannot re-derive the new envelope's HMAC tag. |
 | Algorithm deprecation        | Until **any** credential has been rehashed under the new algorithm. |
 | Token (reset / API key) bulk invalidation | Until the new token issuance has been published. Once a user has obtained a new token, the old digest cannot be restored without re-issuance. |
+| Framework downgrade from V00.84.00 | Until V00.84.00 writes the first bcrypt hash — a rehash at login, a new or changed password: its envelope carries `term=1`, which no earlier release can verify (JS-SEC-133), and until the Eclipse-Store storage is first opened and converted to the 00.84.00 layout (`persistence/storage-layout-migrated`), which no earlier release can open (JS-SEC-125). Back up the storage directory before the upgrade. |
 
 ## One-way (no rollback)
 

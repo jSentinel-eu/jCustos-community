@@ -55,6 +55,14 @@ same VM via `BootstrapWiring`.
 | (admin is NOT pre-populated) | — | created by you via the bootstrap flow |
 
 These are demo credentials, hashed at startup with PBKDF2. Do not reuse.
+Since 00.84.00 (JS-SEC-137) `user` and `demo` are created only when the
+demo is started with the development switch
+`-Djcustos.demo.insecureDemoAccounts=true` — for a local try-out, never on
+an instance others can reach:
+
+```bash
+cd demo-vaadin && mvn jetty:run -Djcustos.demo.insecureDemoAccounts=true
+```
 
 The first administrator is created during the **first run** via the
 bootstrap token printed to the server console.
@@ -109,12 +117,10 @@ cd demo-vaadin && mvn jetty:run \
     -Dsecurity.bootstrap.token.file=./data/bootstrap.token
 ```
 
-To skip the bootstrap flow for review purposes (turns on a
-hard-coded `admin/admin` demo user as in the original demo state):
-
-```bash
-cd demo-vaadin && mvn jetty:run -Dsecurity.bootstrap.mode=DISABLED
-```
+Bootstrap mode `DISABLED` does not skip the flow in this demo: the demo
+has no administrator account of its own, so start-up stops with
+"Bootstrap is DISABLED but no administrator account exists" (the guard in
+`BootstrapStartup`). Use `TRANSIENT_CONSOLE` or `PERSISTENT_FILE`.
 
 See [`bootstrap.md`](bootstrap.md) for the full bootstrap matrix.
 
@@ -124,9 +130,11 @@ See [`bootstrap.md`](bootstrap.md) for the full bootstrap matrix.
 
 ### Welcome screen
 
-Shows the logged-in user's display name and roles. `MainView` is
-guarded by `@VisibleFor(USER)`; everyone with the `USER` role
-(directly or via a role hierarchy) reaches it.
+Shows the logged-in user's display name and roles. `MainView` carries
+`@SecureRoute()` (since 00.84.00, JS-SEC-158): every authenticated
+subject reaches it, an anonymous visitor is sent to the login view. It is
+the forward target for a signed-in subject that a role check refuses, so
+it must admit every signed-in subject.
 
 ### Side navigation
 
@@ -163,12 +171,13 @@ to standalone routes:
 
 | Route | Annotation | Result for non-matching role |
 |---|---|---|
-| `/admin` | `@VisibleFor({ADMIN})` | reroute to login |
-| `/nerd` | `@VisibleFor({ADMIN, NERD})` | reroute to login |
-| `/public` | (none) | always reachable |
+| `/admin` | `@VisibleFor({ADMIN})` | anonymous: reroute to login; signed in without the role: forward to `MainView` |
+| `/nerd` | `@VisibleFor({ADMIN, NERD})` | anonymous: reroute to login; signed in without the role: forward to `MainView` |
+| `/public` | `@PublicRoute` | always reachable (the demo runs deny-by-default since 00.84.00, so a public view has to say so) |
 
-Try opening them as `user/user` (USER only) → reroute. Then log in as
-`demo/demo` (NERD) and reach `/nerd` but not `/admin`.
+With the demo accounts switched on, open them as `user/user` (USER only)
+→ forwarded to `MainView`. Then log in as `demo/demo` (NERD) and reach
+`/nerd` but not `/admin`.
 
 ### Sign out
 

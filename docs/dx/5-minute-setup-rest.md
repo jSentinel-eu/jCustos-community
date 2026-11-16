@@ -112,9 +112,9 @@ JDK `HttpServer`.
 ## Session store and revocation (00.84.00)
 
 With `.sessions(s -> s.storeBacked(store))` and a resolver that
-implements `RestSubjectResolver.resolveSessionId`, the authentication
-and authorisation filters look up the session record before the
-handler runs. A record with the status `REVOKED`, or one that was seen
+implements `RestSubjectResolver.resolveSessionId`, the three REST
+filters — authentication, authorisation and the version filter — look
+up the session record before the handler runs. A record with the status `REVOKED`, or one that was seen
 on an earlier request and is gone, ends the session: 401 through the
 decision mapper and a `SessionInvalidated` audit event with the reason
 `Revoked`. Save the record at login under a non-secret key —
@@ -130,6 +130,12 @@ Several nodes revoke by status, or switch on
 `security-version-without-subject-id-resolver`) plus every new V00.73
 sub-builder validation code (`audit/missing-service`,
 `sessions/missing-store`, `credentials/modern-without-bc`, …).
+Since 00.84.00 it also refuses to boot without `.denyByDefault(true)`
+(`authorization/allow-by-omission`), without an audit service
+(`audit/noop-fallback`) and without a `LogoutService`
+(`logout/missing-service`). Services registered through
+`META-INF/services` count: the bootstrap lists them as
+`spi-registered` instead of reporting `missing-authentication-service`.
 
 ## Programmatic health (V00.74.10)
 
@@ -225,6 +231,10 @@ Notes:
   `.jwt(j -> j.validator(myValidator))` (the two are mutually exclusive).
 - the JWKS client caches by `Cache-Control: max-age` (default 5 min), refreshes
   once on a `kid` miss (single-flight), and negative-caches endpoint failures.
+  Since 00.84.00 it drops the key set after 24 hours without a successful fetch
+  (`jwks/stale-keys-dropped`), skips keys that may not verify signatures (`use`
+  other than `sig`, `key_ops` without `verify`) and RSA keys below 2048 bit
+  (JS-SEC-149).
 - a non-`https` JWKS URI is a STRICT error (`jwks/uri-not-https`).
 
 See `demo-rest`'s `/api/jwt/demo` route for an end-to-end example.

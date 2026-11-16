@@ -36,7 +36,7 @@ SPI-Datei unter `META-INF/services/`.
 | `jCustos-rest` | `jCustos-rest` | Framework-light REST-Adapter (Filter, BearerToken, HTTP-Status-Mapping, Step-Up `WWW-Authenticate`) — plus Phase-4c `RestJCustosVersionFilter` und Phase-8d `OpenApiJCustosMetadataGenerator` |
 | `jCustos-standalone` | `jCustos-standalone` | Plain-Java / Desktop / CLI Adapter (ThreadLocal-Subject, `SecuredProxy` Dynamic-Proxy) |
 | `jCustos-test` | `jCustos-test` | Wiederverwendbare Test-Fixtures: `FakeAuthenticationService`, `FakeAuthorizationService`, `InMemorySubjectStore`, `RecordingAuditSink`, JUnit-5-`JCustosTestExtension`. Test-Scope-Dependency. |
-| `jCustos-processor` | `jCustos-processor` | Compile-Time-Annotation-Processor: erzeugt `<Type>Secured`-Subklassen für `@Secured`-annotierte konkrete Klassen. Wird als `<annotationProcessorPath>` eingebunden. Basiert auf `com.svenruppert:proxybuilder:00.11.00` + `proxybuilder-annotations:00.11.00`. |
+| `jCustos-processor` | `jCustos-processor` | Compile-Time-Annotation-Processor: erzeugt `<Type>Secured`-Subklassen für `@Secured`-annotierte konkrete Klassen. Wird als `<annotationProcessorPath>` eingebunden. Basiert auf `com.svenruppert:proxybuilder:00.11.01` + `proxybuilder-annotations:00.11.01` (seit **V00.84**; 00.11.00 der Annotations wurde nie veröffentlicht, JS-SEC-141). |
 | `jCustos-persistence-testkit` | `jCustos-persistence-testkit` | ⚠️ Contract-Test-Suites für jede Persistence-Store-SPI: `@Test default`-Methoden-Interfaces, die ein eigener Store-Adapter implementiert, um automatisch gegen den Library-Persistence-Kontrakt verifiziert zu werden. Persistence-Tech-agnostisch. |
 | `jCustos-persistence-eclipsestore` | `jCustos-persistence-eclipsestore` | ⚠️ Eclipse-Store (`org.eclipse.store:storage-embedded:4.1.0`) Referenz-Impl jeder Persistence-Store-SPI; besteht dieselbe 95+ Contract-Suite wie die In-Memory-Defaults. Drop-in für durable Persistence. |
 | `demo-rest-shared` | `demo-rest-shared` | Transport-Konstanten + JSON-Helper für REST-Demos |
@@ -52,6 +52,15 @@ SPI-Datei unter `META-INF/services/`.
 Alle SPIs werden über `META-INF/services/<FQN>` registriert und über
 `eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver`
 aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
+Seit **V00.84** übernehmen auch die DX-Bootstraps
+(`RestSecurity`/`StandaloneSecurity`/`VaadinSecurity.bootstrap().install()`)
+einen per `META-INF/services` (etwa `@JCustosAutoService`) registrierten
+`AuthenticationService`/`AuthorizationService` — der REST-Bootstrap auch den
+`RestSubjectResolver` — und listen ihn mit der Quelle `spi-registered`, statt
+`missing-authentication-service`/`missing-authorization-service` zu melden;
+mehrere registrierte Implementierungen sind der ERROR
+`ambiguous-authentication-service`/`ambiguous-authorization-service`
+(`ambiguous-rest-subject-resolver`).
 
 ### Authentifizierung & Autorisierung
 
@@ -77,7 +86,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
-| `LoginAttemptPolicy` | core | `InMemoryLoginAttemptPolicy` | Login-Throttling + Lockout-Entscheidungen |
+| `LoginAttemptPolicy` | core | `InMemoryLoginAttemptPolicy` (seit **V00.84 auch Resolver-Default** statt `NoopLoginAttemptPolicy`: fünf Fehlversuche in 15 min sperren 15 min, verdoppelnd bis 4 h; ein ausdrücklich registrierter Noop meldet `bruteforce/noop-policy` — JS-SEC-124) | Login-Throttling + Lockout-Entscheidungen. Seit **V00.84** (JS-SEC-123) reserviert ein erlaubtes `beforeAttempt` den Versuch; danach folgt genau eines von `confirmSuccess`/`recordSuccess`, `recordFailure` oder `abandonAttempt`, `peek` liest ohne Reservierung. `recordFailure(context[, reason])` ist der einzige Audit-Punkt für `LoginFailed`; die Schlüssel laufen über `SubjectKeyCanonicalizer` (`alice` = `ALICE`) |
 | `ClientAddressResolver` | core | `DefaultClientAddressResolver` (Verbindungs-Peer, kein Header) | **V00.84** (JS-SEC-061, CWE-348): entscheidet, welche Adresse Throttling, Abuse-Erkennung und Audit-Zeilen schlüsselt. `TrustedProxyClientAddressResolver` wertet `X-Forwarded-For` nur von konfigurierten Proxys (Adressen/CIDR) aus, liest von rechts, ignoriert `Forwarded`/`X-Real-IP`. Adapter: `VaadinClientAddress`, `RestClientAddress`, `RestRequest.remoteAddress()`, DX `.clientAddress(...)`. Doku: `docs/security/deployment/reverse-proxy.md` |
 | `SessionPolicy<U>` | core | `TimeoutSessionPolicy` (seit **V00.84 auch Resolver-Default**: 30 min Leerlauf, 12 h Gesamtlebensdauer, Rotation nach Login, Login-Route aus dem Resolver — JS-SEC-065; `NoopSessionPolicy` ist der ausdrückliche Opt-out) | Lifecycle-Hooks + Idle/Absolute-Timeout |
 
@@ -85,7 +94,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
-| `LogoutService` | core | `NoopLogoutService` / `SubjectClearingLogoutService` | Zentraler Logout-Treiber mit Fan-out |
+| `LogoutService` | core | `NoopLogoutService` / `SubjectClearingLogoutService` (der Noop-Rückfall wird seit **V00.84** einmalig als `logout/noop-fallback` gemeldet; der DX-Bootstrap meldet `logout/missing-service` — WARNING, ERROR in PRODUCTION/STRICT, JS-SEC-124) | Zentraler Logout-Treiber mit Fan-out |
 | `LogoutListener` | core | — (Anwender-Erweiterung) | Post-logout Side-Effects (Token-Revoke etc.) |
 | `SubjectSessionRegistry` | core | `InMemorySubjectSessionRegistry` | Multi-Session-Tracking pro Subject (für `AllSessionsOfSubject`-Scope) |
 
@@ -94,9 +103,10 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
 | `PasswordHasher` | core | `Pbkdf2PasswordHasher` (seit **V00.84** 600 000 Iterationen aus `Pbkdf2Defaults`, JS-SEC-072; `verify` prüft Iterationszahl und Salt-Länge gegen die Grenzwerte, bevor abgeleitet wird) | Hashing + Drift-Detection (`needsRehash`); Legacy-Drahtformat `pbkdf2$…`, neue Anwendungen nutzen `PasswordHashingServices.defaults()` |
+| `PasswordHashProvider` | core | `Pbkdf2PasswordHashProvider`; Argon2id/bcrypt/scrypt über `jCustos-crypto-bc` | Algorithmus-Provider der Credential-Pipeline (`PasswordHashingService`). Seit **V00.84** Default-Methode `rehashHint(PasswordHashEnvelope)`: ein Provider meldet Schwächen, die nur er kennt, `needsRehash` wertet den Hinweis nach der Parameterprüfung der Policy aus; `BcryptPasswordHashProvider` meldet jede Hülle ohne `term=1` als `PARAMETERS_OUTDATED` (JS-SEC-133) |
 | `PasswordPolicy` | core | `MinimumLengthPasswordPolicy(8)` | Passwort-Mindestlängen-Validierung |
 | `AdministratorAccountStore` | core | anwendungsdefiniert | Persistierung des Bootstrap-Admins |
-| `BootstrapTokenStore` | core | `InMemoryBootstrapTokenStore` / `FileBootstrapTokenStore` | Token-Persistenz für First-Run-Bootstrap |
+| `BootstrapTokenStore` | core | `InMemoryBootstrapTokenStore` / `FileBootstrapTokenStore` | Token-Persistenz für First-Run-Bootstrap; `FileBootstrapTokenStore` übernimmt seit **V00.84** nur eine Datei, die er selbst geschrieben haben kann (POSIX: reguläre Datei des Prozessnutzers ohne Rechte für Gruppe/andere; Token im Generatorformat), sonst entsteht ein neuer Token (JS-SEC-130) |
 | `BootstrapTokenOutput` | core | `ConsoleBootstrapTokenOutput` / `FileBootstrapTokenOutput` | Token-Ausgabe an Operator |
 
 ### Rollenmodell (optional)
@@ -112,7 +122,7 @@ aufgelöst (cached AtomicReference + lazy ServiceLoader-Resolution).
 
 | SPI | Modul | Zweck |
 |---|---|---|
-| `RestSubjectResolver` | rest | Request → `Optional<JCustosSubject>` + `SessionMetadata` + (Phase 4c) optionaler `RestJCustosVersionContext` |
+| `RestSubjectResolver` | rest | Request → `Optional<JCustosSubject>` + `SessionMetadata` + (Phase 4c) optionaler `RestJCustosVersionContext`; seit **V00.84** Default-Methode `resolveSessionId(request)` — liefert sie eine Session-ID, prüfen die REST-Filter den `SessionStore`-Datensatz auf Widerruf (JS-SEC-131) |
 
 ### Persistence-Stores (Phase 2 — alle 11 ⚠️ `@ExperimentalJCustosApi`)
 
@@ -123,16 +133,16 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | Store | Modul / Package | Record / Key | Zweck |
 |---|---|---|---|
 | `AuditEventStore` | core/audit | `AuditEnvelope` | Persistente Audit-Events; Query-API |
-| `SessionStore` | core/session | `SessionRecord` keyed on `SessionId` | Persistente Sessions + `findAll()` für Admin-Views |
-| `LoginAttemptStore` | core/bruteforce | `LoginAttemptKey(username, clientAddress)` | Brute-Force-Versuche, store-backed flacher Lockout |
+| `SessionStore` | core/session | `SessionRecord` keyed on `SessionId` | Persistente Sessions + `findAll()` für Admin-Views; seit **V00.84** (JS-SEC-131) liest die Widerrufsprüfung (`VaadinSessionRevocation`, `RestSessionRevocation`) den Datensatz pro Request — `REVOKED` oder ein gesehener und danach entfernter Datensatz beendet die Session, `EXPIRED` allein nicht; Datensätze unter `SessionRef.of(id)` statt der Live-ID ablegen (JS-SEC-117) |
+| `LoginAttemptStore` | core/bruteforce | `LoginAttemptKey(username, clientAddress)` | Brute-Force-Versuche, store-backed flacher Lockout; seit **V00.84** vier atomare Versuchs-Operationen als `default`-Methoden, der In-Memory-Store ist hart begrenzt und verdrängt keinen gesperrten Schlüssel (JS-SEC-122, JS-SEC-123) |
 | `RoleAssignmentStore` | core/authorization/api/roles | `RoleAssignmentKey(tenant, subjectId)` → `Set<RoleName>` | Persistente Rollen-Zuordnungen |
 | `BootstrapStateStore` | core/bootstrap | `BootstrapState` per Tenant | "Ist das System bootstrapped?" — idempotent |
-| `RememberMeTokenStore` | core/authentication | `RememberMeTokenRecord` (hash-only) | Persistent-Login-Tokens |
+| `RememberMeTokenStore` | core/authentication | `RememberMeTokenRecord` (hash-only) | Persistent-Login-Tokens; seit **V00.84** `markRotated`/`findRotated` als Spur getauschter Tokens für die Replay-Erkennung — beide mitgelieferten Stores führen sie (JS-SEC-128) |
 | `PasswordResetTokenStore` | core/accountlifecycle | `PasswordResetTokenRecord` (hash-only, single-use); `InMemoryPasswordResetTokenStore` seit **V00.84** kapazitätsbegrenzt (`CapacityBound`, Subjekt-Index, JS-SEC-074) | Passwort-Reset-Flow |
 | `EmailVerificationTokenStore` | core/accountlifecycle | `EmailVerificationTokenRecord` (hash-only, single-use); `InMemoryEmailVerificationTokenStore` seit **V00.84** kapazitätsbegrenzt (JS-SEC-074) | Email-Verifikations-Flow |
 | `ApiKeyStore` | core/authentication | `ApiKeyRecord` (hash-only, mit Scopes) | Long-Lived API-Keys |
-| `RefreshTokenStore` | core/authentication | `RefreshTokenRecord` (hash-only, rotating mit `markReplaced`) | Rotating Refresh-Tokens mit Replay-Defense |
-| `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter; seit **V00.84** `tryAdmit(key, at, since, limit)` als atomare Zulassung (CWE-367), In-Memory-Store kapazitätsbegrenzt mit Verdrängung des ältesten Schlüssels und Fensterbeschnitt (JS-SEC-078) |
+| `RefreshTokenStore` | core/authentication | `RefreshTokenRecord` (hash-only, rotating mit `markReplaced`) | Rotating Refresh-Tokens mit Replay-Defense; seit **V00.84** atomares `rotate(oldHash, successor, now)` und eine „invalid before“-Marke nach `revokeAll` (JS-SEC-129) |
+| `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter; seit **V00.84** prüft und zählt `tryAdmit(key, at, since, limit)` in einem Schritt (CWE-367) — atomar im In-Memory- und im Eclipse-Store-Store, Events mit gleichem Zeitpunkt zählen einzeln, es werden genau `limit` Anfragen zugelassen (JS-SEC-078, JS-SEC-118). Beide Stores sind begrenzt, verdrängen den am längsten nicht benutzten Schlüssel und halten höchstens 10 000 Events pro Schlüssel (`InMemoryRateLimitStore.DEFAULT_MAX_EVENTS_PER_KEY`; an der Grenze lehnt `tryAdmit` ab) |
 
 ### JCustosVersion / Drift Detection (Phase 4 — ⚠️)
 
@@ -156,13 +166,13 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | Klasse | Modul | Zweck |
 |---|---|---|
 | `ApiKeyAuthenticationService` | core/authentication | Hash-only Lookup, Lifecycle-Verdict (`Unknown` / `ForeignTenant` / `Revoked` / `Expired`); markiert `lastUsedAt`; emittiert `ApiKeyUsed`/`ApiKeyDenied` |
-| `TokenService` | core/authentication | `issue(subject)` / `rotate(refresh)` / `revoke(refresh)` über `RefreshTokenStore`; chain-link via `markReplaced` mit Replay-Defense; emittiert `TokenRotated` auf erfolgreicher Rotation; seit **V00.84** (JS-SEC-071, CWE-367/CWE-294) atomarer Claim über `markReplaced` **vor** dem Ausstellen (zwei nebenläufige Rotationen → genau ein Paar), Replay eines verbrauchten Tokens sperrt die Token-Familie und auditiert `CredentialVerificationFailed(REFRESH_TOKEN_REPLAY)` |
+| `TokenService` | core/authentication | `issue(subject)` / `rotate(refresh)` / `revoke(refresh)` über `RefreshTokenStore`; chain-link via `markReplaced` mit Replay-Defense; emittiert `TokenRotated` auf erfolgreicher Rotation; seit **V00.84** (JS-SEC-071, CWE-367/CWE-294) atomarer Claim **vor** dem Ausstellen (zwei nebenläufige Rotationen → genau ein Paar), Replay eines verbrauchten Tokens sperrt die Token-Familie und auditiert `CredentialVerificationFailed(REFRESH_TOKEN_REPLAY)`; Claim und Nachfolger laufen seit JS-SEC-129 in einem Schritt über `RefreshTokenStore.rotate`, ein Logout oder `revokeAll` während der Rotation geht nicht mehr verloren |
 
 ### Rate-Limiting (Phase 7c — ⚠️)
 
 | SPI / Klasse | Modul | Default | Zweck |
 |---|---|---|---|
-| `RateLimitPolicy` | core/ratelimiting | `InMemoryRateLimitPolicy` (Sliding-Window) | Per-Scope Rate-Limit (getrennt von `LoginAttemptPolicy`); `tryAcquire(RateLimitKey)` → `RateLimitDecision(Allowed \| Throttled)`; `tryAcquire` nutzt seit **V00.84** `RateLimitStore.tryAdmit` — N parallele Anfragen bei limit-1 lassen höchstens `limit` durch (JS-SEC-078) |
+| `RateLimitPolicy` | core/ratelimiting | `InMemoryRateLimitPolicy` (Sliding-Window) | Per-Scope Rate-Limit (getrennt von `LoginAttemptPolicy`); `tryAcquire(RateLimitKey)` → `RateLimitDecision(Allowed \| Throttled)`; `tryAcquire` nutzt seit **V00.84** `RateLimitStore.tryAdmit` und lässt je Fenster genau `limit` Anfragen zu, auch bei parallelen Aufrufen (JS-SEC-078, JS-SEC-118) |
 
 ### Store-backed Services (Phase 4b — ⚠️)
 
@@ -173,10 +183,10 @@ sie die Security-Flow-Auswertung nie blockieren.
 | Service | Modul | Backing-Store |
 |---|---|---|
 | `StoreBackedJCustosAuditService` | core/audit | `AuditEventStore` |
-| `StoreBackedLoginAttemptPolicy` | core/bruteforce | `LoginAttemptStore` (flacher Lockout) |
+| `StoreBackedLoginAttemptPolicy` | core/bruteforce | `LoginAttemptStore` (flacher Lockout); seit **V00.84** Konstruktor mit Audit-Service, `recordFailure` publiziert `LoginFailed`, ein Zähler verfällt nach einem vollen `window()` ohne Fehlversuch (JS-SEC-122, JS-SEC-123) |
 | `StoreBackedSubjectSessionRegistry` | core/logout | `SessionStore` + optionaler `JCustosVersionStore` (Phase-4c-Snapshot beim Register); seit **V00.84** bindet `register` eine wiederverwendete Session-ID bei fremdem Subjekt oder nicht-aktivem Status neu statt aufzufrischen (JS-SEC-075) |
 | `StoreBackedRoleAuthorizationService<U>` | core/authorization/api/roles | `RoleAssignmentStore` (generic über Subject-Type) |
-| `StoreBackedRememberMeService` | core/authentication | `RememberMeTokenStore` + `PasswordHasher` |
+| `StoreBackedRememberMeService` | core/authentication | `RememberMeTokenStore` + `PasswordHasher`; seit **V00.84** tauscht `rotate` das Token bei jeder Nutzung, ein bereits getauschtes Token widerruft alle Remember-me-Tokens des Subjekts und auditiert `SessionInvalidated` mit Grund `RememberMeTokenReplay` (JS-SEC-128) |
 | `StoreBackedBootstrapStateService` | core/bootstrap | `BootstrapStateStore` (idempotentes `markCompleted`) |
 
 ---
@@ -189,7 +199,7 @@ sie die Security-Flow-Auswertung nie blockieren.
 | `@RequiresPermission({"foo:bar"})` | core | `RequiresPermissionEvaluator` | Subject muss alle genannten Permissions haben (AND) |
 | `@RequiresAllPermissions({"a", "b"})` | core | `RequiresAllPermissionsEvaluator` | Explizite AND-Semantik (Klarheit über `@RequiresPermission`) |
 | `@RequiresAnyPermission({"a", "b"})` | core | `RequiresAnyPermissionEvaluator` | OR-Semantik — mindestens eine Permission reicht |
-| `@RequiresPolicy("doc.owner-or-admin")` ⚠️ | core | `RequiresPolicyEvaluator` | Benannte Policy aus `PolicyRegistry`, mit Step-Up-Support |
+| `@RequiresPolicy("doc.owner-or-admin")` ⚠️ | core | `RequiresPolicyEvaluator` | Benannte Policy aus `PolicyRegistry`, mit Step-Up-Support; seit **V00.84** (JS-SEC-157) ohne Subjekt `Unauthenticated("no-subject")`, bevor die Policy gefragt wird — außer die Policy erlaubt anonyme Anfragen ausdrücklich (`PolicyBuilder.allowAnonymous()`, `JCustosPolicies.anonymous(policy)`) |
 | `@ProtectedBy(class.class)` | core | `ProtectedByEvaluator` | Eigene Logik via `AccessEvaluator`-Klasse |
 | `@JCustosAnnotation(MyEvaluator.class)` | core | — (Meta-Annotation) | Bindet eine projekt-eigene Annotation an einen Evaluator |
 | `@Secured` | core | — (Compile-Time-Trigger) | Markiert eine konkrete Klasse, damit `jCustos-processor` einen `<Type>Secured`-Wrapper generiert (RetentionPolicy.SOURCE) |
@@ -197,6 +207,11 @@ sie die Security-Flow-Auswertung nie blockieren.
 
 Projekt-eigene Annotationen (Beispiele aus den Demos): `@VisibleFor`
 (demo-vaadin), `@CustomCheck` (jCustos-vaadin Tests).
+
+Seit **V00.84** (JS-SEC-154) wirkt eine Einschränkung auch, wenn sie auf
+einem Annotationstyp sitzt (`@RequiresRole("ADMIN") @interface AdminOnly`,
+eine Ebene tief) — in Vaadin, REST, Standalone und im `@Secured`-Processor;
+die Regel „eine Einschränkung pro Element“ bleibt.
 
 ---
 
@@ -316,15 +331,15 @@ Alle implementieren `AuditEvent` (sealed interface) und sind über
 | Event | Wichtige Felder | Wird emittiert von |
 |---|---|---|
 | `LoginSucceeded` | `username`, `clientAddress`, `sessionId` | `MyAuthenticationService`, REST `login`-Handler, `StandaloneLoginFlow` |
-| `LoginFailed` | `username`, `clientAddress`, `reason` | `InMemoryLoginAttemptPolicy.recordFailure`, `StandaloneLoginFlow` |
+| `LoginFailed` | `username`, `clientAddress`, `reason` | `recordFailure` der drei mitgelieferten Policies (`InMemoryLoginAttemptPolicy`, `StoreBackedLoginAttemptPolicy`, `NoopLoginAttemptPolicy`) — seit **V00.84** der einzige Audit-Punkt: genau ein Event pro abgelehntem Login, auch hinter dem Vaadin-`LoginView` und den REST-Handlern (JS-SEC-123, JS-SEC-124). `LoginView` und `StandaloneLoginFlow` publizieren selbst nur für einen Login, den die Policy nach der Credential-Prüfung verweigert (Sperre während der Prüfung) |
 | `LogoutPerformed` | `subjectId`, `sessionId`, `scope` | `SubjectClearingLogoutService` |
 | `AccessGranted` | `subjectId`, `route` | `AuthorizationListener` (Vaadin), `RestAuthorizationFilter` |
-| `AccessDenied` | `subjectId`, `route`, `reason` | dito |
+| `AccessDenied` | `subjectId`, `route`, `reason` | dito; seit **V00.84** auch `RestAuthenticationFilter` für eine Anfrage ohne Subjekt (`Unauthenticated:no-subject`, JS-SEC-086) |
 | `ActionDenied` | `subjectId`, `actionName` | `StaticActionAuthorizationService.requireAllowed` |
 | `BruteForceLimitReached` | `username`, `clientAddress`, `failedAttempts`, `lockoutDuration` | `InMemoryLoginAttemptPolicy` |
 | `SessionCreated` | `subjectId`, `sessionId` | `TimeoutSessionPolicy.onLogin` — seit **V00.84** (JS-SEC-060) mit der **post-Rotations-ID**, da `LoginView` vor `onLogin` rotiert |
 | `SessionExpired` | `subjectId`, `sessionId`, `reason` | `TimeoutSessionPolicy`, `SessionLifetimeListener`, REST-Filter |
-| `SessionInvalidated` | `subjectId`, `sessionId (alt)`, `reason` | `LoginView.notifyOnLogin` (B3-Rotation; seit V00.84 nach `SessionCreated` mit der neuen ID) |
+| `SessionInvalidated` | `subjectId`, `sessionId (alt)`, `reason` | `LoginSessionRotation.afterLogin` aus `LoginView` und `AbstractOAuth2CallbackView` (B3-Rotation; seit V00.84 nach `SessionCreated` mit der neuen ID); seit **V00.84** zusätzlich mit den Gründen `Revoked` (`VaadinSessionRevocation`, `RestSessionRevocation`, JS-SEC-131), `RotationAfterLoginFailed` (JS-SEC-146), `LoginNotConfirmed` (`LoginView`, JS-SEC-123) und `RememberMeTokenReplay` (JS-SEC-128) |
 | `RoleAssigned` | `subjectId`, `role`, `assignedBy` | `InMemoryDemoUserDirectory.assignRole`, `DemoUserStore.setRole` |
 | `RoleRevoked` | `subjectId`, `role`, `revokedBy` | dito |
 | `UserCreated` | `username`, `role`, `createdBy` | `InMemoryDemoUserDirectory.addUser`, `DemoUserStore.create` |
@@ -339,14 +354,21 @@ Alle implementieren `AuditEvent` (sealed interface) und sind über
 | Event | Wichtige Felder | Wird emittiert von |
 |---|---|---|
 | `SessionStale` | `subjectId`, `sessionId`, `route`, `snapshotVersion`, `currentVersion` | `JCustosVersionEnforcer` bei Drift (Phase 4c) |
-| `PasswordResetRequested` | `subjectId`, `tokenHash` | `PasswordResetService.request` (Phase 7a) |
-| `PasswordResetCompleted` | `subjectId`, `tokenHash` | `PasswordResetService.consume` |
+| `PasswordResetRequested` | `subjectId`, `tokenHash` | `PasswordResetService.request` (Phase 7a); seit **V00.84** auch `credential.reset.PasswordResetService.issue` (mit dem öffentlichen Selektor, nie dem Verifier — JS-SEC-074) |
+| `PasswordResetCompleted` | `subjectId`, `tokenHash` | `PasswordResetService.consume`; seit **V00.84** auch `credential.reset.PasswordResetService.consume` |
 | `EmailVerificationRequested` | `subjectId`, `email`, `tokenHash` | `EmailVerificationService.request` |
 | `EmailVerified` | `subjectId`, `email`, `tokenHash` | `EmailVerificationService.consume` |
 | `ApiKeyUsed` | `subjectId`, `keyName`, `keyHash` | `ApiKeyAuthenticationService.authenticate` (Phase 7b) |
 | `ApiKeyDenied` | `subjectId`, `keyHash`, `reason` (Unknown/ForeignTenant/Revoked/Expired) | dito |
 | `TokenRotated` | `subjectId`, `oldHash`, `newHash` | `TokenService.rotate` |
 | `RateLimitExceeded` | `scope`, `subjectId`, `limit`, `window`, `eventsInWindow` | `InMemoryRateLimitPolicy.tryAcquire` bei Throttle (Phase 7c) |
+
+Seit **V00.84** (JS-SEC-117) tragen `SessionCreated`, `SessionExpired`,
+`SessionInvalidated`, `SessionStale` und `LogoutPerformed` im Feld
+`sessionId` die Session-Referenz — `sref-` plus die ersten 16 Hex-Zeichen
+des SHA-256 (`SessionRef.of(id)`) —, nie die Live-Session-ID; die
+Kern-Produzenten, die REST-Filter und der Vaadin-Adapter reduzieren schon
+beim Erzeugen.
 
 `AuditQuery(types, subjectId, from, to, limit)` mit Factories
 `all()`, `ofType(...)`, `forSubject(...)`. `AuditQuery.subjectIdOf`
@@ -365,6 +387,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `DefaultCompositeAuditService` | core | No-arg, SPI-registrierbar; RingBuffer + LoggingAuditSink |
 | `RingBufferAuditSink` | core | Default-Cap 256 Events, älteste fliegen raus, thread-safe |
 | `LoggingAuditSink` | core | JUL-basierter Sink, kompaktes `AUDIT type=… field=value …`-Format; seit **V00.84** `sessionRef=` (`sref-` + 16 Hex-Zeichen SHA-256, `SessionRef`) statt der Live-Session-ID (JS-SEC-079, CWE-532) |
+| `SessionRef` ⚠️ | core | **V00.84** (JS-SEC-117, CWE-532): `SessionRef.of(id)` / `ofNullable(id)` bildet die Session-Referenz (`PREFIX` `sref-` + `HEX_LENGTH` 16 Hex-Zeichen SHA-256, 21 Zeichen); ein Wert dieser Form bleibt unverändert, `isReference(value)` erkennt ihn. Gemeinsame Referenz für Log-Zeile, Audit-Events, Session-Datensätze und Dashboards |
 
 ---
 
@@ -374,25 +397,29 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 
 | Klasse | Zweck |
 |---|---|
-| `LoginView` (abstract) | Login-Form mit username/password/remember-me/Login/Cancel + Custom-Slot |
-| `LoginListener<U>` (abstract) | `BeforeEnterListener` mit Rollen-/Subject-Lifecycle-Hooks |
+| `LoginView` (abstract) | Login-Form mit username/password/remember-me/Login/Cancel + Custom-Slot; seit **V00.84** (JS-SEC-124) fährt die View das Throttling-Protokoll der registrierten `LoginAttemptPolicy` selbst um `checkCredentials()` — `beforeAttempt`, dann genau eines von `confirmSuccess`, `recordFailure`, `abandonAttempt`, geschlüsselt auf Benutzername und die Adresse des `ClientAddressResolver`; Hooks `reactOnLockedOut(lockout)` und `reactOnVerificationUnavailable()`, Opt-out über `throttleLoginAttempts()` für einen `AuthenticationService`, der die Policy selbst aufruft |
+| `LoginListener<U>` (abstract) | `BeforeEnterListener` mit Rollen-/Subject-Lifecycle-Hooks; erkennt seit **V00.84** über `RouteRestrictionResolver` auch eine Route, die nur ihr Layout schützt |
 | `LoginListeners` | Statischer Resolver für `LoginListener` (SPI + Cache + `setLoginListener`) |
-| `AuthorizationListener` (`@ListenerPriority(MAX_VALUE - 1)`) | Annotation-basierter Routenschutz pro Navigation |
-| `SessionLifetimeListener` (`@ListenerPriority(MAX_VALUE)`) | Idle/Absolute-Timeout-Enforcement vor Authorization; seit **V00.84** (JS-SEC-082, CWE-613) zusätzlich `RequestHandler` für jeden UIDL-Request (RPC ohne Navigation: Subjekt löschen, `SessionExpired`, Redirect auf die Login-Route, Session schließen) und `VaadinSession.getLastRequestTimestamp()` als Aktivitätssignal |
+| `AuthorizationListener` (`@ListenerPriority(MAX_VALUE - 1)`) | Annotation-basierter Routenschutz pro Navigation; seit **V00.84** müssen die Einschränkungen des Ziels **und** jedes Router-Layouts der Kette gewähren (JS-SEC-154, `@PublicRoute` hebt keine Layout-Einschränkung auf), und jede Ablehnung ohne erreichbares Reroute-Ziel — nicht registrierte Route oder die abgelehnte View selbst — endet in der Error-View für `SecurityException` (JS-SEC-152, JS-SEC-158) |
+| `SessionLifetimeListener` (`@ListenerPriority(MAX_VALUE)`) | Idle/Absolute-Timeout-Enforcement vor Authorization; seit **V00.84** (JS-SEC-082, JS-SEC-155, CWE-613) zusätzlich `RequestHandler` für jeden UIDL-Request und `VaadinRequestInterceptor` für Nachrichten über einen reinen WebSocket-Push-Kanal. Die Prüfung läuft unter dem Session-Lock; bei Ablauf wird der Request verbraucht (Subjekt gelöscht, `SessionExpired`, Vaadin-Session geschlossen, HTTP-Session invalidiert, der Client erhält Vaadins Session-expired-Meldung). Aktivität führt der Listener in einem eigenen Attribut, automatische Polls (`UI.setPollInterval`) zählen nicht, `getLastRequestTimestamp()` wird nicht mehr herangezogen. Prüft außerdem den `SessionStore`-Datensatz der aktuellen Session auf Widerruf (JS-SEC-131) |
 | `ApplicationServiceInitListener` | Registriert `LoginListener` als `BeforeEnterListener` pro UI |
 | `VaadinSessionSubjectStore` | `SubjectStore`-Default — speichert Subject in `VaadinSession.getAttribute` |
 | `VaadinLogoutService<U>` | Vaadin-spezifischer `LogoutService` mit Page-Redirect / Session-Close / HTTP-Invalidate; seit **V00.84** (JS-SEC-084) Komfort-Konstruktoren mit Ziel `/` + `loginRouteName()` (zur Logout-Zeit aufgelöst, statt fest `/login`) und Session-ID im `SessionContext` für `SessionPolicy.onLogout` |
 | `VaadinLogoutGateway` / `DefaultVaadinLogoutGateway` | Thin Wrapper über `UI.getPage().setLocation`, `VaadinSession.close`, `WrappedSession.invalidate`; seit **V00.84** (JS-SEC-084) `currentSessionId()` (Default-Methode, der Default-Gateway liefert die WrappedSession-ID) |
 | `VaadinAccessContextFactory` | Baut `AccessContext` aus `BeforeEnterEvent`; `subjectId` und `displayName` des `JCustosSubject` seit **V00.84** (JS-SEC-083) aus dem `SubjectIdResolver`, nie aus `toString()` (ohne Resolver: Identitäts-Handle) |
 | `VaadinAccessDecisionMapper` / `VaadinNavigationAccessDecisionMapper` | Mappen `AccessDecision` / `NavigationAccessDecision` auf Vaadin-Navigation |
-| `JCustosAnnotationScanner` | Scannt Class/Method/AnnotatedElement nach `@JCustosAnnotation`-Meta-Annotation (cached); erbt entlang der Superklassen-Kette **und seit V00.84 entlang der Interfaces** (JS-SEC-081, CWE-862) — die am stärksten abgeleitete Einschränkung gewinnt |
+| `JCustosAnnotationScanner` | Scannt Class/Method/AnnotatedElement nach `@JCustosAnnotation`-Meta-Annotation (cached); erbt entlang der Superklassen-Kette **und seit V00.84 entlang der Interfaces** (JS-SEC-081, CWE-862) — die am stärksten abgeleitete Einschränkung gewinnt. Seit **V00.84** außerdem: eine Methode ohne eigene Einschränkung erbt die ihrer Klasse (JS-SEC-070), `scan(Method, Class)` löst eine geerbte oder überschriebene Methode so auf, wie sie auf der übergebenen Klasse läuft (Methode, dann Klasse, dann überschriebene Deklaration — JS-SEC-114), zusammengesetzte Annotationen wirken eine Ebene tief (JS-SEC-154) |
+| `RouteRestrictionResolver` ⚠️ (`authorization/impl`) | **V00.84** (JS-SEC-154): löst die Einschränkungen einer Navigation auf — Ziel plus jedes Router-Layout der Kette, alle müssen gewähren; gemeinsame Quelle für `AuthorizationListener`, `LoginListener` und die Start-up-Discovery |
+| `LoginSessionRotation` ⚠️ | **V00.84** (JS-SEC-146, CWE-384): die öffentliche Post-Login-Sequenz `afterLogin(...)` — Session-ID-Rotation, `SessionPolicy.onLogin`, Rotations-Audit, Hook `onSessionRotated`, Security-Version-Snapshot; genutzt von `LoginView` und `AbstractOAuth2CallbackView` (der Callback scheitert geschlossen: ohne Rotation wird der Login zurückgenommen, `SessionInvalidated(RotationAfterLoginFailed)`) |
+| `VaadinSessionRevocation` ⚠️ (`session/vaadin`) | **V00.84** (JS-SEC-131, CWE-613): `revoke(record)` / `terminate(sessionId, …)` beenden die Live-Session auf demselben Knoten sofort (Subjekt, Snapshot und Token-Credential gelöscht, `SessionInvalidated(Revoked)`, Vaadin-Session geschlossen, HTTP-Session invalidiert); `useSessionStore(store)` registriert den Store für die Prüfung pro Request — der Bootstrap übernimmt diese Registrierung bei `.sessions(s -> s.storeBacked(...))` (`bootstrap-session-revocation`). Vergleicht über `SessionRef`, findet also Datensätze unter Referenz und unter Live-ID |
+| `RouteNameCheck` ⚠️ (`jCustos-dx-vaadin`) | **V00.84** (JS-SEC-152): prüft einen Routennamen gegen die Route-Registry (`REGISTERED` / `UNREGISTERED` / `UNAVAILABLE`); Grundlage der Bootstrap-Befunde `vaadin/login-route-unresolved` und `vaadin/step-up-route-unresolved`. Die Registry ist auch aus `VaadinServiceInitListener.serviceInit` lesbar, nur nicht außerhalb eines Service (`ServletContextListener`, `main`) |
 
 ### Login-View-Features
 
 - Stabile Test-IDs: `loginview-tf-username`, `loginview-pf-password`, `loginview-btn-login`, `loginview-btn-cancel`, `loginview-cb-remember-me`
 - Custom-Element-Slot via `setCustomElements(Component)` / `clearCustomElements()`
 - LUMO-Theme-Variants vorverdrahtet
-- `notifyOnLogin()` rotiert die HTTP-Session-ID zuerst über `HttpServletRequest.changeSessionId()` (seit **V00.84**, JS-SEC-060, CWE-384; Fallback `VaadinService.reinitializeSession` nur für Nicht-Servlet-Requests), ruft dann `SessionPolicy.onLogin` mit der **neuen** ID (`SessionCreated` trägt die überlebende ID), auditiert `SessionInvalidated` für die alte ID und ruft den Hook `onSessionRotated(alt, neu)` — dort legen Anwendungen `SessionStore`-Einträge an oder schlüsseln sie um (`SessionStore.rekey`, `SessionRecord.withSessionId`)
+- Nach erfolgreichem Login (seit **V00.84** über `LoginSessionRotation.afterLogin(...)`, JS-SEC-146) wird die HTTP-Session-ID zuerst über `HttpServletRequest.changeSessionId()` rotiert (seit **V00.84**, JS-SEC-060, CWE-384; Fallback `VaadinService.reinitializeSession` nur für Nicht-Servlet-Requests), dann folgt `SessionPolicy.onLogin` mit der **neuen** ID (`SessionCreated` trägt die Referenz der überlebenden ID, `SessionRef`), `SessionInvalidated` für die alte ID und der Hook `onSessionRotated(alt, neu)` — dort legen Anwendungen `SessionStore`-Einträge an oder schlüsseln sie um (`SessionStore.rekey`, `SessionRecord.withSessionId`)
 - `captureJCustosVersionSnapshot()` (Phase 4c-Followup): wenn sowohl `JCustosVersionStore` als auch `SubjectIdResolver` als SPI registriert sind, liest die View beim erfolgreichen Login die aktuelle `JCustosVersion` und schreibt sie in den `VaadinJCustosVersionContext`. Strict-no-op + exception-swallowing, blockiert den Login-Flow nie.
 
 ### Phase-4c JCustosVersion-Enforcement (⚠️)
@@ -400,18 +427,18 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | Klasse | Zweck |
 |---|---|
 | `VaadinJCustosVersionContext` (Package `session/vaadin`) | Per-VaadinSession Snapshot-Carrier (`record(subjectId, tenant, snapshot, sessionId)` / `current()` / `clear()`). Survives Session-Rotation. |
-| `JCustosVersionEnforcerListener` (`@ListenerPriority(Integer.MAX_VALUE)`) | BeforeEnter-Listener vor `AuthorizationListener`. On Drift: clear snapshot + reroute zur konfigurierten LoginView-Klasse. Seit **V00.84** (JS-SEC-082) auch `RequestHandler`: dieselbe Instanz über `ServiceInitEvent.addRequestHandler` registrieren, dann wird Drift auf jedem UIDL-Request durchgesetzt (Subjekt löschen, Snapshot leeren, `SessionStale`, Redirect, Session schließen) |
+| `JCustosVersionEnforcerListener` (`@ListenerPriority(Integer.MAX_VALUE)`) | BeforeEnter-Listener vor `AuthorizationListener`. On Drift: clear snapshot + reroute zur konfigurierten LoginView-Klasse. Seit **V00.84** (JS-SEC-082, JS-SEC-155) auch `RequestHandler` und `VaadinRequestInterceptor`: `register(ServiceInitEvent)` verdrahtet alle drei Eintrittspunkte, dann wird Drift auf jeder Client-Nachricht unter dem Session-Lock durchgesetzt (Subjekt löschen, Snapshot leeren, `SessionStale`, Session schließen, Request verbrauchen — der Client erhält Vaadins Session-expired-Meldung) |
 
 ### Phase-8a/b Components (`jCustos-vaadin/components/` — ⚠️)
 
 | Klasse | Zweck |
 |---|---|
-| `SecuredVisibility` + `SecuredVisibilityMode` (HIDE / DISABLE) | Zentraler Decision-Point. `Requirement(requiredRoles, requiredPermissions)` (AND-composed), `Target`-Interface, `apply()` + `isAllowed()`. SPI-backed `currentJCustosView()` resolved via `AuthenticationService.subjectType()` + `SubjectStore` + `AuthorizationService`. Missing SPI → denial. |
+| `SecuredVisibility` + `SecuredVisibilityMode` (HIDE / DISABLE) | Zentraler Decision-Point. `Requirement(requiredRoles, requiredPermissions)` (AND-composed), `Target`-Interface, `apply()` + `isAllowed()`. SPI-backed `currentJCustosView()` resolved via `AuthenticationService.subjectType()` + `SubjectStore` + `AuthorizationService`. Missing SPI → denial. Seit **V00.84**: ohne gebundenes Subjekt wird jede Anforderung abgelehnt, `SecuredUi.requiresRole()`/`requiresPermission()` lehnen ein leeres Array mit `IllegalArgumentException` ab (JS-SEC-135), und eine abgelehnte Komponente ohne `HasEnabled` (`Composite`, eigene `@Tag`-Komponente, `Icon`) wird im HIDE-Modus tatsächlich verborgen (JS-SEC-153). |
 | `SecuredButton` (Default DISABLE) | Vaadin-Button-Subklasse. Checkt auf Konstruktor und onAttach; `refresh()` für manuelle Re-Checks. |
 | `SecuredRouterLink` (Default HIDE) | Vaadin-RouterLink-Subklasse. Router-explicit Konstruktor für headless tests. |
 | `SecuredMenuItem.bind(MenuItem, Requirement, …)` | Binding-Helper, da MenuItem vom Parent-MenuBar erzeugt wird (kein Subclass-Pattern möglich). |
-| `SessionManagementView` | Reusable Composite. Grid über `SessionStore.findAll()` (Tenant/Subject/SessionId/Status/Created/LastActivity/Version/Action). Per-Row Revoke via `Consumer<SessionRecord>`. Apps subclassen mit `@Route` + `@RequiresPermission`. **V00.84 (JS-SEC-068, CWE-306):** Drei-Argument-Konstruktor mit `Requirement`; der Revoke-Handler prüft das aktuelle Subjekt serverseitig gegen die Anforderung, auditiert eine Ablehnung als `AccessDenied` und lässt den Store unberührt. |
-| `SessionManagementRoute` + `SessionManagementAccess` (`jCustos-dx-vaadin`) | Vom Bootstrap aktivierte Route `/session-management`. **V00.84 (JS-SEC-068):** trägt `@ProtectedBy(SessionManagementAccess)`; der Evaluator prüft die mit `.sessionManagementView(Requirement)` veröffentlichte Anforderung — ohne Anforderung fail-closed (`Forbidden`), ohne Subjekt `Unauthenticated`. `.sessionManagementView()` ohne Anforderung ist deprecated und meldet `session-management-view-without-requirement` (ERROR in PRODUCTION/STRICT, WARNING sonst). Die frühere Deny-by-Default-Ausnahme in `AuthorizationListener` und die Discovery-Ausnahme sind entfallen. |
+| `SessionManagementView` | Reusable Composite. Grid über `SessionStore.findAll()` (Tenant/Subject/SessionId/Status/Created/LastActivity/Version/Action). Per-Row Revoke via `Consumer<SessionRecord>`. Apps subclassen mit `@Route` + `@RequiresPermission`. **V00.84 (JS-SEC-068, CWE-306):** Drei-Argument-Konstruktor mit `Requirement`; der Revoke-Handler prüft das aktuelle Subjekt serverseitig gegen die Anforderung, auditiert eine Ablehnung als `AccessDenied` und lässt den Store unberührt. **V00.84 (JS-SEC-131):** mit `VaadinSessionRevocation::revoke` als Revoke-Callback beendet „Revoke“ die Session beim Klick; die Spalte „Session id“ zeigt `SessionRef.of(...)` statt der Live-ID. |
+| `SessionManagementRoute` + `SessionManagementAccess` (`jCustos-dx-vaadin`) | Vom Bootstrap aktivierte Route `/session-management`. **V00.84 (JS-SEC-068):** trägt `@ProtectedBy(SessionManagementAccess)`; der Evaluator prüft die mit `.sessionManagementView(Requirement)` veröffentlichte Anforderung — ohne Anforderung fail-closed (`Forbidden`), ohne Subjekt `Unauthenticated`. `.sessionManagementView()` ohne Anforderung ist deprecated und meldet `session-management-view-without-requirement` (ERROR in PRODUCTION/STRICT, WARNING sonst). Die frühere Deny-by-Default-Ausnahme in `AuthorizationListener` und die Discovery-Ausnahme sind entfallen. Seit JS-SEC-131 ist das echte Beenden der Session (`VaadinSessionRevocation`) der Standard-Revoke der Route. |
 
 ---
 
@@ -419,16 +446,19 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 
 | Klasse | Zweck |
 |---|---|
-| `RestRequest` / `RestResponse` / `RestHandler` (Interfaces) | Framework-light Abstractions, kein Spring/Jakarta-Servlet-Lock-in |
+| `RestRequest` / `RestResponse` / `RestHandler` (Interfaces) | Framework-light Abstractions, kein Spring/Jakarta-Servlet-Lock-in; `RestRequest` seit **V00.84** mit `remoteAddress()` (JS-SEC-061) und `headerValues(String)` — `headers()` fügt wiederholte Listen-Header mit `", "` zusammen, ein wiederholter `Authorization`-, `X-Api-Key`- oder `Cookie`-Header wird mit `400` abgelehnt (JS-SEC-113) |
 | `BodyRestRequest` | `RestRequest`-Variante mit Body |
-| `BearerTokenExtractor` | Liest `Authorization: bearer <token>` (case-insensitive Scheme) |
-| `RestAuthenticationFilter` | "Authenticated-only" Filter — `401` ohne Subject oder bei abgelaufener Session; rendert über den publizierten Decision-Mapper (Body-Strategie, `WWW-Authenticate: Bearer`) und auditiert `AccessDenied` (`Unauthenticated:no-subject`) bzw. `SessionExpired` (JS-SEC-086) |
-| `RestAuthorizationFilter` | Annotation-basierter Filter — `200`/Handler, `401 Unauthorized` (no subject), `403 Forbidden` (missing role/permission); emittiert AccessGranted / AccessDenied / SessionExpired |
+| `BearerTokenExtractor` | Liest `Authorization: bearer <token>` (case-insensitive Scheme); seit **V00.84** kein Token, wenn `Authorization` zweimal ankommt (JS-SEC-113) |
+| `RestAuthenticationFilter` | "Authenticated-only" Filter — `401` ohne Subject oder bei abgelaufener Session; rendert über den publizierten Decision-Mapper (Body-Strategie, `WWW-Authenticate: Bearer`) und auditiert `AccessDenied` (`Unauthenticated:no-subject`) bzw. `SessionExpired` (JS-SEC-086); seit **V00.84** auch `401` für eine widerrufene Session (`RestSessionRevocation`, JS-SEC-131) |
+| `RestAuthorizationFilter` | Annotation-basierter Filter — `200`/Handler, `401 Unauthorized` (no subject), `403 Forbidden` (missing role/permission); emittiert AccessGranted / AccessDenied / SessionExpired. Rendert über den im Konstruktor übergebenen oder den publizierten Decision-Mapper (`RestDecisionContext.mapperOrDefault()`), jedes `401` mit `WWW-Authenticate: Bearer` (JS-SEC-086). Seit **V00.84**: Überladung `authorizeAndHandle(request, response, handler, method, handlerClass)` löst eine geerbte oder überschriebene Handler-Methode auf der Handler-Klasse auf (JS-SEC-114); `401` für eine widerrufene Session (JS-SEC-131); eine Policy-Route verlangt ein Subjekt (JS-SEC-157) |
 | `RestAccessContextFactory` | Baut `AccessContext` aus `RestRequest` (resourceType="rest-endpoint") |
 | `HttpStatusDecisionMapper` | `AuthorizationDecision` → HTTP-Status; jedes `Unauthenticated`-401 trägt `WWW-Authenticate: Bearer` (RFC 7235), Step-Up `StepUp method="…"`; Body über die konfigurierte `RestErrorBodies`-Strategie |
 | `BootstrapRestStatusMapper` | Bootstrap-spezifisches Status-Mapping |
 | `RestHeaders` | Helper für Header-Lookup |
-| `RestJCustosVersionContext` + `RestJCustosVersionFilter` (Phase 4c, ⚠️) | Drift-Filter; `RestSubjectResolver.resolveJCustosVersionContext` als opt-in Default-Methode. Bei Drift: `401 + WWW-Authenticate: SessionStale` (RFC 7235-Style) und Audit-Event; Status und Body über den publizierten Decision-Mapper (JS-SEC-086). |
+| `RestHeaderLines` ⚠️ | **V00.84** (JS-SEC-113, CWE-348): Helfer für Adapter, die mehrzeilige Header liefern — `joined(...)` baut `headers()` regelkonform, `values(...)` liefert alle Zeilen, `rejectDuplicates(...)` antwortet `400` auf einen wiederholten `Authorization`-, `X-Api-Key`- oder `Cookie`-Header |
+| `RestDecisionContext` | Hält den vom Bootstrap publizierten Decision-Mapper; **V00.84** (JS-SEC-086): `mapperOrDefault()` ist öffentlich (publizierter Mapper, sonst `HttpStatusDecisionMapper`) — eigene Ablehnungen eines Handlers laufen über `RestDecisionContext.mapperOrDefault().apply(decision, response)` |
+| `RestSessionRevocation` ⚠️ | **V00.84** (JS-SEC-131, CWE-613): Widerrufsprüfung der drei REST-Filter. Mit registriertem `SessionStore` (`.sessions(s -> s.storeBacked(...))` am `RestSecurity.bootstrap()` oder `useSessionStore(...)`) und einem Resolver mit `resolveSessionId` beendet ein `REVOKED`- oder ein gesehener und dann entfernter Datensatz die Session: `401` über den Mapper, `SessionInvalidated(Revoked)`, kein Handler. `EXPIRED` allein beendet nichts, Store-Fehler werden geloggt; Gedächtnis gesehener Datensätze pro Knoten 10 000 (`SEEN_CAPACITY`), für mehrere Knoten `requireRecord(true)` |
+| `RestJCustosVersionContext` + `RestJCustosVersionFilter` (Phase 4c, ⚠️) | Drift-Filter; `RestSubjectResolver.resolveJCustosVersionContext` als opt-in Default-Methode. Bei Drift: `401 + WWW-Authenticate: SessionStale` (RFC 7235-Style) und Audit-Event; Status und Body über den publizierten Decision-Mapper (JS-SEC-086). Seit **V00.84** läuft vor der Drift-Prüfung die Widerrufsprüfung (`RestSessionRevocation`, JS-SEC-131), und das `SessionStale`-Event trägt `sessionReference(sessionId)` statt des Bearer-Tokens (JS-SEC-117). |
 
 ### Phase-8d OpenAPI-Metadaten (`jCustos-rest/openapi/` — ⚠️)
 
@@ -445,8 +475,8 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | Klasse | Zweck |
 |---|---|
 | `ThreadLocalSubjectStore` | `SubjectStore`-Default — per-Thread-Bindings, **nicht** inherited |
-| `StandaloneLoginFlow<T, U>` | Login-Treiber: konsultiert `LoginAttemptPolicy` → `AuthenticationService` → bindet Subject → emittiert `LoginSucceeded`/`LoginFailed` |
-| `SecuredProxy.wrap(Interface, impl)` | JDK Dynamic Proxy — enforce per Methode oder Klasse via `JCustosEnforcer.enforce(method, declaringClass)`; Einschränkungen auf Super-Interfaces werden vererbt, und unter `setDenyByDefault(true)` wird eine Methode ohne Einschränkung abgelehnt, sofern sie oder ihr Interface nicht `@PublicRoute` trägt (seit V00.84, JS-SEC-081) |
+| `StandaloneLoginFlow<T, U>` | Login-Treiber: konsultiert `LoginAttemptPolicy` → `AuthenticationService` → bindet Subject → emittiert `LoginSucceeded`; `LoginFailed` publiziert seit **V00.84** die Policy in `recordFailure` (Grund `REASON_NO_SUBJECT` bzw. `REASON_CREDENTIALS_REJECTED`), der Flow selbst nur für einen Login, den die Policy nach der Prüfung verweigert (JS-SEC-123). Eine vom KDF-Limiter abgewiesene Prüfung gibt den Versuch zurück, zählt keinen Fehlschlag und reicht `CredentialVerificationUnavailableException` an den Aufrufer weiter (JS-SEC-126) |
+| `SecuredProxy.wrap(Interface, impl)` | JDK Dynamic Proxy — enforce per Methode oder Klasse via `JCustosEnforcer.enforce(method, declaringClass)`; Einschränkungen auf Super-Interfaces werden vererbt, und unter `setDenyByDefault(true)` wird eine Methode ohne Einschränkung abgelehnt, sofern sie oder ihr Interface nicht `@PublicRoute` trägt (seit V00.84, JS-SEC-081); eine geerbte Methode wird seit V00.84 so geprüft, wie sie auf der übergebenen Klasse läuft (`JCustosAnnotationScanner.scan(Method, Class)`, JS-SEC-114) |
 | `SecuredProxy.requireAllowed(Class, methodName)` | Single-shot Enforcement für Lambdas/Callbacks |
 | `LoginResult<U>` (sealed) | `Success` / `Rejected` / `LockedOut` |
 
@@ -457,17 +487,19 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | Klasse / Datei | Zweck |
 |---|---|
 | `@Secured` (in jCustos-core, `…/authorization/annotations`) | Compile-Time-Trigger — markiert eine **konkrete Klasse** für die Wrapper-Erzeugung. `RetentionPolicy.SOURCE`, Target `TYPE`. |
-| `SecuredAnnotationProcessor` | `BasicStaticProxyAnnotationProcessor<Secured>` aus `com.svenruppert:proxybuilder:00.11.00`. Generiert `<Type>Secured extends <Type>` und ersetzt jede annotierte Methode durch `JCustosEnforcer.require…(…)` + `super.<method>(…)`. Marker am Wrapper: `@GeneratedByProxyBuilder(processor, sourceClass, proxyBuilderVersion="00.11.00", date, comments)` (RUNTIME-reflectable via `proxybuilder-annotations`) + `@DelegatesTo("Owner#method(params)")` pro generierter Methode. |
+| `SecuredAnnotationProcessor` | `BasicStaticProxyAnnotationProcessor<Secured>` aus `com.svenruppert:proxybuilder:00.11.01`. Generiert `<Type>Secured extends <Type>` und ersetzt jede annotierte Methode durch `JCustosEnforcer.require…(…)` + `super.<method>(…)`. Seit **V00.84** (JS-SEC-156, JS-SEC-159) läuft alles, was das native Mapping nicht abdeckt — `@ProtectedBy`, eigene `@JCustosAnnotation`-Annotationen, zusammengesetzte und von Supertypen geerbte Einschränkungen, Methoden ohne Einschränkung (Deny-by-Default) — über `JCustosEnforcer.enforce(Method, Class)`, wie bei `SecuredProxy`. Marker am Wrapper: `@GeneratedByProxyBuilder(processor, sourceClass, proxyBuilderVersion="00.11.00", date, comments)` (RUNTIME-reflectable via `proxybuilder-annotations`) + `@DelegatesTo("Owner#method(params)")` pro generierter Methode. |
 | `META-INF/services/javax.annotation.processing.Processor` | Registriert den Processor für `javac` / Maven-Compiler. |
-| `JCustosEnforcer` (in jCustos-core) | Zentrale Enforcement-API, geteilt mit `SecuredProxy`. Methoden: `requirePermission`, `requireAllPermissions`, `requireAnyPermission`, `requireRole`, `requireAnyRole`, `requirePolicy`; plus die Generic-`enforce(Method, Class)` für den Dynamic-Proxy-Pfad. Wirft `AccessDeniedException` on deny. |
+| `JCustosEnforcer` (in jCustos-core) | Zentrale Enforcement-API, geteilt mit `SecuredProxy`. Methoden: `requirePermission`, `requireAllPermissions`, `requireAnyPermission`, `requireRole`, `requireAnyRole`, `requirePolicy`; plus die Generic-`enforce(Method, Class)` für den Dynamic-Proxy-Pfad. Wirft `AccessDeniedException` on deny. Seit **V00.84**: unter Deny-by-Default wird ein Element ohne Einschränkung abgelehnt, sofern es oder seine Klasse nicht `@PublicRoute` trägt (JS-SEC-081); `requirePolicy` wirft ohne Subjekt, außer die Policy erlaubt anonyme Aufrufe (JS-SEC-157). |
 
 Konsumenten binden das Modul über `<annotationProcessorPaths>` in
 `maven-compiler-plugin` ein — nie als reguläre Compile-Dependency, da
 der Processor selbst zur Runtime nicht im Classpath stehen muss. Die
 generierte `<Type>Secured`-Klasse hat **keine** Restanforderungen ans
-Konsumenten-Projekt (`@GeneratedByProxyBuilder` wird im
-`writeDefinedClass`-Override gestrippt, weil
-`RetentionPolicy.SOURCE`).
+Konsumenten-Projekt außer den Markern `@GeneratedByProxyBuilder` /
+`@DelegatesTo` aus `proxybuilder-annotations`: Konsumenten deklarieren
+`com.svenruppert:proxybuilder-annotations:00.11.01` als Compile-Dependency
+und schließen `io.dropwizard.metrics` und `com.squareup:javapoet` davon aus
+(seit **V00.84**, JS-SEC-141; `demo-standalone` zeigt die Deklaration).
 
 Annotation-Mapping (Method-Level wins über Class-Level):
 
@@ -483,8 +515,15 @@ Annotation-Mapping (Method-Level wins über Class-Level):
 
 Diagnostics für `@Secured` auf `final` Klassen oder Method-Security-
 Annotationen auf `final`/`private`/`static`-Methoden werden vom
-proxybuilder-Base-Processor als `Diagnostic.Kind.ERROR` emittiert —
-kein Code in `jCustos-processor` selbst nötig.
+proxybuilder-Base-Processor als `Diagnostic.Kind.ERROR` emittiert.
+Seit **V00.84** (JS-SEC-156) meldet `jCustos-processor` zusätzlich selbst:
+eine Einschränkung auf einer Methode, die der Wrapper nicht überschreibt
+(`final`, `static`, `private`, `protected`, package-private, eine
+`Object`-Methode, per `@SkipProxy` oder `excludeMethodNames`
+ausgeschlossen), ist der Compile-Fehler
+`processing/unenforceable-security-annotation`; eine native und eine
+eigene (oder zusammengesetzte) Einschränkung auf einem Element sind
+`processing/multiple-security-annotations`.
 
 ---
 
@@ -505,7 +544,7 @@ kein Code in `jCustos-processor` selbst nötig.
 | `BootstrapMode` (enum) | `TRANSIENT_CONSOLE` / `PERSISTENT_FILE` / `DISABLED` |
 | `BootstrapConfigurationLoader` | Lädt aus sysprop `security.bootstrap.*` > env > defaults |
 | `BootstrapStateService` | `bootstrapRequired()` / `hasAdministrator()` |
-| `BootstrapTokenStore` (SPI) | In-Memory oder File-backed (`./data/bootstrap.token`, POSIX 0600) |
+| `BootstrapTokenStore` (SPI) | In-Memory oder File-backed (`./data/bootstrap.token`, POSIX 0600); eine untergeschobene oder zu weit berechtigte Token-Datei wird seit **V00.84** nicht übernommen, ein Erstellungszeitpunkt mehr als fünf Minuten in der Zukunft gilt als abgelaufen (JS-SEC-130) |
 | `BootstrapTokenGenerator` | 25-stelliger XXXX-XXXX-…-XXXX-Token, kryptographisch sicher |
 | `BootstrapTokenOutput` (SPI) | Console (TRANSIENT) oder File (PERSISTENT) |
 | `BootstrapStartup.initializeIfRequired` | Wird beim Service-Init aufgerufen; throw bei `DISABLED && !hasAdmin` |
@@ -576,7 +615,12 @@ Zeigt **beide** Method-Security-Pfade nebeneinander:
 | `reset-members` | `@RequiresRole("ADMIN")` | Compile-Time | `MemberDirectory` |
 | `help` / `quit` | — | — | UI |
 
-Seeded Users: `admin/admin`, `librarian/librarian`, `alice/alice`.
+Seeded Users: `admin/admin`, `librarian/librarian`, `alice/alice` — seit
+**V00.84** (JS-SEC-137) nur mit dem Entwicklungsschalter
+`-Djcustos.demo.insecure-seed-accounts=true`, der außerhalb von
+`DEVELOPMENT` abgelehnt wird; ohne Schalter startet die Demo ohne
+Benutzer. Passwörter laufen durch die Credential-Pipeline statt im
+Klartext.
 Bücher (`LibraryService`) werden via `SecuredProxy.wrap(...)` gesichert
 (JDK Dynamic Proxy auf das Interface). Members (`MemberDirectory`)
 werden via `new MemberDirectorySecured()` instanziiert — die Klasse
@@ -590,9 +634,9 @@ Beide Pfade landen im selben `JCustosEnforcer`.
 | Toolchain | Modul | Zweck |
 |---|---|---|
 | `jCustos-test` (eigenes Modul) | core / vaadin / rest / standalone / demo-vaadin / demo-standalone | Wiederverwendbare Fakes (`FakeAuthenticationService`, `FakeAuthorizationService`), `InMemorySubjectStore`, `RecordingAuditSink`, JUnit-5-`JCustosTestExtension`, `AccessContexts` / `JCustosSubjects` / `SyntheticAnnotations`-Helper. Konsumiert per `<scope>test</scope>`. |
-| Vaadin Browserless Testing 1.0.0 (`com.vaadin:browserless-test-junit6`) | vaadin / demo-vaadin | UI-Adapter-Tests ohne Browser; `BrowserlessTest`-Basisklasse, `navigate(Class)`, `$view(Class)`, typed Tester (`ButtonTester`, `GridTester`, `ComboBoxTester`, `NotificationTester`, `ConfirmDialogTester`) |
+| Vaadin Browserless Testing 1.0.0 (`com.vaadin:browserless-test-junit6`; der Kern `browserless-test-shared` kommt seit **V00.84** in 25.3.2 über die Vaadin-BOM) | vaadin / demo-vaadin | UI-Adapter-Tests ohne Browser; `BrowserlessTest`-Basisklasse, `navigate(Class)`, `$view(Class)`, typed Tester (`ButtonTester`, `GridTester`, `ComboBoxTester`, `NotificationTester`, `ConfirmDialogTester`) |
 | `com.google.testing.compile:compile-testing` 0.21.0 | jCustos-processor | Annotation-Processor-Tests: `Compiler.javac().withProcessors(...).compile(...)`, `assertThat(compilation).succeeded()`, `generatedSourceFile(...).contentsAsUtf8String().contains(...)`. |
-| JUnit Jupiter 6.1.0-M1 | alle | Test-Framework |
+| JUnit Jupiter 6.1.0 | alle | Test-Framework |
 | PIT 1.x | alle | Mutation Testing |
 
 ### Mutation Coverage (Stand 2026-05-31, V00.70 Refresh)
@@ -651,7 +695,11 @@ Alle Module grün.
 | `RolePermissionResolver.permissionsForRoles(roles, mapping)` | core | Merge-Helper |
 | `RoleMatcher.containsAny(...)` / `.containsAll(...)` | core | Rollen-Matching |
 | `PermissionMatcher.matches(...)` / `.containsAll(...)` | core | Permission-Matching (mit Wildcard `resource:*`) |
-| `JCustosAnnotationScanner.scan(Class/Method/AnnotatedElement)` | core | Annotation-Resolution mit Cache |
+| `JCustosAnnotationScanner.scan(Class/Method/AnnotatedElement)` / `.scan(Method, Class)` | core | Annotation-Resolution mit Cache; `scan(Method, Class)` seit **V00.84** für Methoden, wie sie auf einer bestimmten Klasse laufen (JS-SEC-114) |
+| `SessionRef.of(id)` / `.ofNullable(id)` / `.isReference(value)` | core | **V00.84** (JS-SEC-117): Session-Referenz `sref-…` für Audit, Logs, Session-Datensätze und Dashboards |
+| `SubjectKeyCanonicalizer.defaults()` / `.exact()` | core | **V00.84** (JS-SEC-123, CWE-178): ein Schlüssel pro Konto — Default NFKC, Kleinschreibung (`Locale.ROOT`), getrimmt; `exact()` für Verzeichnisse mit Groß-/Kleinschreibung. Dieselbe Instanz an Login-Policies, `InMemoryCredentialStore` und `InMemoryAbuseDetectionService` übergeben |
+| `RestDecisionContext.mapperOrDefault()` | rest | **V00.84** (JS-SEC-086): Decision-Mapper, über den eigene REST-Ablehnungen gerendert werden |
+| `RestHeaderLines.joined(...)` / `.rejectDuplicates(...)` | rest | **V00.84** (JS-SEC-113): mehrzeilige Header für `RestRequest`-Adapter |
 | `Secured.wrap(Class, impl)` / `Secured.requireAllowed(Class, methodName)` | standalone | Dynamic-Proxy-Enforcement |
 
 ---
@@ -675,14 +723,16 @@ Alle Module grün.
 
 - **Java 26** (Sealed Types, Records, Pattern Matching durchgängig)
 - **Vaadin 25.3.3** (vaadin-core, kein Hilla)
-- **Jetty 12.1.8 EE11** als Dev-Server für die Vaadin-Demos
+- **Jetty 12.1.15 EE11** (`jetty-ee11-maven-plugin`) als Dev-Server für die Vaadin-Demos
 - **Maven 4** (pinned via `./mvnw`; Minimum `4.0.0-rc-5`)
 - **Eclipse Store 4.1.0** (`org.eclipse.store:storage-embedded`) für
   die durable Persistence-Referenz in `jCustos-persistence-eclipsestore`
-- **proxybuilder 00.11.00** (`com.svenruppert:proxybuilder` +
+- **proxybuilder 00.11.01** (`com.svenruppert:proxybuilder` +
   `proxybuilder-annotations`) für den Compile-Time-Processor
+- **Bouncy Castle 1.86** (`org.bouncycastle:bcprov-jdk18on`) im optionalen
+  `jCustos-crypto-bc`
 - **Lizenz:** EUPL v1.2
-- **Aktuelle Version:** `00.80.00` (Betrieb & Forensik — siehe § 18; §1–§17 dokumentieren den V00.70.00-Kernstand)
+- **Aktuelle Version:** `00.84.00` (§1–§17 dokumentieren den V00.70.00-Kernstand, ergänzt um die mit **V00.84** markierten Änderungen; § 18 das V00.80.00-Delta Betrieb & Forensik; alles Weitere in den `RELEASE-NOTES-*.md`)
 
 ---
 
@@ -713,6 +763,9 @@ Alle Module grün.
 - ⚠️ **Self-Observability**: Marker `EventBusSelfObservabilityEvent` (die 6 INTEGRITY-Records), `EventBusObservabilityPublisher` (direct-dispatch, nie durch die signierte Pipeline → strukturell rekursionsfrei), `SelfObservabilityEvents.fromVerification(...)` (genau EIN Event pro Fehler; Replay → CRITICAL), `DeadLetterRecorder`.
 - ⚠️ **Strict-Mode-Consume-Wiring**: `ConsumeFailureAction`/`ConsumeFailurePolicy` (`strict()` fail-closed / `operationalDefaults()` / Builder) + `ConsumeFailureHandler` (Event + Metrik-Seam + optional Dead-Letter + Operator-Log mit stabilen `events/...`-Codes; Fehlkonfiguration scheitert beim Wiring); `EventPublishService` mit optionalem Handler-Parameter, HTTP-Mapping unverändert.
 - ⚠️ **Wire-Codec-Umzug**: `EnvelopeWireCodec`/`EventWireException` jetzt in `eu.jsentinel.jcustos.events.wire` (+ `encodeMetadata(...)`-Projektion ohne Payload/Signatur); events-rest behält einen `@Deprecated(forRemoval)`-Delegator für ein Release. `CanonicalJson` ist public (Export-Codec-Reuse).
+- ⚠️ **V00.84 — Schlüsselbindung an den Producer** (JS-SEC-101): `JCustosEventVerificationKeyResolver.mayVerify(keyId, producerId, tenantId)` wird nach der Signaturprüfung gefragt; ein Schlüssel, der nicht an den beanspruchten Producer gebunden ist, ergibt `KeyNotAuthorizedForProducer`. `JdkKeyStoreKeyManagement` bindet über den Alias-Namen oder `withProducerBinding(...)`; ein eigener Resolver erbt „Key-ID = Producer-ID“.
+- ⚠️ **V00.84 — Payload-Metadaten-Prüfung** (JS-SEC-107): `ConsumePipeline` dekodiert die kanonische Payload und vergleicht Event-Typ, Event-ID, Tenant, Subjekt und Zeitpunkt mit dem Envelope; Abweichung, nicht dekodierbare Payload oder unbekannter Content-Type ergeben `PayloadMetadataMismatch`. `Valid.payload()` liefert die geprüfte Payload — Konsumenten lesen das Event dort statt `canonicalPayload` selbst zu dekodieren.
+- ⚠️ **V00.84 — Sequenzen und Ablehnungen**: ein frischer Scope akzeptiert nur bis `maxInitialSequence` (Default 1), eine begrenzte Lücke ist über `maxTolerableGap` tolerierbar (`new SequenceValidator(maxInitialSequence, maxTolerableGap)`), `resetSequence`/`releaseReservation` am `JCustosEventSequenceStore` (JS-SEC-105, JS-SEC-108); Ablehnungen nicht authentifizierter Envelopes laufen unter dem System-Tenant und sind auf 20 pro Minute gedrosselt (`suppressedUnauthenticatedCount()`, `SelfObservabilityEvents.isUnauthenticatedRejection`, JS-SEC-104); Dead Letters werden über `storeOrMerge` zusammengeführt, `InMemoryDeadLetterStore` hält standardmäßig 1 000 offene Datensätze (JS-SEC-109).
 
 ### Guides
 

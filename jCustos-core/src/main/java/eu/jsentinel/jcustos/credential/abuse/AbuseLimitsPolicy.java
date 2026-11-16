@@ -122,10 +122,11 @@ public final class AbuseLimitsPolicy {
   /**
    * Sensible default policy: 5/10/15 failures per username per
    * 15 minutes for LOGIN; 30 / 60 / 120 per client address per hour
-   * (volume counter); for RESET_REQUEST a delay from the 3rd and a block
-   * from the 6th request per username per hour and 10 / 30 per client
-   * address per hour, both volume counters that count accepted requests
-   * too (JS-SEC-121); no step-up for the reset and change flows.
+   * (volume counter); for RESET_REQUEST thresholds of 3 (delay) and 6
+   * (block) earlier requests per username per hour - the fourth request is
+   * delayed, the seventh blocked - and 10 / 30 per client address per hour,
+   * both volume counters that count accepted requests too (JS-SEC-121); no
+   * step-up for the reset and change flows.
    */
   public static AbuseLimitsPolicy defaults() {
     Duration loginWindow = Duration.ofMinutes(15);

@@ -77,7 +77,11 @@ grep -rn 'implements Serializable | extends Serializable
         | serialVersionUID' --include='*.java'
 ```
 
-### Library modules — four ceremonial occurrences
+### Library modules — six ceremonial occurrences
+
+Re-checked for 00.84.00 over every library module (`jCustos-*/src/main`):
+the four occurrences of V00.74.10 below, under their jCustos names, and two
+added in 00.84.00, both in `jCustos-identity-oidc-vaadin`.
 
 | File | Marker | Reason |
 |---|---|---|
@@ -85,6 +89,8 @@ grep -rn 'implements Serializable | extends Serializable
 | `jSentinel-vaadin/.../SessionLifetimeListener.java` | `implements …, Serializable; private static final long serialVersionUID` | Same Vaadin reason. Holds only an `Instant`-based timeout snapshot — no credentials, no tokens. |
 | `jSentinel-dx/.../JSentinelBootstrapException.java` | `private static final long serialVersionUID` | Inherits from `RuntimeException → Exception → Throwable`. `Throwable` is mandatorily `Serializable` per JLS. The `serialVersionUID` is the canonical declaration that suppresses the compiler warning. No custom serialization behaviour. |
 | `jSentinel-propagation-oidc/.../JSentinelPropagationException.java` | `private static final long serialVersionUID` | Same `Throwable` inheritance. Same canonical declaration. |
+| `jCustos-identity-oidc-vaadin/.../VaadinSessionRegistryCleanup.java` (00.84.00) | `private static final long serialVersionUID` (via Vaadin's `SessionDestroyListener`) | Vaadin lifecycle listener, Shape 1. Its only field, the `SessionRegistry`, is `transient`. No `writeObject` / `readObject` override. |
+| `jCustos-identity-oidc-vaadin/.../AbstractOidcLogoutView.java`, nested `PendingLogoutTokens` (00.84.00) | `implements Serializable; private static final long serialVersionUID` | `VaadinSession` attribute holding the unused single-use logout tokens of one session (JS-SEC-147), bounded in number. Vaadin requires the marker for session attributes. The tokens are session-bound proofs of intent, not credentials; a replicated session carries them like the rest of its state. No `writeObject` / `readObject` override. |
 
 That is the complete list. The remaining sixteen library modules
 (`jSentinel-core`, `-rest`, `-standalone`, `-test`, `-processor`,
@@ -292,7 +298,9 @@ When adding or reviewing framework code:
 - [ ] New records carrying credentials, tokens, pepper or
       authentication state are not `Serializable`.
 - [ ] The CI grep recipe (below) reports the same four library hits
-      it did at V00.74.10. Any new hit triggers a documented review.
+      it did at V00.74.10, plus the two reviewed 00.84.00 hits in
+      `jCustos-identity-oidc-vaadin`. Any new hit triggers a
+      documented review.
 
 For operators deploying the framework:
 
@@ -332,8 +340,10 @@ grep -rn 'implements Serializable\|extends Serializable\|java\.io\.Serializable\
 ```
 
 Expected output across the library modules: exactly four matches —
-the two Vaadin listeners plus the two exception classes. Anything
-more triggers a documented review.
+the two Vaadin listeners plus the two exception classes. Since
+00.84.00 `jCustos-identity-oidc-vaadin` adds two reviewed classes
+(`VaadinSessionRegistryCleanup`, `AbstractOidcLogoutView.PendingLogoutTokens`,
+see the survey above). Anything more triggers a documented review.
 
 An ArchUnit rule that codifies the policy is appropriate as
 project-level test infrastructure (not yet shipped):

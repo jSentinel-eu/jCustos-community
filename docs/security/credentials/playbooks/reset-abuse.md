@@ -51,6 +51,13 @@ from that version on.
   account within an hour is answered with `AbuseDecision.Delay`
   and the seventh with `AbuseDecision.Block`; per client address
   the limits are 10 (delay) and 30 (block) per hour.
+- The per-username counter is keyed on the account, not on the
+  spelling: `InMemoryAbuseDetectionService` applies a
+  `SubjectKeyCanonicalizer` (by default NFKC, lower case, trimmed),
+  so `alice`, `ALICE` and ` Alice ` share one budget since V00.84.00.
+  A deployment with case-sensitive user names passes
+  `SubjectKeyCanonicalizer.exact()`, as it does to its credential
+  store and login policy.
 - Before V00.84.00 the per-username counter was a failure counter.
   A request that was accepted for an existing account is a success,
   so it was never counted and cleared the window; the limit only

@@ -30,7 +30,10 @@ therefore not accidentally pick up an old storage tree.
   `AuditExportService` (NDJSON + `SignedAuditBatch`). The export stays
   verifiable forever with public key material only — the wire/hash
   protocol strings (`jsentinel-audit-chain/v1`, …) were deliberately NOT
-  renamed, so old exports verify unchanged under jCustos.
+  renamed, so old exports stay verifiable under jCustos. Since 00.84.00 an
+  export verifies only when its signing key is bound to the producer id
+  `jcustos-audit-export`, and an export written before 00.84.00 verifies as
+  `Unanchored(LEGACY_EXPORT)` (JS-SEC-103).
 - **Signed event envelopes:** the wire format is FQCN-free and unchanged;
   exported/streamed envelopes remain valid. The Eclipse-Store envelope
   store itself starts fresh.
@@ -43,4 +46,5 @@ therefore not accidentally pick up an old storage tree.
 
 The Eclipse-Store restart/contract tests (e.g.
 `EclipseStoreAuditChainRestartTest`) run against the new type names and
-prove close → reopen → `Valid` for jCustos-written storages.
+prove close → reopen → a verifying chain for jCustos-written storages
+(`Anchored` since 00.84.00; the verifier no longer returns `Valid`).

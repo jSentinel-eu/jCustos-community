@@ -60,6 +60,12 @@ user base, idle accounts):
 - The override record carries
   `EmergencyPolicyOverride.Reason.PEPPER_COMPROMISE` so every
   status change is auditable as part of the same incident.
+- Since V00.84.00 a failing audit sink no longer stops the run
+  (JS-SEC-077): the helper goes on with the remaining accounts, and
+  the returned `Report.auditFailures()` counts the status changes
+  whose audit event was lost. A non-zero count means the incident
+  record has to be completed from the report, not from the audit
+  stream.
 
 ### 4. Decommission the old key (after re-encoding completes)
 
