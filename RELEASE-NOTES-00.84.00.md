@@ -1502,6 +1502,16 @@ goes with `deleteBySubject` and `purgeExpired`, and is bounded like the other re
 one with 32 parallel presentations of one token. **Consumers:** a third-party `RememberMeTokenStore`
 that keeps no trail overrides `implementsRotationTrail()` in its contract test to return `false`.
 
+## The Maven wrapper verifies the distribution it downloads, and the release build no longer runs npm (SA43, JS-SEC-143, CWE-494, CWE-829)
+
+The wrapper downloaded Maven 4.0.0-rc-5 without a checksum. The release prerequisite built the whole
+reactor, so six Vaadin demos ran `npm install` without a lockfile in the same session that signed
+the artefacts. The wrapper now pins the SHA-256 of the distribution, cross-checked against the
+SHA-512 and the signature Apache publishes, and the wrapper scripts move to 3.3.4, whose checksum
+test also works with the `sha256sum` of macOS. The release scripts build the library modules only.
+**Consumers:** no change. Contributors with an older copy of `mvnw` need the 3.3.4 scripts for a
+fresh download.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin
