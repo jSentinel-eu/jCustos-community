@@ -90,9 +90,11 @@ public final class JCustosEnforcer {
    *
    * @param methodOrElement annotated method (typically) or any annotated
    *                        element to inspect first
-   * @param declaringClass  declaring class used as fallback element and
-   *                        as the {@code resourceName} of the access
-   *                        context
+   * @param declaringClass  the class the call is served by: for a method it
+   *                        declares or inherits, the method is scanned as it
+   *                        runs on this class ({@link JCustosAnnotationScanner#scan(Method, Class)});
+   *                        otherwise it is the fallback element. Also the
+   *                        {@code resourceName} of the access context
    * @param methodName      method name used as the {@code operation} of
    *                        the access context
    * @throws AccessDeniedException when access is denied
@@ -100,14 +102,26 @@ public final class JCustosEnforcer {
   public static void enforce(AnnotatedElement methodOrElement,
                              Class<?> declaringClass,
                              String methodName) {
-    Optional<AnnotationAccessEvaluatorPair<Annotation>> match = SCANNER.scan(methodOrElement)
+    // JS-SEC-114 (CWE-862): a method the class inherits is scanned as it runs on that class.
+    // Scanning it on its declaring class let the restriction of a base class win over the
+    // restriction of the class the call is served by. The fallback to the class itself stays:
+    // here, unlike in the REST filter, @PublicRoute on a method does not lift a class-level
+    // restriction, and the generated @Secured wrappers decide the same way.
+    boolean onClass = methodOrElement instanceof Method method
+        && method.getDeclaringClass().isAssignableFrom(declaringClass);
+    Optional<AnnotationAccessEvaluatorPair<Annotation>> match = (onClass
+        ? SCANNER.scan((Method) methodOrElement, declaringClass)
+        : SCANNER.scan(methodOrElement))
         .or(() -> SCANNER.scan(declaringClass));
+    AnnotatedElement effective = onClass
+        ? JCustosAnnotationScanner.effectiveMethod((Method) methodOrElement, declaringClass)
+        : methodOrElement;
     if (match.isEmpty()) {
       // JS-SEC-081 (CWE-862): under deny-by-default an element without any restriction is
       // unconfigured, not open. Only an explicit @PublicRoute on the element or on its class
       // opens it - the same contract RestAuthorizationFilter and AuthorizationListener apply.
       if (JCustosServiceResolver.isDenyByDefault()
-          && !methodOrElement.isAnnotationPresent(PublicRoute.class)
+          && !effective.isAnnotationPresent(PublicRoute.class)
           && !declaringClass.isAnnotationPresent(PublicRoute.class)) {
         throw new AccessDeniedException("Denied by default: no security annotation on "
             + declaringClass.getName() + "#" + methodName + " and no @PublicRoute");

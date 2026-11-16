@@ -1410,6 +1410,18 @@ called for a route whose restriction sits on a router layout. It now uses the sa
 forwarded to the login view by this listener already. No security effect — the authorisation
 listener denied the navigation before as well.
 
+## `JCustosEnforcer` checks an inherited method on the class that serves the call (addition to SA14, JS-SEC-114, CWE-862)
+
+`JCustosEnforcer.enforce(Method, Class)` — the call behind `SecuredProxy` and the generated
+`@Secured` wrappers — scanned a method on the class that declares it and fell back to the class
+passed in only when that found nothing. For a method the class inherits, the restriction of the base
+class therefore won over the restriction of the class the call is served by. The enforcer now scans
+such a method with `JCustosAnnotationScanner.scan(Method, Class)` as it runs on the class passed in,
+and keeps the fallback to that class. `@PublicRoute` on a method still does not lift a class-level
+restriction on this path; this differs from the REST filter, where it does, and is unchanged.
+**Consumers:** a call on a subclass with a restriction of its own is decided by that restriction,
+not by the base class's.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

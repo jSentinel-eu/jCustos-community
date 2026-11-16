@@ -449,6 +449,59 @@ class JCustosEnforcerTest {
     assertDoesNotThrow(() -> JCustosEnforcer.enforce(m, AnnotatedClass.class));
   }
 
+  // ── JS-SEC-114: a method is enforced as it runs on the class passed in ──
+
+  @RequiresRole("ADMIN")
+  static class RestrictedBase {
+    public void inherited() {}
+  }
+
+  @RequiresRole("USER")
+  static class UserDerived extends RestrictedBase {
+  }
+
+  static class PlainBase {
+    @RequiresRole("ADMIN")
+    public void purge() {}
+  }
+
+  static class UnannotatedOverride extends PlainBase {
+    @Override
+    public void purge() {}
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: an inherited method is enforced with the restriction of the class the call is served by")
+  void inheritedMethodUsesTheServingClassRestriction() throws Exception {
+    bind(new TestUser("alice", Set.of("USER"), Set.of()));
+    Method m = UserDerived.class.getMethod("inherited");
+
+    assertDoesNotThrow(() -> JCustosEnforcer.enforce(m, UserDerived.class),
+        "the restriction of UserDerived applies, not the one of the base class");
+    assertThrows(AccessDeniedException.class, () -> JCustosEnforcer.enforce(m, RestrictedBase.class),
+        "invoked on the base class, the base class restriction applies");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: an un-annotated override keeps the restriction of the overridden method")
+  void unannotatedOverrideKeepsTheRestriction() throws Exception {
+    bind(new TestUser("alice", Set.of("USER"), Set.of()));
+    Method m = UnannotatedOverride.class.getMethod("purge");
+
+    assertThrows(AccessDeniedException.class, () -> JCustosEnforcer.enforce(m, UnannotatedOverride.class));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-114: an element that is not a method of the class keeps the element-then-class lookup")
+  void unrelatedElementKeepsTheFallback() throws Exception {
+    bind(new TestUser("alice", Set.of(), Set.of("doc:read")));
+    Method m = NoAnnotationClass.class.getMethod("doStuff");
+
+    assertDoesNotThrow(() -> JCustosEnforcer.enforce(m, AnnotatedClass.class));
+    bind(new TestUser("bob", Set.of(), Set.of()));
+    assertThrows(AccessDeniedException.class, () -> JCustosEnforcer.enforce(m, AnnotatedClass.class));
+  }
+
   // ── method-level annotations ──────────────────────────────────────
 
   static class MixedClass {
