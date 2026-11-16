@@ -25,6 +25,7 @@ package eu.jsentinel.jcustos.credential.reset;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.audit.PasswordResetCompleted;
 import eu.jsentinel.jcustos.audit.PasswordResetRequested;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
@@ -40,6 +41,7 @@ import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidationResult;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidator;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleService;
+import eu.jsentinel.jcustos.credential.lifecycle.InvalidStatusTransitionException;
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
@@ -115,7 +117,9 @@ import java.util.Optional;
  * password against the input policy, then <em>claims</em> the token by
  * CAS-marking it CONSUMED and only after a successful claim hashes the
  * password and performs a compare-and-swap on the credential's encoded
- * hash (JS-SEC-128, CWE-367: one token writes at most one password). Open
+ * hash (JS-SEC-128, CWE-367: one token writes at most one password) through
+ * {@link CredentialStore#replaceSecretIfCurrent}, which records the change and
+ * clears a compromise marker in the same step (JS-SEC-161). Open
  * siblings are retired and {@link PasswordResetCompleted} is emitted
  * (JS-SEC-074).</p>
  *
@@ -480,7 +484,9 @@ public final class PasswordResetService implements HasLogger {
     // loses against a concurrent credential change, the reset fails and the
     // token stays consumed — a link must never become usable again.
     PasswordHashResult newHash = hashingService.hash(newPassword);
-    CredentialUpdateResult credUpdate = credentialStore.updateHashIfCurrent(
+    // JS-SEC-161 (CWE-620): a new secret - the store records the change and
+    // clears the compromise marker in the same step as the hash.
+    CredentialUpdateResult credUpdate = credentialStore.replaceSecretIfCurrent(
         record.username(),
         credentialRecord.encodedHash(),
         newHash.encodedHash(),
@@ -498,9 +504,19 @@ public final class PasswordResetService implements HasLogger {
     if (credentialRecord.status() == CredentialStatus.RESET_PENDING
         && lifecycleService.isAllowed(
             CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE)) {
-      lifecycleService.transition(record.username(),
-          CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE,
-          "reset-consumed");
+      try {
+        lifecycleService.transition(record.username(),
+            CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE,
+            "reset-consumed");
+      } catch (InvalidStatusTransitionException refused) {
+        // JS-SEC-161: only a store that does not record the new secret gets here
+        // (replaceSecretIfCurrent left the compromise marker in place). The
+        // password is replaced; the credential stays RESET_PENDING.
+        logger().warn("credential/rotation-not-recorded: the password of user '{}' was"
+            + " reset, but the credential store did not record the new secret, so the"
+            + " credential stays {}: {}", LogFieldScrubber.scrub(record.username()),
+            CredentialStatus.RESET_PENDING, refused.getMessage());
+      }
     }
     // JS-SEC-121: the reset completed; there is no earlier status to return to.
     resetStore.forgetStatusBeforeReset(record.username());

@@ -50,6 +50,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * record keeps the spelling it was registered with. A deployment whose
  * names are case-sensitive passes {@link SubjectKeyCanonicalizer#exact()}
  * here <em>and</em> to its login policy.</p>
+ *
+ * <p>JS-SEC-161 (CWE-284, CWE-620): the store keeps the rotation proof of
+ * {@link CredentialRecord} - statuses move through
+ * {@link CredentialRecord#withStatus}, a new secret through
+ * {@link CredentialRecord#withNewSecret}, a rehash through
+ * {@link CredentialRecord#withHash} - and says so in
+ * {@link #recordsSecretRotation()}.</p>
  */
 public final class InMemoryCredentialStore implements CredentialStore {
 
@@ -147,6 +154,67 @@ public final class InMemoryCredentialStore implements CredentialStore {
       return CredentialUpdateResult.Stale.INSTANCE;
     }
     return new CredentialUpdateResult.Updated(updated);
+  }
+
+  @Override
+  public CredentialUpdateResult replaceSecretIfCurrent(
+      String username,
+      String expectedEncodedHash,
+      String newEncodedHash,
+      Instant when) {
+    Objects.requireNonNull(username, "username");
+    Objects.requireNonNull(expectedEncodedHash, "expectedEncodedHash");
+    Objects.requireNonNull(newEncodedHash, "newEncodedHash");
+    Objects.requireNonNull(when, "when");
+
+    String key = key(username);
+    CredentialRecord current = records.get(key);
+    if (current == null) {
+      return CredentialUpdateResult.NotFound.INSTANCE;
+    }
+    if (!current.encodedHash().equals(expectedEncodedHash)) {
+      return CredentialUpdateResult.Stale.INSTANCE;
+    }
+    // JS-SEC-161: hash, change time and the cleared compromise marker in one CAS
+    CredentialRecord updated = current.withNewSecret(newEncodedHash, when);
+    if (!records.replace(key, current, updated)) {
+      return CredentialUpdateResult.Stale.INSTANCE;
+    }
+    return new CredentialUpdateResult.Updated(updated);
+  }
+
+  @Override
+  public CredentialUpdateResult updateStatusIfUnchanged(
+      CredentialRecord witness,
+      CredentialStatus newStatus,
+      Instant when) {
+    Objects.requireNonNull(witness, "witness");
+    Objects.requireNonNull(newStatus, "newStatus");
+    Objects.requireNonNull(when, "when");
+
+    String key = key(witness.username());
+    CredentialRecord current = records.get(key);
+    if (current == null) {
+      return CredentialUpdateResult.NotFound.INSTANCE;
+    }
+    // JS-SEC-161: the whole record is the witness - the version included, so a
+    // status that left and came back since the caller judged it does not match.
+    if (!current.equals(witness)) {
+      return CredentialUpdateResult.Stale.INSTANCE;
+    }
+    CredentialRecord updated = current.withStatus(newStatus, when);
+    if (!records.replace(key, current, updated)) {
+      return CredentialUpdateResult.Stale.INSTANCE;
+    }
+    return new CredentialUpdateResult.Updated(updated);
+  }
+
+  /**
+   * @return {@code true}: the store keeps the rotation proof (JS-SEC-161)
+   */
+  @Override
+  public boolean recordsSecretRotation() {
+    return true;
   }
 
   /**

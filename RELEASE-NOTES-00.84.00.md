@@ -380,7 +380,8 @@ the subsequent `consume` writes the new hash and moves the credential to `ACTIVE
 stays blocked because re-enabling is an administrative decision. `DISABLED` additionally gains
 `MUST_CHANGE` and `RESET_PENDING` as the safer re-enable paths while `DISABLED → ACTIVE` stays
 available to administrators. The incident-response bulk path (`MassCredentialStatusChange`)
-writes statuses directly and is unaffected.
+writes statuses directly; since SA61 it records the compromise and does not re-enable a credential
+whose compromised secret was never replaced.
 
 Verified: `isAllowed(COMPROMISED, ACTIVE)` is `false`, `isAllowed(COMPROMISED, MUST_CHANGE)` and
 `isAllowed(COMPROMISED, RESET_PENDING)` are `true`; issuing a reset for a `COMPROMISED`
@@ -1465,7 +1466,7 @@ email-verification tokens drop consumed and expired records and then refuse `sav
 `…-token-store-capacity-exceeded`, like their in-memory counterparts; rate-limit keys drop buckets
 that left every window applied to them and then the key used least recently. Not bounded, by intent:
 audit events (retention stays `purgeOlderThan`), role assignments, security versions, bootstrap
-states, API keys and the refresh-token "invalid before" marks.
+states, API keys and the refresh-token and remember-me "invalid before" marks.
 
 **Consumers:** the stored layout changed. A storage written by 00.83.x or by an earlier 00.84.00
 build is converted when it is first opened (`persistence/storage-layout-migrated` in the log) and
@@ -1926,6 +1927,111 @@ now; any other exception is recorded as a failed attempt (`StandaloneLoginFlow.R
 and answered like wrong credentials, and `LoginView` also clears a subject the check had already
 bound. **Consumers:** `StandaloneLoginFlow.login` returns `Rejected` instead of rethrowing such
 exceptions.
+
+## A compromised credential returns to ACTIVE only after its secret was replaced (SA61, JS-SEC-161, CWE-284, CWE-620)
+
+ER09 (JS-SEC-076) took `COMPROMISED → ACTIVE` out of the state machine, but `COMPROMISED → DISABLED
+→ ACTIVE` and `COMPROMISED → MUST_CHANGE → ACTIVE` stayed allowed, as did the detours over `LOCKED`
+and `RESET_PENDING`: an administrator who disabled a compromised credential and re-enabled it later
+put the compromised secret back into service unchanged. `CredentialRecord` now carries the proof of
+a rotation: `compromisedSince` is set when the credential enters `COMPROMISED` and stays set through
+every later status until a new secret is written, and `secretChangedAt` records that write.
+`CredentialLifecycleService.transition(…, ACTIVE)` throws `InvalidStatusTransitionException` with
+reason `SECRET_ROTATION_REQUIRED` while `secretRotationRequired()` holds, whatever status it comes
+from, and compares the whole record, so check and write concern the same version. Password change
+and reset write the new secret through the new `CredentialStore.replaceSecretIfCurrent`, which
+records the change time and clears the marker in the same compare-and-swap as the hash; a rehash
+keeps both. `MassCredentialStatusChange` records the compromise when it writes `COMPROMISED` and no
+longer moves a credential that still holds a compromised secret to `ACTIVE`, `REHASH_REQUIRED` or
+`DEPRECATED_ALGORITHM`; such credentials are counted in the new `Report.rotationRequired`.
+**Consumers:** re-enabling a credential that went through `COMPROMISED` throws until the user
+changes the password or completes a reset — offer `MUST_CHANGE` or `RESET_PENDING` instead.
+`CredentialRecord` gained two components (the six-argument constructor stays); a record Eclipse
+Store loads from a storage written before 00.84.00 has both null and is treated fail-closed. A
+third-party `CredentialStore` persists both components, implements `replaceSecretIfCurrent` and
+`updateStatusIfUnchanged` and returns `true` from `recordsSecretRotation()` (the new testkit
+`CredentialStoreContract` checks it); for a store that keeps the defaults, `COMPROMISED → DISABLED`
+and `COMPROMISED → MUST_CHANGE` are refused with `ROTATION_NOT_RECORDED`, and the only way out of
+`COMPROMISED` is the reset.
+
+## A revocation during a remember-me rotation is no longer undone, and the in-memory store is bounded (addition to SA29, JS-SEC-129, CWE-367, CWE-613, CWE-770)
+
+`StoreBackedRememberMeService.rotate` retired the presented token and stored its successor in two
+store calls, so a `revokeAll` — logout everywhere, or the revocation after a password change — that
+landed between them was undone, and an `issue` that began before a `revokeAll` stored its token
+after it. `RememberMeTokenStore` gained `rotate`, `saveUnlessInvalidated` and
+`deleteBySubject(tenant, subject, invalidBefore)`, matching the refresh-token store: claim, trail
+and successor are one step, and a subject-wide revocation leaves an "invalid before" mark that
+refuses older records (a record created at the mark itself counts as newer). Both shipped stores
+implement them; the Eclipse-Store store persists the marks in a new table. The in-memory store kept
+its trail of rotated tokens without limit; live tokens and trail are now bounded at
+`CapacityBound.DEFAULT_MAX_ENTRIES` each, expired entries first, then the oldest, with a warning.
+**Consumers:** `issue` throws `IllegalStateException` with
+`authentication/remember-me-token-superseded` when a `revokeAll` for the subject overtook it; a
+third-party store inherits non-atomic defaults and should override them (the testkit contract checks
+them, `implementsAtomicRotation()` opts out).
+
+## An evicted replay anchor of the Eclipse-Store refresh-token store is reported; the tie at the "invalid before" mark is documented (addition to SA29, JS-SEC-129, CWE-294)
+
+At its bound the Eclipse-Store refresh-token store drops the record stored first; a holder of a
+stolen token who rotates it often enough pushes out the owner's rotated record, and when the owner
+presents the token again it is merely unknown and the thief's chain is not revoked. Keeping those
+records would let the same loop fill the store and refuse every sign-in, so the record is still
+dropped, but every rotated, unexpired record dropped is now counted and logged as
+`persistence/refresh-token-replay-anchor-evicted`. `TokenService.issue` said it refuses a token when
+a `revokeAll` overtook it; a revocation stamped with the same instant does not refuse it — on
+purpose, so that a sign-in right after a revocation within one clock tick works — and the Javadoc
+now says so. **Consumers:** an installation that sees the warning raises the bound or shortens the
+refresh-token lifetime.
+
+## The store-backed login policy audits the lockout it causes; a failing audit sink and an unrecorded failure are reported (addition to SA22 and SA23, JS-SEC-122, JS-SEC-123, CWE-778, CWE-770)
+
+`StoreBackedLoginAttemptPolicy.recordFailure` ignored the status the store returned, so a lockout
+against a persistent store never produced `BruteForceLimitReached`; it now publishes the event when
+a failure locks the key. Both policies dropped an exception of the audit sink without a trace; every
+failed publication is now counted and logged as `bruteforce/audit-sink-failed`, at most once a
+minute. A failure reported after its 30-second reservation had lapsed while the table was full was
+lost silently; it is still not counted against the key, but it is counted and logged as
+`bruteforce/failure-not-recorded`. **Consumers:** alerting on `BruteForceLimitReached` now also
+covers the store-backed policy.
+
+## A password change whose revocation finds no token is reported (addition to SA21 and SA28, JS-SEC-121, JS-SEC-128, CWE-613)
+
+`RevokingCredentialChangeListener` derives the subject from the credential's user name; where
+sessions and tokens are issued for an application user id or another spelling, the security-version
+bump and both `revokeAll` calls hit nobody, and nothing was logged. The listener now logs
+`credential/change-revoked-nothing` when every configured token step revoked nothing (WARN with the
+default mapping, INFO with a configured `subjectResolver(...)`). **Consumers:** an application whose
+tokens do not carry the user name configures `Builder.subjectResolver(...)`.
+
+## The bootstrap token file that is checked is the file that is read (addition to SA30, JS-SEC-130, CWE-367, CWE-59)
+
+`FileBootstrapTokenStore.load()` checked the token path without following a link and then read it
+with `Files.readAllLines`, which follows one. The file is now read through a channel opened with
+`NOFOLLOW_LINKS`, its identity is compared with the one the check saw, and at most
+`MAX_TOKEN_FILE_BYTES` (4 096) bytes are read; anything else is rejected with
+`bootstrap/token-file-rejected` and a fresh token is generated.
+
+## A user name too long to normalise gets a bounded key (addition to SA22, JS-SEC-122, CWE-400, CWE-770)
+
+NFKC can turn one character into eighteen (U+FDFA), so an unbounded user name cost time and memory
+far beyond its own length in `SubjectKeyCanonicalizer.defaults()`. Names longer than
+`MAX_RAW_LENGTH` (256 UTF-16 units) are no longer normalised; they map to `overlong-sha256:`
+followed by the SHA-256 of the name. **Consumers:** a deployment with legitimate names over 256
+characters supplies its own canonicaliser.
+
+## A symbolic link as storage directory is refused, and the storage opens the directory that was checked (addition to SA36, JS-SEC-136, CWE-367, CWE-59)
+
+`StorageTreeHardening` checked the configured storage directory after following a symbolic link, and
+Eclipse Store resolved the path again when it started, so whoever could replace the link chose the
+directory the store opened. A storage directory that is itself a symbolic link is now refused with
+`persistence/storage-permissions`; the checked path is resolved once, and the framework and app
+storages start at that real directory (new `requireOwnerOnlyDirectory`). A directory above it that
+another user owns, or that group or others may write without the sticky bit, is reported with a
+warning. `PasswordChangeResult.VerificationUnavailable`, `LoginAttemptStore.AttemptLimits`,
+`LoginAttemptStore.AttemptStatus` and `AtomicLoginAttemptStoreContract` now carry
+`@ExperimentalJCustosApi`. **Consumers:** point the storage at the directory a link targets, not at
+the link.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

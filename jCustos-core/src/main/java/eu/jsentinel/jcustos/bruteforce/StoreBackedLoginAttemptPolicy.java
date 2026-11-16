@@ -214,13 +214,43 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
    * (see {@link LoginAttemptPolicy#recordFailure(LoginAttemptContext)}). Until 00.84.00 this
    * policy published nothing, and an adapter that left the event to the policy - the Vaadin
    * {@code LoginView}, the REST handlers - audited no failed login behind it.
+   *
+   * <p>When the failure locks the key, {@code BruteForceLimitReached} follows, as with
+   * {@link InMemoryLoginAttemptPolicy}. Until 00.84.00 this policy ignored the status the store
+   * reported, and a lockout earned against the persistent store never reached the audit trail
+   * (JS-SEC-123, CWE-778).</p>
    */
   @Override
   public void recordFailure(LoginAttemptContext context, String reason) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    store.completeFailure(key(context), now, limits);
+    AttemptStatus status = store.completeFailure(key(context), now, limits);
     LoginFailureAudit.publish(auditService, now, context, reason);
+    if (lockedByThisFailure(status, now)) {
+      Instant until = status.blockedUntil().get();
+      LoginFailureAudit.publishLimitReached(auditService, now, context, status.failures(),
+          until.isAfter(now) ? Duration.between(now, until) : Duration.ZERO);
+    }
+  }
+
+  /**
+   * The store derives a lockout from counter and last failure: a key is locked from the failure
+   * that reaches the threshold, and every further failure - the single attempt admitted after a
+   * lockout ran out - locks it again from that failure on. Either way the lockout starts with
+   * the failure just recorded.
+   */
+  private boolean lockedByThisFailure(AttemptStatus status, Instant now) {
+    return status.blocked()
+        && status.failures() >= config.failureThreshold()
+        && status.blockedUntil().get().equals(plusLockout(now));
+  }
+
+  private Instant plusLockout(Instant from) {
+    try {
+      return from.plus(config.initialLockout());
+    } catch (java.time.DateTimeException | ArithmeticException overflow) {
+      return Instant.MAX;
+    }
   }
 
   @Override

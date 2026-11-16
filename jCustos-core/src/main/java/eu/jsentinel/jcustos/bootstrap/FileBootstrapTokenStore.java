@@ -17,12 +17,17 @@
 package eu.jsentinel.jcustos.bootstrap;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SeekableByteChannel;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
@@ -34,6 +39,7 @@ import java.time.format.DateTimeParseException;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * File-backed token store for {@link BootstrapMode#PERSISTENT_FILE}.
@@ -53,6 +59,14 @@ import java.util.Optional;
  * replaces the file. On a non-POSIX filesystem owner and permissions cannot
  * be checked; the behaviour there is unchanged (JS-SEC-016).
  * <p>
+ * The file that was checked is the file that is read: it is opened without
+ * following a symbolic link at the configured path, its identity is compared
+ * with the one the check saw, and at most {@value #MAX_TOKEN_FILE_BYTES} bytes
+ * are read from it (JS-SEC-130, CWE-367, CWE-59). Until 00.84.00 the check
+ * looked at the entry itself but the read followed a link that could have
+ * been put in its place in between, and the whole file was read whatever its
+ * size.
+ * <p>
  * Format (intentionally simple, no JSON dependency):
  * <pre>
  * token=XXXX-XXXX-XXXX-XXXX-XXXX
@@ -71,7 +85,18 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
       PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_WRITE,
       PosixFilePermission.OTHERS_EXECUTE);
 
+  /**
+   * Largest token file that is read: {@value} bytes. The two lines the store
+   * writes need well under a hundred; a larger file was not written by it.
+   *
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public static final int MAX_TOKEN_FILE_BYTES = 4_096;
+
   private final Path path;
+  /** Test seam: runs between the trust check and the read. */
+  Runnable afterTrustCheck = () -> { };
 
   public FileBootstrapTokenStore(Path path) {
     this.path = path;
@@ -84,10 +109,16 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
       // JS-SEC-130 (CWE-345, CWE-732): the file content becomes the credential
       // for creating the first administrator. Adopt it only when nobody but
       // this process's user can have written or read it.
-      if (!trustedOnPosix()) {
+      BasicFileAttributes checked = trustedOnPosix();
+      if (checked == null) {
         return Optional.empty();
       }
-      List<String> lines = Files.readAllLines(path);
+      afterTrustCheck.run();
+      Optional<String> content = readChecked(checked);
+      if (content.isEmpty()) {
+        return Optional.empty();
+      }
+      List<String> lines = content.get().lines().toList();
       String tokenValue = null;
       Instant createdAt = null;
       for (String line : lines) {
@@ -119,14 +150,57 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
   }
 
   /**
+   * JS-SEC-130 (CWE-367, CWE-59): reads the file the trust check judged. The
+   * channel is opened without following a symbolic link, and the identity of
+   * the entry is compared before and after the open, so a file swapped in after
+   * the check is not read; a file larger than {@link #MAX_TOKEN_FILE_BYTES} is
+   * not read either.
+   *
+   * @return the content, or empty when the file is not the one that was checked
+   */
+  private Optional<String> readChecked(BasicFileAttributes checked) throws IOException {
+    ByteBuffer buffer = ByteBuffer.allocate(MAX_TOKEN_FILE_BYTES + 1);
+    try (SeekableByteChannel channel = Files.newByteChannel(path,
+        Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
+      BasicFileAttributes opened =
+          Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      if (!opened.isRegularFile()
+          || (checked.fileKey() != null && !checked.fileKey().equals(opened.fileKey()))) {
+        logger().warn("bootstrap/token-file-rejected: {} was replaced while it was being checked;"
+            + " the file is ignored and a fresh token is required", path);
+        return Optional.empty();
+      }
+      // read up to one byte beyond the limit, so that an oversized file is noticed
+      int read;
+      do {
+        read = channel.read(buffer);
+      } while (read >= 0 && buffer.hasRemaining());
+    } catch (FileSystemException linkOrRace) {
+      // ELOOP: a symbolic link took the place of the checked file
+      logger().warn("bootstrap/token-file-rejected: {} could not be opened as the file that was"
+          + " checked ({}); the file is ignored and a fresh token is required", path,
+          linkOrRace.getClass().getSimpleName());
+      return Optional.empty();
+    }
+    if (buffer.position() > MAX_TOKEN_FILE_BYTES) {
+      logger().warn("bootstrap/token-file-rejected: {} is larger than {} bytes; the file is"
+          + " ignored and a fresh token is required", path, MAX_TOKEN_FILE_BYTES);
+      return Optional.empty();
+    }
+    buffer.flip();
+    return Optional.of(StandardCharsets.UTF_8.decode(buffer).toString());
+  }
+
+  /**
    * JS-SEC-130: owner and permission check for a token file found on disk.
    *
-   * @return {@code true} when the file may be read — it passed the check, or
-   *     the filesystem has no POSIX attributes (JS-SEC-016: nothing to check)
+   * @return the attributes the check judged when the file may be read — it
+   *     passed the check, or the filesystem has no POSIX attributes (JS-SEC-016:
+   *     nothing to check); {@code null} when it may not
    */
-  private boolean trustedOnPosix() throws IOException {
+  private BasicFileAttributes trustedOnPosix() throws IOException {
     if (!path.getFileSystem().supportedFileAttributeViews().contains("posix")) {
-      return true;
+      return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
     }
     // NOFOLLOW_LINKS: judge the entry at the configured path itself. A symbolic
     // link there is not a file this store wrote, wherever it points.
@@ -135,7 +209,7 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
     if (!attributes.isRegularFile()) {
       logger().warn("bootstrap/token-file-rejected: {} is not a regular file; the file "
           + "is ignored and a fresh token is required", path);
-      return false;
+      return null;
     }
     EnumSet<PosixFilePermission> excess = EnumSet.copyOf(GROUP_OR_OTHERS);
     excess.retainAll(attributes.permissions());
@@ -143,16 +217,16 @@ public final class FileBootstrapTokenStore implements BootstrapTokenStore, HasLo
       logger().warn("bootstrap/token-file-rejected: {} is accessible beyond its owner "
           + "(permissions {}); the file is ignored and a fresh token is required",
           path, PosixFilePermissions.toString(attributes.permissions()));
-      return false;
+      return null;
     }
     Optional<UserPrincipal> self = processUser();
     if (self.isEmpty() || !self.get().equals(attributes.owner())) {
       logger().warn("bootstrap/token-file-rejected: {} belongs to '{}', not to the user "
           + "this process runs as; the file is ignored and a fresh token is required",
           path, attributes.owner().getName());
-      return false;
+      return null;
     }
-    return true;
+    return attributes;
   }
 
   /**

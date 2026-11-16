@@ -72,6 +72,17 @@ import static java.util.Objects.requireNonNull;
  * <p>{@link #validate(String)} stays for callers that only need to look at a
  * token; it does not rotate.</p>
  *
+ * <h2>Revocation during a rotation (JS-SEC-129, CWE-367, CWE-613)</h2>
+ * <p>{@link #rotate(String)} hands claim, trail and successor to the store in
+ * one call, {@link RememberMeTokenStore#rotate}, and {@link #revokeAll} leaves
+ * an "invalid before" mark that {@link #issue} and {@link #rotate} respect.
+ * Until 00.84.00 the service retired the token and stored its successor in two
+ * calls; a {@code revokeAll} - the logout everywhere, the revocation after a
+ * password change - that landed between them was undone by the successor, and
+ * an {@code issue} that began before the revocation stored its token after it.
+ * The guarantees hold with a store that implements the atomic operations; both
+ * shipped stores do.</p>
+ *
  * <p>Bound to one {@link TenantId} at construction. Multi-tenant
  * deployments instantiate one service per tenant.
  *
@@ -103,6 +114,14 @@ public final class StoreBackedRememberMeService implements HasLogger {
    * @since 00.84.00
    */
   public static final String REASON_TOKEN_REPLAY = "RememberMeTokenReplay";
+
+  /**
+   * Diagnostic code of the {@link IllegalStateException} that {@link #issue}
+   * throws when a concurrent {@link #revokeAll} overtook it (JS-SEC-129).
+   *
+   * @since 00.84.00
+   */
+  public static final String SUPERSEDED_CODE = "authentication/remember-me-token-superseded";
 
   private final RememberMeTokenStore store;
   private final TokenHasher hasher;
@@ -214,6 +233,12 @@ public final class StoreBackedRememberMeService implements HasLogger {
    * @param subjectId subject the token authenticates; non-null
    * @param ttl       lifetime; must be strictly positive
    * @return issued token (plain value + record metadata)
+   * @throws IllegalStateException with the code {@value #SUPERSEDED_CODE} when
+   *     {@link #revokeAll(SubjectId)} for the same subject completed after this
+   *     call read its clock and before it stored the token (JS-SEC-129): the
+   *     login that led here predates the revocation, so no token is handed out.
+   *     A revocation that read the same instant as this call does not count as
+   *     later. The caller treats it like a failed sign-in.
    */
   public IssuedToken issue(SubjectId subjectId, Duration ttl) {
     requireNonNull(subjectId, "subjectId must not be null");
@@ -229,7 +254,12 @@ public final class StoreBackedRememberMeService implements HasLogger {
     String hash = hasher.hash(plain.toCharArray());
     RememberMeTokenRecord record = new RememberMeTokenRecord(
         hash, tenant, subjectId, now, now.plus(ttl));
-    store.save(record);
+    // JS-SEC-129 (CWE-613): the store refuses a record that is older than the
+    // subject's "invalid before" mark - revokeAll overtook this call.
+    if (!store.saveUnlessInvalidated(record)) {
+      throw new IllegalStateException(SUPERSEDED_CODE
+          + ": the subject's remember-me tokens were revoked while this token was being issued");
+    }
     return new IssuedToken(plain, record);
   }
 
@@ -279,20 +309,22 @@ public final class StoreBackedRememberMeService implements HasLogger {
       return Optional.empty();
     }
     RememberMeTokenRecord old = live.get();
-    // Claim first, issue second (the order of JS-SEC-071): nothing is stored
-    // for a caller that lost the claim.
-    if (!store.markRotated(hash, now)) {
-      // Another presentation of the same token won a moment ago.
-      onRotatedTokenPresented(hash, now);
-      return Optional.empty();
-    }
     String plain = tokenSource.get();
     if (plain == null || plain.isBlank()) {
       throw new IllegalStateException("tokenSource produced a blank token");
     }
     RememberMeTokenRecord successor = new RememberMeTokenRecord(
         hasher.hash(plain.toCharArray()), tenant, old.subjectId(), now, old.expiresAt());
-    store.save(successor);
+    // JS-SEC-071: of two concurrent presentations one wins the claim, and nothing
+    // is stored for the other. JS-SEC-129 (CWE-367, CWE-613): claim, trail and
+    // successor are one store operation, so a revokeAll either precedes the
+    // rotation - which is then refused - or follows it and removes the successor.
+    if (!store.rotate(hash, successor, now)) {
+      // Another presentation of the same token won a moment ago, or the token
+      // was revoked, expired or overtaken by a revocation in the meantime.
+      onRotatedTokenPresented(hash, now);
+      return Optional.empty();
+    }
     return Optional.of(new IssuedToken(plain, successor));
   }
 
@@ -336,7 +368,9 @@ public final class StoreBackedRememberMeService implements HasLogger {
     if (now.isBefore(trail.get().rotatedAt().plus(ROTATION_RACE_TOLERANCE))) {
       return;
     }
-    int revoked = store.deleteBySubject(tenant, consumed.subjectId());
+    // with a mark: a rotation of the other holder that read its clock earlier
+    // cannot store a successor after this revocation (JS-SEC-129)
+    int revoked = store.deleteBySubject(tenant, consumed.subjectId(), now);
     logger().warn("authentication/remember-me-replay: a remember-me token that was "
         + "already rotated was presented again; revoked {} token(s) of subject '{}'",
         revoked, consumed.subjectId().value());
@@ -378,14 +412,17 @@ public final class StoreBackedRememberMeService implements HasLogger {
 
   /**
    * Revokes every token issued to {@code subjectId} in this
-   * service's tenant.
+   * service's tenant and marks the subject's tokens invalid before the
+   * current instant (JS-SEC-129, CWE-613): an {@link #issue} or
+   * {@link #rotate} that read its clock earlier cannot store a token for the
+   * subject afterwards.
    *
    * @param subjectId subject; non-null
    * @return number of tokens removed
    */
   public int revokeAll(SubjectId subjectId) {
     requireNonNull(subjectId, "subjectId must not be null");
-    return store.deleteBySubject(tenant, subjectId);
+    return store.deleteBySubject(tenant, subjectId, clock.instant());
   }
 
   /**

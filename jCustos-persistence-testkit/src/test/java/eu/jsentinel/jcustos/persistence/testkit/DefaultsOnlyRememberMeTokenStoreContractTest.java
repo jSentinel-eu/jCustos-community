@@ -34,10 +34,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Runs {@link RememberMeTokenStoreContract} against a store that implements
  * only the five methods of the releases before 00.84.00 and inherits
- * {@code markRotated} and {@code findRotated} from the SPI defaults. It opts
- * out of the rotation-trail tests ({@link #implementsRotationTrail()}), which
- * proves that the base contract does not demand more than the defaults
- * deliver and that the opt-out skips exactly the JS-SEC-128 tests.
+ * {@code markRotated}, {@code findRotated}, {@code rotate},
+ * {@code saveUnlessInvalidated} and the marking {@code deleteBySubject} from
+ * the SPI defaults. It opts out of the rotation-trail and atomic-rotation tests
+ * ({@link #implementsRotationTrail()}, {@link #implementsAtomicRotation()}),
+ * which proves that the base contract does not demand more than the defaults
+ * deliver and that the opt-outs skip exactly the JS-SEC-128 and JS-SEC-129
+ * tests.
  */
 class DefaultsOnlyRememberMeTokenStoreContractTest implements RememberMeTokenStoreContract {
 
@@ -48,6 +51,11 @@ class DefaultsOnlyRememberMeTokenStoreContractTest implements RememberMeTokenSto
 
   @Override
   public boolean implementsRotationTrail() {
+    return false;
+  }
+
+  @Override
+  public boolean implementsAtomicRotation() {
     return false;
   }
 

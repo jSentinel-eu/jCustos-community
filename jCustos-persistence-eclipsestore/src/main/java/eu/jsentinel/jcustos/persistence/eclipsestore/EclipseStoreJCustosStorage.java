@@ -250,11 +250,14 @@ public final class EclipseStoreJCustosStorage implements AutoCloseable, HasLogge
     // home now, not a private copy (was duplicated across factory + facade + events module).
     // JS-SEC-136 (CWE-276, CWE-732): an existing directory is restricted as well, and one that
     // cannot be - it belongs to another user - is refused instead of opened with a warning.
-    StorageTreeHardening.requireOwnerOnly(dir, STORAGE_PERMISSIONS_CODE,
+    // JS-SEC-136 (CWE-367, CWE-59): the storage starts at the real directory the check
+    // resolved, not at a path it would resolve again; a symbolic link as storage directory is
+    // refused.
+    Path checked = StorageTreeHardening.requireOwnerOnlyDirectory(dir, STORAGE_PERMISSIONS_CODE,
         "the framework store holds session handles, roles and token hashes");
-    EmbeddedStorageManager manager = EmbeddedStorage.start(dir);
+    EmbeddedStorageManager manager = EmbeddedStorage.start(checked);
     // what the start has just created carries the process umask; take the open rights away
-    StorageTreeHardening.restrictStorageFiles(dir, STORAGE_PERMISSIONS_CODE);
+    StorageTreeHardening.restrictStorageFiles(checked, STORAGE_PERMISSIONS_CODE);
     return manager;
   }
 
@@ -326,6 +329,11 @@ public final class EclipseStoreJCustosStorage implements AutoCloseable, HasLogge
     tables.bootstrapStates.attach(this::markChanged, null);
     tables.rememberMeTokens.attach(this::markChanged, RememberMeTokenRecord::expiresAt);
     tables.rememberMeRotated.attach(this::markChanged, trail -> trail.record().expiresAt());
+    if (tables.rememberMeInvalidBefore == null) { // a storage written before the table existed
+      tables.rememberMeInvalidBefore = new StoredTable<>();
+      markChanged(tables);
+    }
+    tables.rememberMeInvalidBefore.attach(this::markChanged, null);
     tables.passwordResetTokens.attach(this::markChanged,
         record -> record.isConsumed() ? Instant.MIN : record.expiresAt());
     tables.emailVerificationTokens.attach(this::markChanged,

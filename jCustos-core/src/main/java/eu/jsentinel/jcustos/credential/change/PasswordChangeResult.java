@@ -22,6 +22,7 @@
  */
 package eu.jsentinel.jcustos.credential.change;
 
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.credential.input.PasswordInputViolation;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleDecision;
 
@@ -76,6 +77,7 @@ public sealed interface PasswordChangeResult
    *
    * @since 00.84.00
    */
+  @ExperimentalJCustosApi
   record VerificationUnavailable() implements PasswordChangeResult {
     public static final VerificationUnavailable INSTANCE = new VerificationUnavailable();
   }

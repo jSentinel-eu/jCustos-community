@@ -18,7 +18,11 @@ package eu.jsentinel.jcustos.util;
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
+import java.util.HexFormat;
 import java.util.Locale;
 
 /**
@@ -49,6 +53,25 @@ import java.util.Locale;
 public interface SubjectKeyCanonicalizer {
 
   /**
+   * Longest name, in UTF-16 code units, that {@link #defaults()} normalises: {@value}. NFKC can
+   * turn one character into eighteen (U+FDFA), so the canonical form of an unbounded name costs
+   * time and memory far beyond its own length - and the throttle keeps up to 100 000 such keys.
+   * A longer name is not normalised but mapped to a fixed-length key, see {@link #defaults()}.
+   *
+   * @since 00.84.00
+   */
+  int MAX_RAW_LENGTH = 256;
+
+  /**
+   * Prefix of the key {@link #defaults()} returns for a name longer than
+   * {@link #MAX_RAW_LENGTH}: the prefix followed by the lower-case hexadecimal SHA-256 of the
+   * name's UTF-8 bytes.
+   *
+   * @since 00.84.00
+   */
+  String OVERLONG_KEY_PREFIX = "overlong-sha256:";
+
+  /**
    * Returns the canonical key for {@code raw}.
    *
    * @param raw the name as supplied; never {@code null}
@@ -62,6 +85,13 @@ public interface SubjectKeyCanonicalizer {
    * the no-break space) onto their plain counterparts, so visually identical names share one
    * key; the second NFKC pass keeps the result stable for characters whose lower-case form
    * decomposes.
+   *
+   * <p>A name longer than {@link #MAX_RAW_LENGTH} is not normalised (JS-SEC-123, CWE-400,
+   * CWE-770): its key is {@link #OVERLONG_KEY_PREFIX} followed by the SHA-256 of the name -
+   * eighty characters, the same for the same name, different for different names, and a fixed
+   * point of this canonicaliser. No registered name of normal length has such a key, so a
+   * credential store answers "unknown user" and a throttle counts the name on a key of its own;
+   * nothing throws.</p>
    *
    * @return the shared default canonicaliser
    */
@@ -84,6 +114,9 @@ public interface SubjectKeyCanonicalizer {
   }
 
   private static String nfkcLowerTrim(String raw) {
+    if (raw.length() > MAX_RAW_LENGTH) {
+      return overlongKey(raw);
+    }
     String folded = Normalizer.normalize(raw, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
     String stable = Normalizer.normalize(folded, Normalizer.Form.NFKC);
     int from = 0;
@@ -95,6 +128,18 @@ public interface SubjectKeyCanonicalizer {
       to--;
     }
     return stable.substring(from, to);
+  }
+
+  /** JS-SEC-123 (CWE-400): a bounded key for a name too long to normalise. */
+  private static String overlongKey(String raw) {
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256")
+          .digest(raw.getBytes(StandardCharsets.UTF_8));
+      return OVERLONG_KEY_PREFIX + HexFormat.of().formatHex(digest);
+    } catch (NoSuchAlgorithmException missing) {
+      // every Java platform must provide SHA-256
+      throw new IllegalStateException("SHA-256 is not available", missing);
+    }
   }
 
   /** What {@link String#trim()} removes plus Unicode whitespace it does not know. */

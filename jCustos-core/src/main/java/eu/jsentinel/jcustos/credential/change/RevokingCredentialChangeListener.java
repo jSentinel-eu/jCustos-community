@@ -23,6 +23,7 @@
 package eu.jsentinel.jcustos.credential.change;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authentication.StoreBackedRememberMeService;
 import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
@@ -33,7 +34,9 @@ import eu.jsentinel.jcustos.session.JCustosVersionStore;
 
 import java.time.Instant;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.IntSupplier;
 
 /**
  * Shipped {@link CredentialChangeListener}: after a password change or reset
@@ -58,7 +61,15 @@ import java.util.function.Function;
  *
  * <p>The credential services identify the account by username. The listener
  * maps it to a {@link SubjectId} with {@link SubjectId#of(String)} unless
- * another mapping is configured.</p>
+ * another mapping is configured with {@link Builder#subjectResolver}. The
+ * mapping has to name the subject id the sessions and tokens were issued for:
+ * an application that issues them for a user id, or for another spelling of
+ * the name, configures the resolver, otherwise the version bump and the
+ * revocations hit a subject nobody uses. That mistake is not silent: when the
+ * remember-me and refresh-token steps that are configured all revoke nothing,
+ * the listener logs {@code credential/change-revoked-nothing} - as a WARN with
+ * the default mapping, at INFO with a configured one, where an account without
+ * tokens is the likely reason.</p>
  *
  * @since 00.84.00
  */
@@ -71,6 +82,10 @@ public final class RevokingCredentialChangeListener
   private final TokenService tokenService;
   private final TenantId tenant;
   private final Function<String, SubjectId> subjectResolver;
+  /** {@code true} while the default {@link SubjectId#of(String)} mapping is in use. */
+  private final boolean defaultSubjectResolver;
+  /** Changes after which every configured token step revoked nothing - for tests. */
+  private final AtomicLong emptyRevocations = new AtomicLong();
 
   private RevokingCredentialChangeListener(Builder builder) {
     this.versionStore = builder.versionStore;
@@ -78,6 +93,7 @@ public final class RevokingCredentialChangeListener
     this.tokenService = builder.tokenService;
     this.tenant = builder.tenant;
     this.subjectResolver = builder.subjectResolver;
+    this.defaultSubjectResolver = builder.defaultSubjectResolver;
   }
 
   /**
@@ -98,12 +114,57 @@ public final class RevokingCredentialChangeListener
       attempt("security-version", username,
           () -> versionStore.increment(new JCustosVersionKey(tenant, subject)));
     }
+    int tokenSteps = 0;
+    int revoked = 0;
+    boolean tokenStepFailed = false;
     if (rememberMeService != null) {
-      attempt("remember-me", username, () -> rememberMeService.revokeAll(subject));
+      tokenSteps++;
+      int count = count("remember-me", username, () -> rememberMeService.revokeAll(subject));
+      tokenStepFailed |= count < 0;
+      revoked += Math.max(count, 0);
     }
     if (tokenService != null) {
-      attempt("refresh-token", username, () -> tokenService.revokeAll(subject));
+      tokenSteps++;
+      int count = count("refresh-token", username, () -> tokenService.revokeAll(subject));
+      tokenStepFailed |= count < 0;
+      revoked += Math.max(count, 0);
     }
+    if (tokenSteps > 0 && !tokenStepFailed && revoked == 0) {
+      reportEmptyRevocation(username, subject);
+    }
+  }
+
+  /**
+   * JS-SEC-128 (CWE-613): every configured token step revoked nothing. Either the
+   * account held no remember-me or refresh token, or the tokens were issued for
+   * another subject id than the one the listener derived from the user name - in
+   * which case they all survived the password change.
+   */
+  private void reportEmptyRevocation(String username, SubjectId subject) {
+    emptyRevocations.incrementAndGet();
+    String message = "credential/change-revoked-nothing: after the password change of user '{}'"
+        + " no remember-me or refresh token of subject '{}' was found. If the tokens are issued"
+        + " for another subject id than this, they survived the change - configure"
+        + " RevokingCredentialChangeListener.Builder.subjectResolver(...).";
+    String user = LogFieldScrubber.scrub(username);
+    String id = LogFieldScrubber.scrub(subject.value());
+    if (defaultSubjectResolver) {
+      logger().warn(message, user, id);
+    } else {
+      logger().info(message, user, id);
+    }
+  }
+
+  /** Package-visible for tests: changes after which every token step revoked nothing. */
+  long emptyRevocationCount() {
+    return emptyRevocations.get();
+  }
+
+  /** @return what {@code action} revoked, or {@code -1} when it failed */
+  private int count(String step, String username, IntSupplier action) {
+    int[] revoked = {-1};
+    attempt(step, username, () -> revoked[0] = action.getAsInt());
+    return revoked[0];
   }
 
   private void attempt(String step, String username, Runnable action) {
@@ -113,7 +174,7 @@ public final class RevokingCredentialChangeListener
       // JS-SEC-128: the password is already replaced. Report the artefact class
       // that survived instead of hiding it behind the first failure.
       logger().warn("credential/change-revocation-failed: step {} failed for user '{}': {}",
-          step, username, failure.toString());
+          step, LogFieldScrubber.scrub(username), failure.toString());
     }
   }
 
@@ -125,6 +186,7 @@ public final class RevokingCredentialChangeListener
     private TokenService tokenService;
     private TenantId tenant = TenantId.DEFAULT;
     private Function<String, SubjectId> subjectResolver = SubjectId::of;
+    private boolean defaultSubjectResolver = true;
 
     private Builder() {
     }
@@ -168,12 +230,17 @@ public final class RevokingCredentialChangeListener
     }
 
     /**
-     * @param subjectResolver maps the credential's username to the subject id
-     *                        the sessions and tokens were issued for; non-null
+     * @param subjectResolver maps the credential's username - the name the
+     *                        credential store registered - to the subject id
+     *                        the sessions and tokens were issued for; non-null.
+     *                        The default is {@link SubjectId#of(String)}, which
+     *                        is right only when the tokens carry exactly that
+     *                        name.
      * @return this builder
      */
     public Builder subjectResolver(Function<String, SubjectId> subjectResolver) {
       this.subjectResolver = Objects.requireNonNull(subjectResolver, "subjectResolver");
+      this.defaultSubjectResolver = false;
       return this;
     }
 

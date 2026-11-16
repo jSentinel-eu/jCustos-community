@@ -87,7 +87,9 @@ import static java.util.Objects.requireNonNull;
  * store. {@link #issue} and {@link #rotate} hand the store records stamped
  * with the instant they read at their start; a record older than the mark
  * is refused, so an operation that began before the revocation cannot
- * finish after it (JS-SEC-129, CWE-613). The guarantees hold with a store
+ * finish after it (JS-SEC-129, CWE-613). A record stamped with the instant
+ * of the mark itself is kept: within one tick of the clock the order of the
+ * two cannot be told, and a sign-in that follows a revocation must work. The guarantees hold with a store
  * that implements the atomic operations — both shipped stores do; see
  * {@link RefreshTokenStore} for the defaults a third-party store inherits.
  *
@@ -218,7 +220,11 @@ public final class TokenService {
    *     same subject completed after this call read its clock and before it
    *     stored the token (JS-SEC-129): the authentication that led here
    *     predates the revocation, so no pair is handed out. The caller treats
-   *     it like a failed sign-in; the next attempt succeeds.
+   *     it like a failed sign-in; the next attempt succeeds. "After" is
+   *     judged by the clock: a revocation that read the same instant as this
+   *     call does not refuse it - the store keeps a record created at the
+   *     mark - so that a sign-in which follows a revocation within one clock
+   *     tick is served. The window this leaves is one tick of the clock.
    */
   public TokenPair issue(SubjectId subjectId) {
     requireNonNull(subjectId, "subjectId must not be null");

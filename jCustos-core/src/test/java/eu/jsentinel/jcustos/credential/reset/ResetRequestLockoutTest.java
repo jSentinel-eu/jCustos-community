@@ -259,6 +259,25 @@ class ResetRequestLockoutTest {
         }
         return kit.credentials.updateStatusIfCurrent(username, expected, next, when);
       }
+
+      // JS-SEC-161: a complete wrapper passes the rotation proof through; without
+      // these the consumed reset could not return the credential to ACTIVE.
+      @Override
+      public CredentialUpdateResult replaceSecretIfCurrent(
+          String username, String expected, String next, Instant when) {
+        return kit.credentials.replaceSecretIfCurrent(username, expected, next, when);
+      }
+
+      @Override
+      public CredentialUpdateResult updateStatusIfUnchanged(
+          CredentialRecord witness, CredentialStatus next, Instant when) {
+        return kit.credentials.updateStatusIfUnchanged(witness, next, when);
+      }
+
+      @Override
+      public boolean recordsSecretRotation() {
+        return kit.credentials.recordsSecretRotation();
+      }
     };
     PasswordResetService reset = service(kit, interleaving, kit.lifecycle(interleaving));
     wire(reset.issue("alice", TTL));

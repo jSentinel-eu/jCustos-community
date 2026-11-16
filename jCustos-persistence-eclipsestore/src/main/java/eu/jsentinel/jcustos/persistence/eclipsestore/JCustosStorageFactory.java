@@ -128,10 +128,10 @@ public final class JCustosStorageFactory {
     Objects.requireNonNull(layout, "layout");
     CapacityBound.requirePositiveCapacity(maxEntriesPerStore);
     ensureParentIsWritableDirectory(parent);
-    hardenStorageTree(parent, layout);
+    // JS-SEC-136 (CWE-367): the app storage starts at the directory the check resolved
+    Path appDir = hardenStorageTree(parent, layout);
 
     Path frameworkDir = parent.resolve(layout.frameworkSubdir());
-    Path appDir       = parent.resolve(layout.appSubdir());
 
     EmbeddedStorageManager frameworkMgr = null;
     EmbeddedStorageManager appMgr       = null;
@@ -193,11 +193,13 @@ public final class JCustosStorageFactory {
    * <p>JS-SEC-136 (CWE-276, CWE-732): existing directories are restricted too. The parent is
    * restricted when it belongs to the process user and reported otherwise; the two storage
    * directories must be owner-only, and one that cannot be made so stops the open.
+   *
+   * @return the real path of the checked app directory, where the app storage is started
    */
-  private static void hardenStorageTree(Path parent, StorageLayout layout) {
+  private static Path hardenStorageTree(Path parent, StorageLayout layout) {
     StorageTreeHardening.hardenOwnerOnly(parent, "persistence/storage-permissions",
         "the framework store holds session handles, roles and token hashes");
-    StorageTreeHardening.requireOwnerOnly(parent.resolve(layout.appSubdir()),
+    return StorageTreeHardening.requireOwnerOnlyDirectory(parent.resolve(layout.appSubdir()),
         "persistence/storage-permissions",
         "the app store shares the framework's owner-only tree");
   }

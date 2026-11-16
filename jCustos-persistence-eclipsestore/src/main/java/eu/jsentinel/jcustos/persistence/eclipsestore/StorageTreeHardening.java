@@ -29,6 +29,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
 import java.util.EnumSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
@@ -58,6 +59,19 @@ import java.util.function.Function;
  * {@link #restrictStorageFiles} takes the same rights away from them, so that a tree that is
  * copied or archived does not carry open modes with it.</p>
  *
+ * <h2>Symbolic links and the path above (JS-SEC-136, CWE-367, CWE-59)</h2>
+ * <p>The check and the storage each resolved the configured path on their own, and a symbolic
+ * link at that path was followed. Whoever could replace the link between the check and
+ * {@code EmbeddedStorage.start} - or at any later time - chose the directory the store opened,
+ * past every check above. Since 00.84.00 a storage directory that is itself a symbolic link is
+ * refused ({@link #requireOwnerOnly}) or reported ({@link #hardenOwnerOnly}); configure the
+ * directory the link points to. {@link #requireOwnerOnlyDirectory} resolves the path once and
+ * returns the real directory it checked, so that the caller opens exactly that one. The
+ * directories above it are verified as well: one that another user owns, or that group or
+ * others may write without the sticky bit, lets that user swap the storage directory for one of
+ * their own at any time - such an ancestor is reported with a warning, as only the deployment
+ * can fix it.</p>
+ *
  * <p>On a filesystem without POSIX attributes all of this is a no-op: owner-only permissions
  * cannot be enforced there and the directory relies on its ACLs (JS-SEC-016).</p>
  *
@@ -73,6 +87,15 @@ public final class StorageTreeHardening {
       PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE,
       PosixFilePermission.GROUP_EXECUTE, PosixFilePermission.OTHERS_READ,
       PosixFilePermission.OTHERS_WRITE, PosixFilePermission.OTHERS_EXECUTE);
+
+  /** Write permission for group or others in a Unix mode. */
+  private static final int GROUP_OR_OTHERS_WRITE = 0022;
+  /** The sticky bit: only an entry's owner may rename or delete it. */
+  private static final int STICKY_BIT = 01000;
+  /** The permission and special bits of a Unix mode. */
+  private static final int MODE_BITS = 07777;
+  /** The superuser, who can replace anything anyway. */
+  private static final int SUPERUSER_UID = 0;
 
   /** Directories Eclipse Store creates below a storage directory: one per channel. */
   private static final String CHANNEL_DIRECTORY_GLOB = "channel_*";
@@ -120,11 +143,32 @@ public final class StorageTreeHardening {
    * @since 00.84.00
    */
   public static void requireOwnerOnly(Path dir, String logPrefix, String storeDescription) {
-    requireOwnerOnly(dir, logPrefix, storeDescription, StorageTreeHardening::processUser);
+    requireOwnerOnlyDirectory(dir, logPrefix, storeDescription);
+  }
+
+  /**
+   * {@link #requireOwnerOnly}, returning the real path of the directory it checked: the
+   * configured path resolved once, after the checks (JS-SEC-136, CWE-367). A caller that opens
+   * the storage at the returned path opens the directory that was checked, even if a link
+   * above it is changed afterwards. Refuses a {@code dir} that is a symbolic link; reports a
+   * directory above it that another user can replace. On a non-POSIX filesystem the path is
+   * returned as it is.
+   *
+   * @param dir              storage directory; created owner-only if missing
+   * @param logPrefix        stable code that starts the exception message and the log lines
+   * @param storeDescription short human phrase naming what the store holds
+   * @return the real path of the checked directory
+   * @throws IllegalStateException when the directory cannot be made owner-only or is a
+   *                               symbolic link
+   * @since 00.84.00
+   */
+  public static Path requireOwnerOnlyDirectory(Path dir, String logPrefix,
+                                               String storeDescription) {
+    return requireOwnerOnly(dir, logPrefix, storeDescription, StorageTreeHardening::processUser);
   }
 
   /** Test seam: {@code whoAmI} names the principal the directory has to belong to. */
-  static void requireOwnerOnly(Path dir, String logPrefix, String storeDescription,
+  static Path requireOwnerOnly(Path dir, String logPrefix, String storeDescription,
                                Function<Path, Optional<UserPrincipal>> whoAmI) {
     Optional<String> problem = restrict(dir, logPrefix, whoAmI);
     if (problem.isPresent()) {
@@ -132,7 +176,62 @@ public final class StorageTreeHardening {
           + ". Hand the directory to the user the process runs as and restrict it to 0700,"
           + " or choose another directory.");
     }
-    restrictStorageFiles(dir, logPrefix);
+    Path real = realPath(dir, logPrefix, storeDescription);
+    restrictStorageFiles(real, logPrefix);
+    return real;
+  }
+
+  /** Resolves {@code dir} once and verifies the directories above the result. */
+  private static Path realPath(Path dir, String logPrefix, String storeDescription) {
+    if (!isPosix(dir)) {
+      return dir;
+    }
+    try {
+      Path real = dir.toRealPath();
+      processUser(real).flatMap(self -> ancestorProblem(real, self)).ifPresent(problem ->
+          HasLogger.staticLogger().warn("{}: {}; {}", logPrefix, problem, storeDescription));
+      return real;
+    } catch (IOException | RuntimeException unresolvable) {
+      throw new IllegalStateException(logPrefix + ": could not resolve " + dir + ": "
+          + unresolvable + "; " + storeDescription, unresolvable);
+    }
+  }
+
+  /**
+   * JS-SEC-136 (CWE-367): the first directory above {@code real} that someone else than
+   * {@code self} or the superuser can rename or replace entries in - it is owned by another
+   * user, or group or others may write it without the sticky bit. A filesystem without the
+   * {@code unix} attribute view is not checked.
+   *
+   * @return what is wrong, as a phrase for a message; empty when the chain is safe
+   */
+  static Optional<String> ancestorProblem(Path real, UserPrincipal self) {
+    if (!real.getFileSystem().supportedFileAttributeViews().contains("unix")) {
+      return Optional.empty();
+    }
+    for (Path ancestor = real.getParent(); ancestor != null; ancestor = ancestor.getParent()) {
+      try {
+        Map<String, Object> unix =
+            Files.readAttributes(ancestor, "unix:mode,uid", LinkOption.NOFOLLOW_LINKS);
+        int mode = (Integer) unix.get("mode");
+        int uid = (Integer) unix.get("uid");
+        boolean sticky = (mode & STICKY_BIT) != 0;
+        if ((mode & GROUP_OR_OTHERS_WRITE) != 0 && !sticky) {
+          return Optional.of(ancestor + ", a directory above the storage directory, can be written"
+              + " by group or others (mode " + Integer.toOctalString(mode & MODE_BITS) + "),"
+              + " who can replace the storage directory");
+        }
+        UserPrincipal owner = Files.getOwner(ancestor, LinkOption.NOFOLLOW_LINKS);
+        if (uid != SUPERUSER_UID && !owner.equals(self)) {
+          return Optional.of(ancestor + ", a directory above the storage directory, belongs to '"
+              + owner.getName() + "', who can replace the storage directory");
+        }
+      } catch (IOException | RuntimeException unreadable) {
+        return Optional.of("could not verify " + ancestor + ", a directory above the storage"
+            + " directory: " + unreadable);
+      }
+    }
+    return Optional.empty();
   }
 
   /**
@@ -186,12 +285,17 @@ public final class StorageTreeHardening {
       return Optional.empty();
     }
     try {
-      if (!Files.exists(dir)) {
+      if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
         Files.createDirectories(dir, PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));
       }
-      // The configured path may be a symbolic link to the real location; it is followed, as
-      // Eclipse Store follows it.
-      PosixFileAttributes attributes = Files.readAttributes(dir, PosixFileAttributes.class);
+      // JS-SEC-136 (CWE-59, CWE-367): judge the entry at the configured path itself. A
+      // symbolic link there would be resolved again by the storage, after this check.
+      PosixFileAttributes attributes =
+          Files.readAttributes(dir, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      if (attributes.isSymbolicLink()) {
+        return Optional.of(dir + " is a symbolic link; the storage would open whatever it points"
+            + " to when it starts, not what was checked - configure the directory it points to");
+      }
       if (!attributes.isDirectory()) {
         return Optional.of(dir + " is not a directory");
       }

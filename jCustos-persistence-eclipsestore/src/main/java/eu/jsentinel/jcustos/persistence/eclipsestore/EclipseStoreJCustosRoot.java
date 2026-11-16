@@ -199,6 +199,15 @@ final class EclipseStoreJCustosRoot {
      */
     final StoredTable<RefreshTokenScope, Instant> refreshTokenInvalidBefore = new StoredTable<>();
 
+    /**
+     * (tenant, subject) → instant before which the subject's remember-me tokens
+     * are invalid (JS-SEC-129, CWE-613), written by a subject-wide revocation.
+     * Added after the layout of 00.84.00 was first written: {@code null} in a
+     * storage written by such a build, created by {@link EclipseStoreJCustosStorage}
+     * when it opens one - hence not {@code final}.
+     */
+    StoredTable<RememberMeTokenScope, Instant> rememberMeInvalidBefore = new StoredTable<>();
+
     /** rate-limit key → the key's events; the bucket is changed in place and stored by its adapter. */
     final StoredTable<RateLimitKey, RateLimitBucket> rateLimitBuckets = new StoredTable<>();
 
@@ -232,6 +241,16 @@ final class EclipseStoreJCustosRoot {
    * @param subjectId subject identifier value
    */
   record RefreshTokenScope(String tenant, String subjectId) {
+  }
+
+  /**
+   * Key of {@link Tables#rememberMeInvalidBefore}: the subject within a tenant
+   * whose remember-me tokens were revoked wholesale (JS-SEC-129).
+   *
+   * @param tenant    tenant scope
+   * @param subjectId subject identifier value
+   */
+  record RememberMeTokenScope(String tenant, String subjectId) {
   }
 
   /**

@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.bruteforce;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.util.CapacityBound;
 
@@ -58,6 +59,14 @@ import static java.util.Objects.requireNonNull;
  * SPI's default methods compute, so a persistent store that keeps only
  * counter and timestamp recovers its lockouts after a restart.
  *
+ * <p>A failure reported after its reservation lapsed finds no entry for its
+ * key, and when the store is full of entries it must keep there is no room
+ * for one either. Such a failure is not counted against the key - the bound
+ * holds and no lockout is evicted for it - but it is counted and logged as
+ * {@code bruteforce/failure-not-recorded}, at most once a minute (JS-SEC-122,
+ * CWE-770); until 00.84.00 it was lost without a trace. The status
+ * {@link #completeFailure} returns is the one the failure would have caused.
+ *
  * <p>The older {@link #recordFailure}/{@link #failureCount}/
  * {@link #lastFailureAt}/{@link #reset} keep working. An entry written only
  * through them carries no limits; the store then applies the limits it saw
@@ -65,9 +74,16 @@ import static java.util.Objects.requireNonNull;
  * it has seen any.
  */
 @ExperimentalJCustosApi
-public final class InMemoryLoginAttemptStore implements LoginAttemptStore {
+public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLogger {
+
+  /** At most one {@code bruteforce/failure-not-recorded} line per this interval. */
+  private static final Duration UNRECORDED_WARNING_INTERVAL = Duration.ofMinutes(1);
 
   private final Object monitor = new Object();
+  /** Failures that found no room (JS-SEC-122); guarded by {@link #monitor}. */
+  private long unrecordedFailures;
+  /** When the last {@code bruteforce/failure-not-recorded} line was logged; guarded by the monitor. */
+  private Instant lastUnrecordedWarning;
   private final BoundedAttemptTable<LoginAttemptKey, Ledger> table;
   /** The limits of the first atomic operation; applied to entries that carry none. */
   private AttemptLimits knownLimits;
@@ -106,6 +122,13 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore {
   int trackedKeyCount() {
     synchronized (monitor) {
       return table.size();
+    }
+  }
+
+  /** Package-visible for tests: failures that found no room in the store (JS-SEC-122). */
+  long unrecordedFailureCount() {
+    synchronized (monitor) {
+      return unrecordedFailures;
     }
   }
 
@@ -192,7 +215,9 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore {
       ledger.count++;
       ledger.lastFailureAt = now;
       ledger.limits = limits;
-      store(key, ledger, now);
+      if (!store(key, ledger, now)) {
+        failureNotRecorded(now);
+      }
       Instant lockedUntil = lockedUntil(ledger, limits);
       return lockedUntil == null
           ? AttemptStatus.open(ledger.count)
@@ -253,7 +278,9 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore {
       }
       ledger.count++;
       ledger.lastFailureAt = at;
-      store(key, ledger, at);
+      if (!store(key, ledger, at)) {
+        failureNotRecorded(at);
+      }
     }
   }
 
@@ -304,6 +331,24 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore {
       return true;
     }
     return table.put(key, ledger, expiresAt, latest(lockedUntil, reservedUntil), now);
+  }
+
+  /**
+   * Caller holds the monitor. JS-SEC-122 (CWE-770): a failure that found no room is counted and
+   * reported - the table is full of lockouts and attempts in flight, and this key is not among
+   * them.
+   */
+  private void failureNotRecorded(Instant now) {
+    unrecordedFailures++;
+    if (lastUnrecordedWarning != null
+        && now.isBefore(plus(lastUnrecordedWarning, UNRECORDED_WARNING_INTERVAL))
+        && !now.isBefore(lastUnrecordedWarning)) {
+      return;
+    }
+    lastUnrecordedWarning = now;
+    logger().warn("bruteforce/failure-not-recorded: a failed login arrived for a key the store no"
+        + " longer tracked while all its entries were locked or in flight; the failure was not"
+        + " counted ({} so far).", unrecordedFailures);
   }
 
   /** Remembers the first limits seen and derives the deadlines of entries that carry none. */

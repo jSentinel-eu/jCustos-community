@@ -115,7 +115,10 @@ public final class InMemoryRefreshTokenStore implements RefreshTokenStore {
     }
   }
 
-  /** Caller holds {@link #mutation}. */
+  /**
+   * Caller holds {@link #mutation}. A record created at the instant of the mark
+   * is not invalidated - see {@link RefreshTokenStore#saveUnlessInvalidated}.
+   */
   private boolean isInvalidated(RefreshTokenRecord record) {
     Instant mark = invalidBefore.get(
         new SubjectScope(record.tenant(), record.subjectId()));

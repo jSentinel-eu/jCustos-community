@@ -54,6 +54,19 @@ import java.util.Optional;
  * target status are skipped; records that are missing from the
  * store are recorded as {@link Report#notFound()} so the operator
  * can investigate residue.</p>
+ *
+ * <h2>Compromised secrets (JS-SEC-161, CWE-284, CWE-620)</h2>
+ * <p>The helper writes statuses directly, past the state machine of
+ * {@code CredentialLifecycleService}. Writing
+ * {@link CredentialStatus#COMPROMISED} records when the credential was
+ * compromised ({@link CredentialRecord#compromisedSince()}) in every store
+ * that keeps the rotation proof, so the mark survives a later
+ * {@code DISABLED} or {@code MUST_CHANGE}. The helper does not, however,
+ * move a credential that still holds a compromised secret to a status that
+ * lets that secret sign in again - {@code ACTIVE}, {@code REHASH_REQUIRED},
+ * {@code DEPRECATED_ALGORITHM}: such a credential is skipped and counted in
+ * {@link Report#rotationRequired()}. Until 00.84.00 the bulk path could
+ * re-enable a whole set of compromised credentials without a new secret.</p>
  */
 public final class MassCredentialStatusChange implements HasLogger {
 
@@ -95,6 +108,8 @@ public final class MassCredentialStatusChange implements HasLogger {
     int notFound = 0;
     int stale = 0;
     int auditFailures = 0;
+    int rotationRequired = 0;
+    boolean admitsStoredSecret = admitsStoredSecret(targetStatus);
     Instant when = Instant.now(clock);
     String reason = override.incidentId()
         + "/" + override.reason().name();
@@ -114,8 +129,19 @@ public final class MassCredentialStatusChange implements HasLogger {
         alreadyAtTarget++;
         continue;
       }
-      CredentialUpdateResult result = store.updateStatusIfCurrent(
-          username, from, targetStatus, when);
+      CredentialUpdateResult result;
+      if (admitsStoredSecret) {
+        // JS-SEC-161 (CWE-284, CWE-620): a secret that was declared compromised
+        // and not replaced since must not sign in again, not even in bulk.
+        if (current.get().secretRotationRequired()) {
+          rotationRequired++;
+          continue;
+        }
+        // the record just judged is the witness, not merely its status
+        result = store.updateStatusIfUnchanged(current.get(), targetStatus, when);
+      } else {
+        result = store.updateStatusIfCurrent(username, from, targetStatus, when);
+      }
       switch (result) {
         case CredentialUpdateResult.Updated u -> {
           changed++;
@@ -130,15 +156,21 @@ public final class MassCredentialStatusChange implements HasLogger {
         case CredentialUpdateResult.NotFound nf -> notFound++;
       }
     }
-    return new Report(changed, alreadyAtTarget, notFound, stale, auditFailures);
+    if (rotationRequired > 0) {
+      logger().warn("credential/mass-change-rotation-required: {} credential(s) still hold a"
+          + " secret that was declared compromised and were not moved to {}; a password change"
+          + " or a reset has to replace the secret first", rotationRequired, targetStatus);
+    }
+    return new Report(changed, alreadyAtTarget, notFound, stale, auditFailures, rotationRequired);
   }
 
-  /**
-   * Aggregate report of a mass status change. Counts only — the
-   * report deliberately does not list affected usernames so the
-   * incident-response output stream stays small and free of any
-   * subject-level identifiers.
-   */
+  /** Statuses whose lifecycle decision lets the stored secret sign in. */
+  private static boolean admitsStoredSecret(CredentialStatus status) {
+    return status == CredentialStatus.ACTIVE
+        || status == CredentialStatus.REHASH_REQUIRED
+        || status == CredentialStatus.DEPRECATED_ALGORITHM;
+  }
+
   private boolean publish(CredentialStatusChanged event) {
     try {
       audit.publish(event);
@@ -150,9 +182,27 @@ public final class MassCredentialStatusChange implements HasLogger {
     }
   }
 
-  public record Report(int changed, int alreadyAtTarget, int notFound, int stale, int auditFailures) {
+  /**
+   * Aggregate report of a mass status change. Counts only — the
+   * report deliberately does not list affected usernames so the
+   * incident-response output stream stays small and free of any
+   * subject-level identifiers.
+   *
+   * @param changed          credentials moved to the target status
+   * @param alreadyAtTarget  credentials already at the target status
+   * @param notFound         usernames without a credential (or blank)
+   * @param stale            credentials whose status changed concurrently
+   * @param auditFailures    changes whose audit event the sink refused; they
+   *                         are counted in {@code changed} as well
+   * @param rotationRequired credentials left alone because they still hold a
+   *                         secret that was declared compromised and the target
+   *                         would let it sign in (JS-SEC-161); since 00.84.00
+   */
+  public record Report(int changed, int alreadyAtTarget, int notFound, int stale, int auditFailures,
+                       int rotationRequired) {
     public Report {
-      if (changed < 0 || alreadyAtTarget < 0 || notFound < 0 || stale < 0 || auditFailures < 0) {
+      if (changed < 0 || alreadyAtTarget < 0 || notFound < 0 || stale < 0 || auditFailures < 0
+          || rotationRequired < 0) {
         throw new IllegalArgumentException("counts must be >= 0");
       }
     }
@@ -166,11 +216,28 @@ public final class MassCredentialStatusChange implements HasLogger {
      * @param stale           credentials whose status changed concurrently
      */
     public Report(int changed, int alreadyAtTarget, int notFound, int stale) {
-      this(changed, alreadyAtTarget, notFound, stale, 0);
+      this(changed, alreadyAtTarget, notFound, stale, 0, 0);
     }
 
+    /**
+     * Report without refused rotations.
+     *
+     * @param changed         credentials moved to the target status
+     * @param alreadyAtTarget credentials already at the target status
+     * @param notFound        usernames without a credential (or blank)
+     * @param stale           credentials whose status changed concurrently
+     * @param auditFailures   changes whose audit event the sink refused
+     */
+    public Report(int changed, int alreadyAtTarget, int notFound, int stale, int auditFailures) {
+      this(changed, alreadyAtTarget, notFound, stale, auditFailures, 0);
+    }
+
+    /**
+     * @return the number of usernames the run handled: every outcome bucket,
+     *     not {@code auditFailures}, which overlaps {@code changed}
+     */
     public int total() {
-      return changed + alreadyAtTarget + notFound + stale;
+      return changed + alreadyAtTarget + notFound + stale + rotationRequired;
     }
   }
 }

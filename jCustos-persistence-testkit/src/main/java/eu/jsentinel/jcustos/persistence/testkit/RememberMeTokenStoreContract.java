@@ -54,6 +54,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * {@link #implementsRotationTrail()} to return {@code false} until it has
  * caught up, which skips these tests and documents the gap in its own test
  * class — with it, rotation works and a replayed token is merely unknown.</p>
+ *
+ * <p>The tests whose name starts with {@code JS-SEC-129} cover the atomic
+ * operations added in 00.84.00 — {@link RememberMeTokenStore#rotate},
+ * {@link RememberMeTokenStore#saveUnlessInvalidated} and the marking
+ * {@link RememberMeTokenStore#deleteBySubject(TenantId, SubjectId, Instant)}.
+ * A store that inherits the defaults overrides
+ * {@link #implementsAtomicRotation()} to return {@code false}.</p>
  */
 @DisplayName("RememberMeTokenStore — contract")
 public interface RememberMeTokenStoreContract {
@@ -68,6 +75,15 @@ public interface RememberMeTokenStoreContract {
    *     trail of rotated tokens (JS-SEC-128); {@code false} skips its tests
    */
   default boolean implementsRotationTrail() {
+    return true;
+  }
+
+  /**
+   * @return {@code true} (the default) when the store under test overrides
+   *     the atomic operations of JS-SEC-129; {@code false} skips their tests
+   * @since 00.84.00
+   */
+  default boolean implementsAtomicRotation() {
     return true;
   }
 
@@ -321,5 +337,157 @@ public interface RememberMeTokenStoreContract {
     assertThrows(NullPointerException.class, () -> store.markRotated("h1", null));
     assertThrows(IllegalArgumentException.class, () -> store.findRotated(""));
     assertThrows(IllegalArgumentException.class, () -> store.findRotated(null));
+  }
+
+  // ── JS-SEC-129: atomic rotation and the "invalid before" mark ────────
+
+  @Test
+  @DisplayName("JS-SEC-129: rotate retires the old token, leaves its trail and stores the successor")
+  default void rotateIsClaimTrailAndSuccessor() {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    RememberMeTokenRecord old = token("old", TenantId.DEFAULT, ALICE);
+    store.save(old);
+    Instant now = T0.plusSeconds(60);
+    RememberMeTokenRecord successor =
+        new RememberMeTokenRecord("next", TenantId.DEFAULT, ALICE, now, EXPIRY);
+
+    assertTrue(store.rotate("old", successor, now));
+
+    assertTrue(store.findByHash("old").isEmpty());
+    assertEquals(Optional.of(successor), store.findByHash("next"));
+    RememberMeTokenStore.RotatedToken trail = store.findRotated("old").orElseThrow();
+    assertEquals(old, trail.record());
+    assertEquals(now, trail.rotatedAt());
+
+    RememberMeTokenRecord second =
+        new RememberMeTokenRecord("next-2", TenantId.DEFAULT, ALICE, now, EXPIRY);
+    assertFalse(store.rotate("old", second, now), "a token is rotated once");
+    assertTrue(store.findByHash("next-2").isEmpty(), "nothing is stored for the loser");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-129: rotate refuses an unknown or expired token and changes nothing")
+  default void rotateRefusesDeadTokens() {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    Instant expiry = T0.plusSeconds(600);
+    store.save(new RememberMeTokenRecord("short", TenantId.DEFAULT, ALICE, T0, expiry));
+    RememberMeTokenRecord successor =
+        new RememberMeTokenRecord("next", TenantId.DEFAULT, ALICE, expiry, EXPIRY.plusSeconds(1));
+
+    assertFalse(store.rotate("ghost", successor, expiry));
+    assertFalse(store.rotate("short", successor, expiry));
+    assertTrue(store.findByHash("next").isEmpty());
+    assertTrue(store.findRotated("short").isEmpty());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-129: deleteBySubject with an instant leaves a mark that refuses older records")
+  default void invalidBeforeMarkRefusesOlderRecords() {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    store.save(token("h1", TenantId.DEFAULT, ALICE));
+    store.save(token("h-bob", TenantId.DEFAULT, BOB));
+    Instant revokedAt = T0.plusSeconds(100);
+
+    assertEquals(1, store.deleteBySubject(TenantId.DEFAULT, ALICE, revokedAt));
+
+    RememberMeTokenRecord older = new RememberMeTokenRecord("older", TenantId.DEFAULT, ALICE,
+        revokedAt.minusMillis(1), EXPIRY);
+    assertFalse(store.saveUnlessInvalidated(older),
+        "a record created before the revocation must not be stored after it");
+    assertTrue(store.findByHash("older").isEmpty());
+
+    RememberMeTokenRecord atMark =
+        new RememberMeTokenRecord("at-mark", TenantId.DEFAULT, ALICE, revokedAt, EXPIRY);
+    assertTrue(store.saveUnlessInvalidated(atMark), "a record created at the mark is new");
+
+    assertTrue(store.saveUnlessInvalidated(token("bob-2", TenantId.DEFAULT, BOB)));
+    assertTrue(store.saveUnlessInvalidated(token("acme-alice", new TenantId("acme"), ALICE)));
+    assertTrue(store.findByHash("h-bob").isPresent());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-129: rotate refuses a successor older than the mark without spending the old token")
+  default void rotateChecksTheMark() {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    Instant revokedAt = T0.plusSeconds(100);
+    store.deleteBySubject(TenantId.DEFAULT, ALICE, revokedAt);
+    store.save(new RememberMeTokenRecord("current", TenantId.DEFAULT, ALICE, revokedAt, EXPIRY));
+
+    RememberMeTokenRecord stale = new RememberMeTokenRecord("stale", TenantId.DEFAULT, ALICE,
+        revokedAt.minusSeconds(1), EXPIRY);
+    assertFalse(store.rotate("current", stale, revokedAt.plusSeconds(1)));
+    assertTrue(store.findByHash("stale").isEmpty());
+    assertTrue(store.findByHash("current").isPresent());
+
+    RememberMeTokenRecord fresh = new RememberMeTokenRecord("fresh", TenantId.DEFAULT, ALICE,
+        revokedAt.plusSeconds(1), EXPIRY);
+    assertTrue(store.rotate("current", fresh, revokedAt.plusSeconds(1)));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-129: an earlier instant does not move the mark back")
+  default void markOnlyMovesForward() {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    store.deleteBySubject(TenantId.DEFAULT, ALICE, T0.plusSeconds(100));
+    store.deleteBySubject(TenantId.DEFAULT, ALICE, T0.plusSeconds(10));
+
+    assertFalse(store.saveUnlessInvalidated(new RememberMeTokenRecord("between",
+        TenantId.DEFAULT, ALICE, T0.plusSeconds(50), EXPIRY)));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-129: a revocation racing a rotation never leaves a live token of the subject")
+  default void revocationAndRotationDoNotInterleave() throws Exception {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      for (int round = 0; round < 200; round++) {
+        String old = "old-" + round;
+        String next = "next-" + round;
+        Instant now = T0.plusSeconds(round);
+        store.save(new RememberMeTokenRecord(old, TenantId.DEFAULT, ALICE, now, EXPIRY));
+        RememberMeTokenRecord successor =
+            new RememberMeTokenRecord(next, TenantId.DEFAULT, ALICE, now, EXPIRY);
+        CountDownLatch start = new CountDownLatch(1);
+        Future<Boolean> rotation = pool.submit(() -> {
+          start.await();
+          return store.rotate(old, successor, now);
+        });
+        Future<Integer> revocation = pool.submit(() -> {
+          start.await();
+          return store.deleteBySubject(TenantId.DEFAULT, ALICE, now);
+        });
+        start.countDown();
+        rotation.get(30, TimeUnit.SECONDS);
+        revocation.get(30, TimeUnit.SECONDS);
+        assertTrue(store.findByHash(old).isEmpty(), "round " + round);
+        assertTrue(store.findByHash(next).isEmpty(),
+            "round " + round + ": the successor must not survive the revocation");
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-129: invalid arguments of the atomic operations are rejected")
+  default void atomicOperationsRejectInvalidArguments() {
+    assumeTrue(implementsAtomicRotation());
+    RememberMeTokenStore store = newStore();
+    RememberMeTokenRecord record = token("h1", TenantId.DEFAULT, ALICE);
+    assertThrows(IllegalArgumentException.class, () -> store.rotate("", record, T0));
+    assertThrows(IllegalArgumentException.class, () -> store.rotate("h1", record, T0),
+        "the successor must not reuse the old hash");
+    assertThrows(NullPointerException.class, () -> store.rotate("h0", null, T0));
+    assertThrows(NullPointerException.class, () -> store.rotate("h0", record, null));
+    assertThrows(NullPointerException.class, () -> store.saveUnlessInvalidated(null));
+    assertThrows(NullPointerException.class,
+        () -> store.deleteBySubject(TenantId.DEFAULT, ALICE, null));
   }
 }

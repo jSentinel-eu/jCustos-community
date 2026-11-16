@@ -88,8 +88,20 @@ import java.util.Objects;
  *       failure threshold</li>
  * </ul>
  *
- * <p>Audit-sink failures are swallowed — they must never break the
- * security flow that emitted them.
+ * <p>Audit-sink failures never break the security flow that emitted them.
+ * They are counted and logged as {@code bruteforce/audit-sink-failed}, at most
+ * once a minute; until 00.84.00 they were swallowed without a trace.
+ *
+ * <h2>A failure that cannot be stored (JS-SEC-122, CWE-770)</h2>
+ *
+ * <p>A failure reported after its reservation lapsed finds no entry for its
+ * key; when the table is full of lockouts and attempts in flight at that
+ * moment, there is no room for one either. Such a failure is not counted
+ * against the key - the table neither grows nor gives up a lockout - but it
+ * is no longer lost silently: it is counted, logged as
+ * {@code bruteforce/failure-not-recorded} at most once a minute, and the key
+ * is not reported as locked by it. Attempts on that key are refused anyway
+ * while the table stays full.</p>
  */
 public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, HasLogger {
 
@@ -114,6 +126,9 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
   private final BoundedAttemptTable<CombinedKey, State> byCombinedKey;
   private final BoundedAttemptTable<String, State> byUsername;
   private Instant lastCapacityWarning;
+  private Instant lastUnrecordedWarning;
+  /** Failures that found no room in a table (JS-SEC-122); guarded by {@link #monitor}. */
+  private long unrecordedFailures;
 
   /** Defaults — suitable for single-node demos. */
   public InMemoryLoginAttemptPolicy() {
@@ -181,6 +196,13 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
   int trackedUsernameCount() {
     synchronized (monitor) {
       return byUsername.size();
+    }
+  }
+
+  /** Package-visible for tests: failures that found no room in a table (JS-SEC-122). */
+  long unrecordedFailureCount() {
+    synchronized (monitor) {
+      return unrecordedFailures;
     }
   }
 
@@ -333,12 +355,25 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     State justLocked;
     Instant lockedUntil;
     int totalFailures;
+    boolean unrecordedWarningDue = false;
+    long unrecordedSoFar = 0;
     synchronized (monitor) {
       State combined = recordOn(byCombinedKey, combinedKey, now);
       State user = recordOn(byUsername, usernameKey, now);
       justLocked = combined.justLocked ? combined : user.justLocked ? user : null;
       lockedUntil = justLocked == null ? null : justLocked.lockedUntil;
       totalFailures = justLocked == null ? 0 : justLocked.totalFailuresObserved;
+      if (combined.unrecorded || user.unrecorded) {
+        unrecordedFailures++;
+        unrecordedSoFar = unrecordedFailures;
+        unrecordedWarningDue = unrecordedWarningDue(now);
+      }
+    }
+    if (unrecordedWarningDue) {
+      // JS-SEC-122 (CWE-770): never silent - a failure that does not count is a gap in the throttle.
+      logger().warn("bruteforce/failure-not-recorded: a failed login arrived after its reservation"
+          + " had lapsed and the {} tracked login keys were all locked or in flight; the failure"
+          + " was not counted ({} so far).", maxEntries, unrecordedSoFar);
     }
 
     LoginFailureAudit.publish(auditService, Instant.now(clock), context, reason);
@@ -351,7 +386,11 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     State state = prepare(table.get(key, now), now);
     state.release(now);
     state.addFailure(now, config);
-    store(table, key, state, now);
+    state.unrecorded = !store(table, key, state, now);
+    if (state.unrecorded) {
+      // JS-SEC-122: nothing was stored, so there is no lockout to announce either
+      state.justLocked = false;
+    }
     return state;
   }
 
@@ -361,6 +400,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       return new State();
     }
     state.justLocked = false;
+    state.unrecorded = false;
     if (state.firstFailureAt != null && now.isAfter(plus(state.firstFailureAt, config.window()))) {
       state.failures = 0;
       state.firstFailureAt = null;
@@ -399,6 +439,16 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
                                                       Instant now) {
     Instant retryAt = table.earliestProtectionEnd().orElse(now);
     return LoginAttemptDecision.lockedOut(nonNegative(now, retryAt), 0);
+  }
+
+  private boolean unrecordedWarningDue(Instant now) {
+    if (lastUnrecordedWarning != null
+        && now.isBefore(plus(lastUnrecordedWarning, CAPACITY_WARNING_INTERVAL))
+        && !now.isBefore(lastUnrecordedWarning)) {
+      return false;
+    }
+    lastUnrecordedWarning = now;
+    return true;
   }
 
   private boolean capacityWarningDue(Instant now) {
@@ -483,23 +533,9 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
 
   private void auditBruteForceLimitReached(
       LoginAttemptContext context, Instant lockedUntil, int totalFailures, Instant now) {
-    JCustosAuditService sink = sink();
-    try {
-      sink.publish(new BruteForceLimitReached(
-          Instant.now(clock),
-          context.username() == null ? "" : context.username(),
-          context.clientAddress(),
-          totalFailures,
-          nonNegative(now, lockedUntil)));
-    } catch (RuntimeException auditFailure) {
-      // never block a security decision because the audit sink failed
-    }
-  }
-
-  private JCustosAuditService sink() {
-    return auditService != null
-        ? auditService
-        : JCustosServiceResolver.securityAuditService();
+    // a failing sink is counted and reported by LoginFailureAudit (JS-SEC-123, CWE-778)
+    LoginFailureAudit.publishLimitReached(auditService, Instant.now(clock), context,
+        totalFailures, nonNegative(now, lockedUntil));
   }
 
   // ── State ─────────────────────────────────────────────────────
@@ -522,6 +558,8 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     private Instant lockedUntil;
     private int lockoutLevel;
     private boolean justLocked;
+    /** The last {@code recordOn} found no room for this state (JS-SEC-122). */
+    private boolean unrecorded;
     private int totalFailuresObserved;
     /** End of each attempt in flight, oldest first; {@code null} while there is none. */
     private ArrayDeque<Instant> reservations;

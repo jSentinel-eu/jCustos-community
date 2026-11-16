@@ -23,12 +23,14 @@
 package eu.jsentinel.jcustos.credential.change;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidationResult;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidator;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleDecision;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleService;
+import eu.jsentinel.jcustos.credential.lifecycle.InvalidStatusTransitionException;
 import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
@@ -60,7 +62,9 @@ import java.util.Optional;
  *       A rejection here surfaces the structural reason.</li>
  *   <li>Hash the new password through {@link PasswordHashingService}.</li>
  *   <li>Compare-and-swap the encoded hash with the original envelope as
- *       witness. Stale → {@code Conflict} (CWE-362).</li>
+ *       witness, through {@link CredentialStore#replaceSecretIfCurrent}: the
+ *       change time is recorded and a compromise marker cleared in the same
+ *       step (JS-SEC-161). Stale → {@code Conflict} (CWE-362).</li>
  *   <li>If the credential was {@code MUST_CHANGE}, clear it to
  *       {@code ACTIVE} through the lifecycle service. Failure to clear
  *       does <em>not</em> roll back the hash update — the password is
@@ -203,7 +207,9 @@ public final class PasswordChangeService implements HasLogger {
     PasswordHashResult newHash = hashingService.hash(command.newPassword());
 
     Instant now = Instant.now(clock);
-    CredentialUpdateResult update = store.updateHashIfCurrent(
+    // JS-SEC-161 (CWE-620): a new secret, not a rehash - the store records the
+    // change and clears the compromise marker together with the hash.
+    CredentialUpdateResult update = store.replaceSecretIfCurrent(
         command.username(), record.encodedHash(), newHash.encodedHash(), now);
     if (!(update instanceof CredentialUpdateResult.Updated)) {
       return PasswordChangeResult.Conflict.INSTANCE;
@@ -213,9 +219,19 @@ public final class PasswordChangeService implements HasLogger {
     // the password update has already succeeded, and the next
     // verification will re-evaluate the lifecycle.
     if (record.status() == CredentialStatus.MUST_CHANGE) {
-      lifecycleService.transition(command.username(),
-          CredentialStatus.MUST_CHANGE, CredentialStatus.ACTIVE,
-          "password-changed");
+      try {
+        lifecycleService.transition(command.username(),
+            CredentialStatus.MUST_CHANGE, CredentialStatus.ACTIVE,
+            "password-changed");
+      } catch (InvalidStatusTransitionException refused) {
+        // JS-SEC-161: only a store that does not record the new secret gets here
+        // (CredentialStore.replaceSecretIfCurrent left the compromise marker in
+        // place). The password is new; the credential stays MUST_CHANGE.
+        logger().warn("credential/rotation-not-recorded: the password of user '{}' was"
+            + " changed, but the credential store did not record the new secret, so the"
+            + " credential stays {}: {}", LogFieldScrubber.scrub(record.username()),
+            CredentialStatus.MUST_CHANGE, refused.getMessage());
+      }
     }
 
     // JS-SEC-128 (CWE-640, CWE-613): the change is done. A reset link issued

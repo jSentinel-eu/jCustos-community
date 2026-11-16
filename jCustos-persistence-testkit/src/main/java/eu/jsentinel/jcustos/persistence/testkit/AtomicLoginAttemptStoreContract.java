@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.persistence.testkit;
 
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptKey;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore.AttemptLimits;
@@ -47,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * @since 00.84.00
  */
+@ExperimentalJCustosApi
 @DisplayName("LoginAttemptStore — atomic attempt contract")
 public interface AtomicLoginAttemptStoreContract extends LoginAttemptStoreContract {
 

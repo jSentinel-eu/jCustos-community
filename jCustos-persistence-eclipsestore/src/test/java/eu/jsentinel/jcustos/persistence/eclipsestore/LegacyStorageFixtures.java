@@ -40,6 +40,16 @@ final class LegacyStorageFixtures {
   /** Written with 00.84.00-SNAPSHOT of commit f3af8000, before the layout changed. */
   static final String WRITTEN_BY_00_84_00_BEFORE_JS_SEC_125 = "written-by-00.84.00-before-js-sec-125";
 
+  /**
+   * Written with 00.84.00-SNAPSHOT of commit 4ad59859: the layout of JS-SEC-125, before the table
+   * of remember-me "invalid before" marks existed.
+   */
+  static final String WRITTEN_BY_00_84_00_BEFORE_REMEMBER_ME_MARKS =
+      "written-by-00.84.00-before-remember-me-marks";
+
+  /** An application root holding credential records of 00.83.00 - no security store. */
+  static final String CREDENTIAL_RECORDS_WRITTEN_BY_00_83_00 = "written-by-00.83.00-credential-records";
+
   /** The instant all fixture data is relative to. */
   static final Instant T0 = Instant.parse("2026-03-01T08:00:00Z");
 

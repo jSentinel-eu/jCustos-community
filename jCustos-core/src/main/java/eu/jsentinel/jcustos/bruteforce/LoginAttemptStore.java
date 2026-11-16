@@ -120,6 +120,7 @@ public interface LoginAttemptStore {
    *                         positive
    * @since 00.84.00
    */
+  @ExperimentalJCustosApi
   record AttemptLimits(int failureThreshold, Duration window, Duration lockout,
                        Duration reservationTtl) {
 
@@ -151,6 +152,7 @@ public interface LoginAttemptStore {
    *                     lockouts — the moment the first of them ends
    * @since 00.84.00
    */
+  @ExperimentalJCustosApi
   record AttemptStatus(int failures, Optional<Instant> blockedUntil) {
 
     /** Validates the components. */

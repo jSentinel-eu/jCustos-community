@@ -24,6 +24,7 @@ import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.persistence.eclipsestore.EclipseStoreJCustosRoot.RefreshTokenScope;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
@@ -44,13 +45,45 @@ import static java.util.Objects.requireNonNull;
  * is refused as unknown. The "invalid before" marks are one entry per subject
  * that was ever revoked wholesale and are not bounded: a dropped mark would
  * let a token from an overtaken operation through.</p>
+ *
+ * <h2>Replay anchors at the bound (JS-SEC-129, CWE-294)</h2>
+ * <p>A record that was rotated and has not expired is what turns a second
+ * presentation of its token into a replay, after which {@code TokenService}
+ * revokes the successors. At the bound such a record can be the one stored
+ * first: a holder of a stolen token who rotates it some hundred thousand times
+ * pushes the owner's rotated record out, and when the owner presents the token
+ * again it is merely unknown - the thief's chain survives. Keeping those
+ * records instead would let the same loop fill the store and refuse every new
+ * sign-in. The store therefore still drops the record, but never silently:
+ * every such eviction is counted ({@link #replayAnchorsEvicted()}) and logged
+ * as {@code persistence/refresh-token-replay-anchor-evicted} - the first one
+ * and then one line per {@value #ANCHOR_EVICTIONS_PER_LOG_LINE}. An
+ * installation that sees it raises the bound
+ * ({@code EclipseStoreJCustosStorage.openAt(Path, int)}) or shortens the
+ * refresh-token lifetime. A token that is unknown because of such an eviction
+ * cannot be told apart from one that never existed; its family is not
+ * revoked.</p>
  */
 final class EclipseStoreRefreshTokenStore implements RefreshTokenStore, HasLogger {
 
+  /** One replay-anchor warning for the first eviction and for every further block of this many. */
+  static final long ANCHOR_EVICTIONS_PER_LOG_LINE = 1_000;
+
   private final EclipseStoreJCustosStorage storage;
+  /** Rotated, unexpired records dropped at the bound by this adapter; guarded by the write lock. */
+  private long replayAnchorsEvicted;
 
   EclipseStoreRefreshTokenStore(EclipseStoreJCustosStorage storage) {
     this.storage = storage;
+  }
+
+  /**
+   * @return how many rotated records that had not yet expired this adapter
+   *     dropped to stay within its bound - each of them a token whose replay is
+   *     no longer recognised (JS-SEC-129)
+   */
+  long replayAnchorsEvicted() {
+    return storage.read(() -> replayAnchorsEvicted);
   }
 
   @Override
@@ -104,13 +137,59 @@ final class EclipseStoreRefreshTokenStore implements RefreshTokenStore, HasLogge
   /** Caller holds the write lock. Stores {@code record}, making room at the bound. */
   private void put(RefreshTokenRecord record) {
     StoredTable<String, RefreshTokenRecord> tokens = storage.tables().refreshTokens;
-    int evicted = tokens.makeRoomFor(record.tokenHash(), storage.maxEntries(), storage.now());
+    Instant now = storage.now();
+    noteReplayAnchorsToBeEvicted(tokens, record.tokenHash(), now);
+    int evicted = tokens.makeRoomFor(record.tokenHash(), storage.maxEntries(), now);
     if (evicted > 0 && tokens.evictionLogDue()) {
       logger().warn("persistence/refresh-token-store-capacity: the refresh-token store is at its"
           + " bound of {} records; the oldest record is dropped for every new token",
           storage.maxEntries());
     }
     tokens.put(record.tokenHash(), record);
+  }
+
+  /**
+   * Caller holds the write lock. Looks at what {@link StoredTable#makeRoomFor} is about to
+   * evict for {@code incoming} - after the dead records, the records stored first - and counts
+   * and reports every rotated record among them that has not expired (JS-SEC-129, CWE-294).
+   */
+  private void noteReplayAnchorsToBeEvicted(StoredTable<String, RefreshTokenRecord> tokens,
+                                            String incoming, Instant now) {
+    int maxEntries = storage.maxEntries();
+    if (tokens.size() < maxEntries || tokens.containsKey(incoming)) {
+      return;
+    }
+    tokens.dropDead(now); // what makeRoomFor drops first; dead records are no anchors
+    int toEvict = tokens.size() - maxEntries + 1;
+    if (toEvict <= 0) {
+      return;
+    }
+    // At the bound one record goes per new token; more only after a reopen with a lower bound.
+    Iterable<String> heads = toEvict == 1 ? List.of(tokens.eldestKey()) : tokens.keys();
+    int anchors = 0;
+    int seen = 0;
+    for (String hash : heads) {
+      if (seen++ >= toEvict) {
+        break;
+      }
+      RefreshTokenRecord victim = tokens.get(hash);
+      if (victim != null && victim.isReplaced() && !victim.isExpired(now)) {
+        anchors++;
+      }
+    }
+    if (anchors == 0) {
+      return;
+    }
+    long before = replayAnchorsEvicted;
+    replayAnchorsEvicted += anchors;
+    if (before == 0
+        || before / ANCHOR_EVICTIONS_PER_LOG_LINE != replayAnchorsEvicted / ANCHOR_EVICTIONS_PER_LOG_LINE) {
+      logger().warn("persistence/refresh-token-replay-anchor-evicted: the refresh-token store is at"
+          + " its bound of {} records and dropped a rotated token that has not expired ({} so far);"
+          + " a replay of such a token is refused as unknown instead of revoking its successors."
+          + " Raise the bound or shorten the refresh-token lifetime.", maxEntries,
+          replayAnchorsEvicted);
+    }
   }
 
   /** Caller holds the write lock. */
