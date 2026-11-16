@@ -24,6 +24,7 @@ package eu.jsentinel.jcustos.credential.password.provider;
 
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.ProviderVerificationResult;
+import eu.jsentinel.jcustos.credential.password.RehashReason;
 import eu.jsentinel.jcustos.credential.password.envelope.PasswordHashEnvelope;
 import eu.jsentinel.jcustos.credential.password.pepper.PepperReference;
 import eu.jsentinel.jcustos.credential.password.policy.PasswordHashPolicy;
@@ -117,6 +118,31 @@ public interface PasswordHashProvider {
       char[] password,
       PasswordHashEnvelope envelope,
       Optional<PepperReference> pepper);
+
+  /**
+   * A rehash this provider requires for a stored envelope whatever the
+   * active policy says (JS-SEC-133, CWE-327, CWE-521).
+   *
+   * <p>The rehash engine compares an envelope with the policy: algorithm,
+   * provider, format and policy version, and the policy's default
+   * parameters. Some weaknesses are known only to the provider - a bcrypt
+   * hash derived without the terminating NUL byte is weak at any cost - and
+   * a policy that assembles its defaults by hand does not name them. A
+   * provider reports such an envelope here; {@code needsRehash} of the
+   * default hashing service then answers {@code Required} with this reason
+   * under every policy. Called only for envelopes this provider
+   * {@linkplain #supports(String, String) serves}; must not run the KDF and
+   * must not throw for a well-formed envelope.
+   *
+   * @param envelope parsed envelope written by this provider; non-null
+   * @return the reason to rehash, or empty when the envelope is current as
+   *         far as the provider is concerned (the default)
+   * @since 00.84.00
+   */
+  default Optional<RehashReason> rehashHint(PasswordHashEnvelope envelope) {
+    Objects.requireNonNull(envelope, "envelope");
+    return Optional.empty();
+  }
 
   /**
    * Optional resource estimate for the supplied parameter map. Default:

@@ -1747,6 +1747,17 @@ method is no longer needed. A composed restriction on a method the wrapper does 
 compile error `processing/unenforceable-security-annotation`, and a composed next to a direct
 restriction is `processing/multiple-security-annotations`.
 
+## A legacy bcrypt hash is rehashed under every policy (addition to SA33, JS-SEC-133, CWE-327, CWE-521)
+
+A policy that assembled its bcrypt defaults by hand without `term=1` never reported a legacy hash
+for a rehash, so its weakness stayed. `PasswordHashProvider` has a new default method
+`rehashHint(PasswordHashEnvelope)`; `DefaultPasswordHashingService.needsRehash` consults the
+envelope's provider, and `RehashDecisionEngine` weighs the hint after the policy's parameter check.
+`BcryptPasswordHashProvider` reports `PARAMETERS_OUTDATED` for every envelope without `term=1`. A
+hint that fails is logged (`credential/rehash-hint-failed`) and ignored. **Consumers:** adding
+`term=1` to hand-assembled defaults is no longer required; providers of your own can report
+weaknesses only they know.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

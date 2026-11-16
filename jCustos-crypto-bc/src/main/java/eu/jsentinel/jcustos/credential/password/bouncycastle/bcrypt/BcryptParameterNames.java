@@ -52,8 +52,9 @@ public final class BcryptParameterNames {
    * raw UTF-8 bytes: Blowfish repeats its key cyclically, so without the
    * terminator a periodic password ({@code abcabcabcabc}) is equivalent
    * to its shortest period ({@code abc}). Legacy hashes still verify, in
-   * legacy framing, and are reported for a rehash through the policy
-   * defaults (see {@link BcryptDefaults#defaultParameters()}).
+   * legacy framing, and are reported for a rehash under every policy - by
+   * the provider's {@code rehashHint}, and through the policy defaults (see
+   * {@link BcryptDefaults#defaultParameters()}).
    *
    * @since 00.84.00
    */

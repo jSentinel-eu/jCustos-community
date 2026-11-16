@@ -69,9 +69,34 @@ public final class RehashDecisionEngine {
       PasswordHashEnvelope envelope,
       PasswordHashPolicy policy,
       Optional<String> activePepperKeyId) {
+    return decide(envelope, policy, activePepperKeyId, Optional.empty());
+  }
+
+  /**
+   * @param envelope            parsed envelope that the provider just
+   *                            verified
+   * @param policy              active policy
+   * @param activePepperKeyId   currently active pepper key id, or
+   *                            {@link Optional#empty()} when peppering
+   *                            is disabled
+   * @param providerHint        the reason the envelope's provider reported
+   *                            through {@code PasswordHashProvider.rehashHint}
+   *                            (JS-SEC-133), or {@link Optional#empty()}. It is
+   *                            weighed after the policy's parameter check and
+   *                            before pepper rotation, and makes the decision
+   *                            {@code Required} whatever the policy's defaults
+   *                            are
+   * @since 00.84.00
+   */
+  public RehashDecision decide(
+      PasswordHashEnvelope envelope,
+      PasswordHashPolicy policy,
+      Optional<String> activePepperKeyId,
+      Optional<RehashReason> providerHint) {
     Objects.requireNonNull(envelope, "envelope");
     Objects.requireNonNull(policy, "policy");
     Objects.requireNonNull(activePepperKeyId, "activePepperKeyId");
+    Objects.requireNonNull(providerHint, "providerHint");
 
     if (!envelope.algorithm().equals(policy.preferredAlgorithm())) {
       return new RehashDecision.Required(
@@ -93,6 +118,11 @@ public final class RehashDecisionEngine {
     if (parametersBelowDefaults(envelope, policy)) {
       return new RehashDecision.Required(
           RehashReason.PARAMETERS_OUTDATED, policy.policyVersion());
+    }
+    if (providerHint.isPresent()) {
+      // JS-SEC-133 (CWE-327): a weakness only the provider knows, e.g. a legacy bcrypt
+      // framing, under a policy whose defaults do not name the parameter that marks it.
+      return new RehashDecision.Required(providerHint.get(), policy.policyVersion());
     }
     if (!envelope.pepperKeyId().equals(activePepperKeyId)) {
       return new RehashDecision.Required(

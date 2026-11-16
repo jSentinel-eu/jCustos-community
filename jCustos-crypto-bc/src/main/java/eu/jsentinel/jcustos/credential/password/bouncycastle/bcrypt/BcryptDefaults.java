@@ -58,9 +58,10 @@ public final class BcryptDefaults {
    * a parameter named in the policy defaults, flags every legacy hash
    * (derived without the terminating NUL byte) on its next successful
    * verification. The provider writes the terminator into every new hash
-   * regardless of the policy; a policy that assembles its bcrypt
-   * defaults by hand must add the entry itself to obtain the rehash
-   * signal.</p>
+   * regardless of the policy. A policy that assembles its bcrypt defaults
+   * by hand without the entry still obtains the signal: since 00.84.00 the
+   * provider reports a legacy envelope itself through
+   * {@link BcryptPasswordHashProvider#rehashHint}.</p>
    */
   public static Map<String, String> defaultParameters() {
     Map<String, String> m = new LinkedHashMap<>();

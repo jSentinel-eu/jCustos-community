@@ -162,4 +162,39 @@ class RehashDecisionEngineTest {
         policy.policyVersion(), params);
     assertEquals(engine.decide(env, policy), engine.decide(env, policy));
   }
+
+  @Test
+  @DisplayName("JS-SEC-133: a provider hint makes an envelope that matches the policy Required, with the provider's reason")
+  void providerHintRequiresRehash() {
+    PasswordHashPolicy policy = Pbkdf2Defaults.referencePolicy();
+    PasswordHashEnvelope env = envelope(
+        Pbkdf2ParameterNames.ALGORITHM, Pbkdf2ParameterNames.PROVIDER_ID,
+        policy.policyVersion(), currentParams());
+
+    assertSame(RehashDecision.NotRequired.INSTANCE,
+        engine.decide(env, policy, Optional.empty(), Optional.empty()));
+    RehashDecision.Required r = assertInstanceOf(RehashDecision.Required.class,
+        engine.decide(env, policy, Optional.empty(), Optional.of(RehashReason.PARAMETERS_OUTDATED)));
+    assertEquals(RehashReason.PARAMETERS_OUTDATED, r.reason());
+    assertEquals(policy.policyVersion(), r.targetPolicyVersion());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-133: the policy's own reasons keep precedence over a provider hint, which precedes pepper rotation")
+  void providerHintPrecedence() {
+    PasswordHashPolicy policy = Pbkdf2Defaults.referencePolicy();
+    PasswordHashEnvelope deprecated = envelope(
+        "OldAlg", Pbkdf2ParameterNames.PROVIDER_ID, policy.policyVersion(), currentParams());
+    assertEquals(RehashReason.ALGORITHM_DEPRECATED, assertInstanceOf(RehashDecision.Required.class,
+        engine.decide(deprecated, policy, Optional.empty(),
+            Optional.of(RehashReason.PARAMETERS_OUTDATED))).reason());
+
+    PasswordHashEnvelope current = envelope(
+        Pbkdf2ParameterNames.ALGORITHM, Pbkdf2ParameterNames.PROVIDER_ID,
+        policy.policyVersion(), currentParams());
+    assertEquals(RehashReason.FORMAT_VERSION_OUTDATED, assertInstanceOf(RehashDecision.Required.class,
+        engine.decide(current, policy, Optional.of("pepper-2"),
+            Optional.of(RehashReason.FORMAT_VERSION_OUTDATED))).reason(),
+        "the hint is reported, not the pepper rotation behind it");
+  }
 }

@@ -22,6 +22,8 @@
  */
 package eu.jsentinel.jcustos.credential.password;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.credential.InternalAuditEventType;
 import eu.jsentinel.jcustos.credential.PublicFailureType;
 import eu.jsentinel.jcustos.credential.password.dummy.DummyVerificationContext;
@@ -194,9 +196,29 @@ public final class DefaultPasswordHashingService implements PasswordHashingServi
     try {
       PasswordHashRecord record = codec.decode(encodedHash);
       return rehashEngine.decide(
-          record.envelope(), policy, pepperService.activeKeyId());
+          record.envelope(), policy, pepperService.activeKeyId(),
+          providerHint(record.envelope()));
     } catch (PasswordHashFormatException e) {
       return RehashDecision.NotRequired.INSTANCE;
+    }
+  }
+
+  /**
+   * JS-SEC-133 (CWE-327, CWE-521): the rehash reason the envelope's own provider reports,
+   * whatever the policy's defaults say - so a legacy bcrypt hash is rehashed under a policy
+   * whose bcrypt defaults were assembled without {@code term=1}. A provider that is not
+   * registered reports nothing; a hint that fails is logged and treated as none, because
+   * {@code needsRehash} runs after a successful login and must not break it.
+   */
+  private Optional<RehashReason> providerHint(PasswordHashEnvelope envelope) {
+    try {
+      return providerRegistry.resolve(envelope.providerId(), envelope.algorithm())
+          .flatMap(provider -> provider.rehashHint(envelope));
+    } catch (RuntimeException hintFailure) {
+      HasLogger.staticLogger().warn(
+          "credential/rehash-hint-failed: provider {} could not assess a stored hash: {}",
+          LogFieldScrubber.scrub(envelope.providerId()), hintFailure.getClass().getName());
+      return Optional.empty();
     }
   }
 

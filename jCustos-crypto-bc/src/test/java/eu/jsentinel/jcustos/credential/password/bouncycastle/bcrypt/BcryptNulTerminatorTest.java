@@ -245,6 +245,37 @@ class BcryptNulTerminatorTest {
         service.needsRehash(service.hash("hunter2".toCharArray()).encodedHash()));
   }
 
+  @Test
+  @DisplayName("JS-SEC-133: a hand-assembled policy without term=1 still rehashes a legacy hash - the provider reports it")
+  void handAssembledPolicyStillSignalsRehash() {
+    Map<String, String> costOnly = new LinkedHashMap<>();
+    costOnly.put(BcryptParameterNames.COST, "4");
+    PasswordHashingService service = BouncyCastleHashingServices.modern(policy(costOnly));
+
+    assertInstanceOf(CredentialVerificationResult.Verified.class,
+        service.verify("hunter2".toCharArray(), LEGACY_HUNTER2_COST_4));
+    assertEquals(
+        new RehashDecision.Required(RehashReason.PARAMETERS_OUTDATED, 1),
+        service.needsRehash(LEGACY_HUNTER2_COST_4),
+        "the policy defaults do not name term; the provider's hint carries the signal");
+
+    PasswordHashResult rehashed = service.hash("hunter2".toCharArray());
+    assertSame(RehashDecision.NotRequired.INSTANCE, service.needsRehash(rehashed.encodedHash()),
+        "a hash written with the terminator is current under the same policy");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-133: rehashHint reports a legacy envelope and only that")
+  void rehashHintOfTheProvider() {
+    PasswordHashEnvelope legacy = PasswordHashCodec.DEFAULT.decode(LEGACY_HUNTER2_COST_4).envelope();
+    assertEquals(Optional.of(RehashReason.PARAMETERS_OUTDATED), provider.rehashHint(legacy));
+
+    PasswordHashEnvelope fresh = PasswordHashCodec.DEFAULT
+        .decode(provider.hash("hunter2".toCharArray(), fastPolicy(), Optional.empty()).encodedHash())
+        .envelope();
+    assertEquals(Optional.empty(), provider.rehashHint(fresh));
+  }
+
   // ── compatibility with standard bcrypt ─────────────────────────────
 
   @Test

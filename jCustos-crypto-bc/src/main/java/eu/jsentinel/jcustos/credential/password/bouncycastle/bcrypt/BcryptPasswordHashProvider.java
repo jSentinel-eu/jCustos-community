@@ -27,6 +27,7 @@ import eu.jsentinel.jcustos.credential.CredentialType;
 import eu.jsentinel.jcustos.credential.InternalAuditEventType;
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.ProviderVerificationResult;
+import eu.jsentinel.jcustos.credential.password.RehashReason;
 import eu.jsentinel.jcustos.credential.password.envelope.PasswordHashCodec;
 import eu.jsentinel.jcustos.credential.password.envelope.PasswordHashEnvelope;
 import eu.jsentinel.jcustos.credential.password.pepper.PepperApplicator;
@@ -64,8 +65,9 @@ import java.util.Optional;
  * <p>An envelope without that parameter is a <em>legacy</em> hash,
  * written before 00.84.00 from the raw UTF-8 bytes. It keeps verifying in
  * legacy framing, so no user is locked out, and is reported for a rehash
- * through the policy defaults (see
- * {@link BcryptDefaults#defaultParameters()}); the weakness of a legacy
+ * under every policy: through {@link #rehashHint(PasswordHashEnvelope)},
+ * and through the policy defaults when they come from
+ * {@link BcryptDefaults#defaultParameters()}; the weakness of a legacy
  * hash ends with that rehash.</p>
  *
  * <p>Two inputs are refused in the new framing: a password containing
@@ -114,6 +116,27 @@ public final class BcryptPasswordHashProvider implements PasswordHashProvider {
   @Override
   public String algorithm() {
     return BcryptParameterNames.ALGORITHM;
+  }
+
+  /**
+   * JS-SEC-133 (CWE-327, CWE-521): an envelope without
+   * {@link BcryptParameterNames#TERMINATOR}{@code =1} is a legacy hash, derived from the raw
+   * UTF-8 bytes, under which a periodic password verifies with its shortest period. It needs
+   * a rehash whatever the policy's bcrypt defaults are. Until 00.84.00 the signal came from
+   * the defaults only, and a policy that assembled them by hand without {@code term=1} never
+   * rehashed a legacy hash.
+   *
+   * @param envelope parsed bcrypt envelope; non-null
+   * @return {@link RehashReason#PARAMETERS_OUTDATED} for a legacy envelope, otherwise empty
+   * @since 00.84.00
+   */
+  @Override
+  public Optional<RehashReason> rehashHint(PasswordHashEnvelope envelope) {
+    Objects.requireNonNull(envelope, "envelope");
+    String terminator = envelope.parameters().get(BcryptParameterNames.TERMINATOR);
+    return BcryptParameterNames.TERMINATOR_NUL.equals(terminator)
+        ? Optional.empty()
+        : Optional.of(RehashReason.PARAMETERS_OUTDATED);
   }
 
   @Override
