@@ -221,6 +221,42 @@ class WrapperIndexWriterTest {
         rows);
   }
 
+  @Test
+  @DisplayName("JS-SEC-159: an override that carries no annotation but overrides a restricted declaration is indexed")
+  void overrideOfRestrictedDeclarationIsIndexed() throws IOException {
+    JavaFileObject contract = JavaFileObjects.forSourceLines(
+        "demo.Contract",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "public interface Contract {",
+        "  @RequiresRole(\"ADMIN\") void purge();",
+        "  void list();",
+        "}");
+    JavaFileObject base = JavaFileObjects.forSourceLines(
+        "demo.Base",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;",
+        "public class Base {",
+        "  @RequiresPermission(\"doc:archive\") public void archive() {}",
+        "}");
+    JavaFileObject service = JavaFileObjects.forSourceLines(
+        "demo.Overriding",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "@Secured public class Overriding extends Base implements Contract {",
+        "  @Override public void purge() {}",
+        "  @Override public void list() {}",
+        "  @PublicRoute @Override public void archive() {}",
+        "}");
+
+    Compilation result = compile(contract, base, service);
+    assertThat(result).succeeded();
+    // list() overrides an unrestricted declaration, archive() opts out with @PublicRoute.
+    assertEquals(List.of("demo.Overriding:demo.OverridingSecured:proxybuilder:00.11.00:purge:secured"),
+        dataRows(readIndex(result)));
+  }
+
   // ── helpers ──────────────────────────────────────────────────────
 
   private static String readIndex(Compilation compilation) throws IOException {

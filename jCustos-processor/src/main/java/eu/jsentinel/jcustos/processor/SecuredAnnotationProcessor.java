@@ -108,8 +108,11 @@ import java.util.stream.Stream;
  *       and any consumer-defined annotation that is meta-annotated with
  *       {@link JCustosAnnotation @JCustosAnnotation};</li>
  *   <li>a restriction the processor cannot pin down at compile time: one
- *       inherited from a superclass or an interface, or one that applies
- *       to a method declared in a supertype;</li>
+ *       inherited from a superclass or an interface, one that applies
+ *       to a method declared in a supertype, one written on a supertype
+ *       declaration the method overrides or implements without repeating it
+ *       (JS-SEC-159), and a composed restriction - an annotation whose type
+ *       carries the restriction (JS-SEC-154);</li>
  *   <li>a method without any restriction - the call is a no-op under
  *       allow-by-omission and denies under deny-by-default (JS-SEC-081)
  *       unless the method or its class carries
@@ -119,6 +122,18 @@ import java.util.stream.Stream;
  * static field of the generated class; a method that cannot be resolved
  * fails the class initialisation with an {@link IllegalStateException}
  * instead of leaving the call unguarded.
+ *
+ * <p><strong>JS-SEC-159 (CWE-862).</strong> A restriction on an interface or
+ * superclass method that the {@code @Secured} class overrides without
+ * repeating it is enforced through that generic call: the run-time scanner
+ * looks for it after the class-level restriction (JS-SEC-114), and the
+ * wrapper hands the overriding method and the {@code @Secured} class to the
+ * same enforcer. {@code SecuredWrapperParityTest} pins wrapper and
+ * {@code SecuredProxy} to the same decision for these cases. The run-time
+ * scanner is the reference: a class-level restriction of the
+ * {@code @Secured} class, declared or inherited, takes precedence over the
+ * restriction of the overridden declaration, and {@link PublicRoute @PublicRoute}
+ * on the overriding method is the opt-out.
  *
  * <p>Method-level annotations take precedence over class-level
  * annotations (one enforcer call per generated method). At most one
@@ -435,11 +450,15 @@ public final class SecuredAnnotationProcessor
     }
 
     // The scanner's order: the class that declares the method - unless the method
-    // opts out with @PublicRoute - and then the @Secured class.
+    // opts out with @PublicRoute - then the @Secured class, then a declaration the
+    // method overrides or implements (JS-SEC-114). The generic call below enforces
+    // all of it at run time; the flag only decides whether the wrapper index lists
+    // the method as guarded (JS-SEC-159).
+    boolean publicRoute = hasAnnotation(method, PublicRoute.class.getCanonicalName());
     boolean restricted =
-        (!hasAnnotation(method, PublicRoute.class.getCanonicalName())
-            && typeCarriesRestriction(declaringType))
-            || typeCarriesRestriction(securedType);
+        (!publicRoute && typeCarriesRestriction(declaringType))
+            || typeCarriesRestriction(securedType)
+            || (!publicRoute && overridesRestrictedDeclaration(method, securedType));
 
     Optional<Binding> foreign = Stream.concat(
             Stream.of((Element) method),
@@ -634,20 +653,27 @@ public final class SecuredAnnotationProcessor
   // ── restriction model (JS-SEC-156) ───────────────────────────────
 
   /**
-   * An annotation that is directly present on an element and whose annotation
-   * type is meta-annotated with {@link JCustosAnnotation} - the predicate the
-   * run-time scanner applies.
+   * A restriction an element carries, found the way the run-time scanner finds
+   * it: an annotation directly present on the element whose annotation type is
+   * meta-annotated with {@link JCustosAnnotation}, or - one level deep - such an
+   * annotation on the annotation type of an annotation the element carries (a
+   * composed annotation, JS-SEC-154).
    *
-   * @param annotationType the annotation type
+   * @param annotationType the annotation type written on the element
    * @param evaluatorBound whether {@code @JCustosAnnotation} binds it to an
    *                       {@link AccessEvaluator} or {@link AuthorizationEvaluator},
    *                       which is what makes it a restriction the enforcer can
    *                       evaluate
+   * @param composedOf     for a composed annotation the restriction annotation on
+   *                       its type, otherwise {@code null}; a composed restriction
+   *                       is never lowered natively
    */
-  private record Binding(TypeElement annotationType, boolean evaluatorBound) {
+  private record Binding(TypeElement annotationType, boolean evaluatorBound, TypeElement composedOf) {
 
     String display() {
-      return "@" + annotationType.getSimpleName();
+      return composedOf == null
+          ? "@" + annotationType.getSimpleName()
+          : "@" + annotationType.getSimpleName() + " (composed of @" + composedOf.getSimpleName() + ")";
     }
   }
 
@@ -657,15 +683,32 @@ public final class SecuredAnnotationProcessor
       if (!(mirror.getAnnotationType().asElement() instanceof TypeElement annotationType)) {
         continue;
       }
+      jCustosAnnotationOf(annotationType).ifPresent(binding ->
+          bindings.add(new Binding(annotationType, bindsEvaluator(binding), null)));
+      // JS-SEC-154 (CWE-862): the run-time scanner resolves a composed annotation such as
+      // `@RequiresRole("ADMIN") @interface AdminOnly` one level deep. The processor did not:
+      // on a class with a native class-level restriction it lowered the class restriction for
+      // such a method, and the wrapper granted what SecuredProxy denied.
       for (AnnotationMirror meta : annotationType.getAnnotationMirrors()) {
-        if (meta.getAnnotationType().asElement() instanceof TypeElement metaType
-            && metaType.getQualifiedName()
-            .contentEquals(JCustosAnnotation.class.getCanonicalName())) {
-          bindings.add(new Binding(annotationType, bindsEvaluator(meta)));
+        if (meta.getAnnotationType().asElement() instanceof TypeElement metaType) {
+          jCustosAnnotationOf(metaType).ifPresent(binding ->
+              bindings.add(new Binding(annotationType, bindsEvaluator(binding), metaType)));
         }
       }
     }
     return bindings;
+  }
+
+  /** The {@code @JCustosAnnotation} on {@code annotationType}, if it carries one. */
+  private static Optional<AnnotationMirror> jCustosAnnotationOf(TypeElement annotationType) {
+    for (AnnotationMirror meta : annotationType.getAnnotationMirrors()) {
+      if (meta.getAnnotationType().asElement() instanceof TypeElement metaType
+          && metaType.getQualifiedName()
+          .contentEquals(JCustosAnnotation.class.getCanonicalName())) {
+        return Optional.of(meta);
+      }
+    }
+    return Optional.empty();
   }
 
   /** The restriction annotations directly present on {@code element}. */
@@ -692,6 +735,10 @@ public final class SecuredAnnotationProcessor
   }
 
   private static Optional<Class<? extends Annotation>> nativeTypeOf(Binding binding) {
+    if (binding.composedOf() != null) {
+      // The values sit on the composed annotation's type, not on the element.
+      return Optional.empty();
+    }
     return SECURITY_ANNOTATIONS.stream()
         .filter(candidate -> binding.annotationType().getQualifiedName()
             .contentEquals(candidate.getCanonicalName()))
@@ -705,6 +752,29 @@ public final class SecuredAnnotationProcessor
   private boolean typeCarriesRestriction(TypeElement type) {
     return typeClosure(type).stream()
         .anyMatch(candidate -> !restrictionsOn(candidate).isEmpty());
+  }
+
+  /**
+   * JS-SEC-159 (CWE-862): whether {@code method}, as a member of the {@code @Secured}
+   * class, overrides or implements a supertype declaration that carries a
+   * restriction. Annotations on methods are not inherited in Java; the run-time
+   * scanner looks for such a declaration after the class-level restriction, and the
+   * generic guard the wrapper emits applies it.
+   */
+  private boolean overridesRestrictedDeclaration(ExecutableElement method, TypeElement securedType) {
+    Element declaringType = method.getEnclosingElement();
+    for (TypeElement type : typeClosure(securedType)) {
+      if (type.equals(declaringType)) {
+        continue;
+      }
+      for (ExecutableElement candidate : ElementFilter.methodsIn(type.getEnclosedElements())) {
+        if (!restrictionsOn(candidate).isEmpty()
+            && elementUtils.overrides(method, candidate, securedType)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /** {@code type}, then its superclasses, then every interface; without {@link Object}. */

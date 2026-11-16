@@ -56,6 +56,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Every fixture method is exercised for six subjects, with deny-by-default
  * off and on. The test also asserts that the matrix is not trivial: each
  * fixture must produce grants and denials.</p>
+ *
+ * <p>JS-SEC-159 (SA59, CWE-862) adds the fixtures whose methods override a
+ * restricted interface or superclass declaration without repeating the
+ * annotation - with no class-level restriction, under a native, a custom and
+ * an inherited one - and pins their decisions explicitly as well, so a
+ * restriction both paths had lost would not pass as parity. The composed
+ * fixture covers JS-SEC-154 on the wrapper path.</p>
  */
 @DisplayName("JS-SEC-156 — SecuredProxy and the generated wrapper decide alike")
 class SecuredWrapperParityTest {
@@ -207,6 +214,159 @@ class SecuredWrapperParityTest {
       "    public String restricted() { return \"ok\"; }",
       "}");
 
+  // ── JS-SEC-159 (SA59, CWE-862): restrictions on overridden supertype declarations ──
+
+  /** An interface whose methods carry the restrictions; the @Secured classes override them bare. */
+  private static final JavaFileObject GUARDED_CONTRACT = JavaFileObjects.forSourceLines(
+      "fixture.GuardedContract",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "public interface GuardedContract {",
+      "    @RequiresRole(\"ADMIN\")",
+      "    String fromInterface();",
+      "    @RequiresAnyPermission({\"order:delete\", \"order:export\"})",
+      "    String fromInterfaceAnyPermission();",
+      "    @AdminOnly",
+      "    String fromInterfaceCustom();",
+      "    @RequiresPermission(\"order:delete\")",
+      "    default String fromInterfaceDefault() { return \"contract\"; }",
+      "}");
+
+  /** A superclass without a class-level restriction; its methods carry native and custom ones. */
+  private static final JavaFileObject RESTRICTED_BASE = JavaFileObjects.forSourceLines(
+      "fixture.RestrictedBase",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "public class RestrictedBase {",
+      "    @RequiresRole(\"ADMIN\")",
+      "    public String fromSuperclassNative() { return \"base\"; }",
+      "    @RequiresPermission({\"order:read\", \"order:export\"})",
+      "    public String fromSuperclassPermissions() { return \"base\"; }",
+      "    @ProtectedBy(OwnerOnly.class)",
+      "    public String fromSuperclassProtectedBy() { return \"base\"; }",
+      "    @AdminOnly",
+      "    public String fromSuperclassCustom() { return \"base\"; }",
+      "    @RequiresRole(\"ADMIN\")",
+      "    public String openedByOverride() { return \"base\"; }",
+      "}");
+
+  /** The overriding class repeats none of the restrictions and has no class-level one. */
+  private static final JavaFileObject OVERRIDES_BARE = JavaFileObjects.forSourceLines(
+      "fixture.OverridesBare",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@Secured",
+      "public class OverridesBare extends RestrictedBase implements GuardedContract {",
+      "    @Override public String fromInterface() { return \"ok\"; }",
+      "    @Override public String fromInterfaceAnyPermission() { return \"ok\"; }",
+      "    @Override public String fromInterfaceCustom() { return \"ok\"; }",
+      "    @Override public String fromInterfaceDefault() { return \"ok\"; }",
+      "    @Override public String fromSuperclassNative() { return \"ok\"; }",
+      "    @Override public String fromSuperclassPermissions() { return \"ok\"; }",
+      "    @Override public String fromSuperclassProtectedBy() { return \"ok\"; }",
+      "    @Override public String fromSuperclassCustom() { return \"ok\"; }",
+      "    @PublicRoute",
+      "    @Override public String openedByOverride() { return \"ok\"; }",
+      "    public String own() { return \"ok\"; }",
+      "}");
+
+  /** The same overrides under a native class-level restriction of the @Secured class itself. */
+  private static final JavaFileObject OVERRIDES_UNDER_NATIVE_GUARD = JavaFileObjects.forSourceLines(
+      "fixture.OverridesUnderNativeGuard",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@Secured",
+      "@RequiresPermission(\"order:read\")",
+      "public class OverridesUnderNativeGuard extends RestrictedBase implements GuardedContract {",
+      "    @Override public String fromInterface() { return \"ok\"; }",
+      "    @Override public String fromInterfaceAnyPermission() { return \"ok\"; }",
+      "    @Override public String fromInterfaceCustom() { return \"ok\"; }",
+      "    @Override public String fromSuperclassNative() { return \"ok\"; }",
+      "    @Override public String fromSuperclassProtectedBy() { return \"ok\"; }",
+      "    @PublicRoute",
+      "    @Override public String openedByOverride() { return \"ok\"; }",
+      "    public String own() { return \"ok\"; }",
+      "}");
+
+  /** The same overrides under a custom class-level restriction of the @Secured class itself. */
+  private static final JavaFileObject OVERRIDES_UNDER_CUSTOM_GUARD = JavaFileObjects.forSourceLines(
+      "fixture.OverridesUnderCustomGuard",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@Secured",
+      "@ProtectedBy(OwnerOnly.class)",
+      "public class OverridesUnderCustomGuard extends RestrictedBase implements GuardedContract {",
+      "    @Override public String fromInterface() { return \"ok\"; }",
+      "    @Override public String fromInterfaceAnyPermission() { return \"ok\"; }",
+      "    @Override public String fromInterfaceCustom() { return \"ok\"; }",
+      "    @Override public String fromSuperclassNative() { return \"ok\"; }",
+      "    @Override public String fromSuperclassCustom() { return \"ok\"; }",
+      "    public String own() { return \"ok\"; }",
+      "}");
+
+  /** A superclass whose class-level restriction the @Secured subclass inherits. */
+  private static final JavaFileObject GUARDED_BASE = JavaFileObjects.forSourceLines(
+      "fixture.GuardedBase",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@RequiresRole(\"USER\")",
+      "public class GuardedBase {",
+      "    @RequiresRole(\"ADMIN\")",
+      "    public String fromSuperclassNative() { return \"base\"; }",
+      "    @AdminOnly",
+      "    public String fromSuperclassCustom() { return \"base\"; }",
+      "}");
+
+  /** Overrides under a class-level restriction that is only inherited. */
+  private static final JavaFileObject OVERRIDES_UNDER_INHERITED_GUARD = JavaFileObjects.forSourceLines(
+      "fixture.OverridesUnderInheritedGuard",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@Secured",
+      "public class OverridesUnderInheritedGuard extends GuardedBase implements GuardedContract {",
+      "    @Override public String fromInterface() { return \"ok\"; }",
+      "    @Override public String fromInterfaceAnyPermission() { return \"ok\"; }",
+      "    @Override public String fromInterfaceCustom() { return \"ok\"; }",
+      "    @Override public String fromSuperclassNative() { return \"ok\"; }",
+      "    @Override public String fromSuperclassCustom() { return \"ok\"; }",
+      "}");
+
+  /** A composed restriction (JS-SEC-154): the restriction sits on the annotation type. */
+  private static final JavaFileObject COMPOSED_ADMIN = JavaFileObjects.forSourceLines(
+      "fixture.ComposedAdmin",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+      "import java.lang.annotation.ElementType;",
+      "import java.lang.annotation.Retention;",
+      "import java.lang.annotation.RetentionPolicy;",
+      "import java.lang.annotation.Target;",
+      "",
+      "@Retention(RetentionPolicy.RUNTIME)",
+      "@Target({ElementType.TYPE, ElementType.METHOD})",
+      "@RequiresRole(\"ADMIN\")",
+      "public @interface ComposedAdmin { }");
+
+  /** A composed restriction on a method of a class with a native class-level restriction. */
+  private static final JavaFileObject COMPOSED_ON_METHOD = JavaFileObjects.forSourceLines(
+      "fixture.ComposedOnMethod",
+      "package fixture;",
+      "import eu.jsentinel.jcustos.authorization.annotations.*;",
+      "",
+      "@Secured",
+      "@RequiresPermission(\"order:read\")",
+      "public class ComposedOnMethod {",
+      "    @ComposedAdmin",
+      "    public String composed() { return \"ok\"; }",
+      "    public String classLevel() { return \"ok\"; }",
+      "}");
+
   private static final List<String> FIXTURES = List.of(
       "fixture.Plain",
       "fixture.NativeClassGuard",
@@ -214,7 +374,12 @@ class SecuredWrapperParityTest {
       "fixture.InheritsGuard",
       "fixture.OverridesGuard",
       "fixture.ImplementsMarked",
-      "fixture.PublicClass");
+      "fixture.PublicClass",
+      "fixture.OverridesBare",
+      "fixture.OverridesUnderNativeGuard",
+      "fixture.OverridesUnderCustomGuard",
+      "fixture.OverridesUnderInheritedGuard",
+      "fixture.ComposedOnMethod");
 
   /** Subject name to roles and permissions; {@code null} is the anonymous caller. */
   private static final Map<String, List<Set<String>>> SUBJECTS = subjects();
@@ -227,6 +392,9 @@ class SecuredWrapperParityTest {
     harness = GeneratedWrapperHarness.compile(
         PLAIN, NATIVE_CLASS_GUARD, CUSTOM_CLASS_GUARD, BASE, INHERITS_GUARD,
         OVERRIDES_GUARD, MARKED, IMPLEMENTS_MARKED, PUBLIC_CLASS,
+        GUARDED_CONTRACT, RESTRICTED_BASE, OVERRIDES_BARE, OVERRIDES_UNDER_NATIVE_GUARD,
+        OVERRIDES_UNDER_CUSTOM_GUARD, GUARDED_BASE, OVERRIDES_UNDER_INHERITED_GUARD,
+        COMPOSED_ADMIN, COMPOSED_ON_METHOD,
         WrapperFixtures.OWNER_ONLY, WrapperFixtures.ADMIN_ONLY,
         WrapperFixtures.ADMIN_ONLY_EVALUATOR);
   }
@@ -292,6 +460,17 @@ class SecuredWrapperParityTest {
         "overridden", "own"));
     expected.put("fixture.ImplementsMarked", List.of("defaulted", "own", "ownNative"));
     expected.put("fixture.PublicClass", List.of("open", "restricted"));
+    List<String> overriddenSurface = List.of(
+        "fromInterface", "fromInterfaceAnyPermission", "fromInterfaceCustom",
+        "fromInterfaceDefault", "fromSuperclassCustom", "fromSuperclassNative",
+        "fromSuperclassPermissions", "fromSuperclassProtectedBy", "openedByOverride", "own");
+    expected.put("fixture.OverridesBare", overriddenSurface);
+    expected.put("fixture.OverridesUnderNativeGuard", overriddenSurface);
+    expected.put("fixture.OverridesUnderCustomGuard", overriddenSurface);
+    expected.put("fixture.OverridesUnderInheritedGuard", List.of(
+        "fromInterface", "fromInterfaceAnyPermission", "fromInterfaceCustom",
+        "fromInterfaceDefault", "fromSuperclassCustom", "fromSuperclassNative"));
+    expected.put("fixture.ComposedOnMethod", List.of("classLevel", "composed"));
     for (Map.Entry<String, List<String>> entry : expected.entrySet()) {
       Class<?> fixture = harness.load(entry.getKey());
       List<String> names = guardedSurface(fixture).stream().map(Method::getName).toList();
@@ -304,6 +483,80 @@ class SecuredWrapperParityTest {
             wrapper.getName() + " does not override " + name);
       }
     }
+  }
+
+  /**
+   * JS-SEC-159 (SA59, CWE-862): parity alone would also hold if both paths had lost the
+   * restriction of an overridden declaration. These decisions are therefore pinned
+   * explicitly, on both paths, with allow-by-omission - the setting under which an
+   * unenforced restriction shows as a grant.
+   */
+  @Test
+  @DisplayName("JS-SEC-159: an override without annotation keeps the restriction of the declaration it overrides, on both paths")
+  void overriddenDeclarationsKeepTheirRestriction() {
+    List<String[]> expectations = List.of(
+        // fixture, method, subject, expected decision
+        new String[] {"fixture.OverridesBare", "fromInterface", "reader", DENIED},
+        new String[] {"fixture.OverridesBare", "fromInterface", "anonymous", DENIED},
+        new String[] {"fixture.OverridesBare", "fromInterface", "admin", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromInterfaceAnyPermission", "reader", DENIED},
+        new String[] {"fixture.OverridesBare", "fromInterfaceAnyPermission", "exporter", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromInterfaceCustom", "owner", DENIED},
+        new String[] {"fixture.OverridesBare", "fromInterfaceCustom", "admin", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromInterfaceDefault", "reader", DENIED},
+        new String[] {"fixture.OverridesBare", "fromInterfaceDefault", "owner", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassNative", "reader", DENIED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassNative", "admin", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassPermissions", "reader", DENIED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassPermissions", "exporter", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassProtectedBy", "reader", DENIED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassProtectedBy", "owner", ALLOWED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassCustom", "owner", DENIED},
+        new String[] {"fixture.OverridesBare", "fromSuperclassCustom", "admin", ALLOWED},
+        // @PublicRoute on the override is the opt-out; it is written on the method that runs
+        new String[] {"fixture.OverridesBare", "openedByOverride", "anonymous", ALLOWED},
+        new String[] {"fixture.OverridesBare", "own", "anonymous", ALLOWED},
+        // the class-level restriction of the @Secured class takes precedence (JS-SEC-114)
+        new String[] {"fixture.OverridesUnderNativeGuard", "fromInterface", "reader", ALLOWED},
+        new String[] {"fixture.OverridesUnderNativeGuard", "fromInterface", "nobody", DENIED},
+        new String[] {"fixture.OverridesUnderNativeGuard", "fromSuperclassPermissions", "reader", DENIED},
+        new String[] {"fixture.OverridesUnderCustomGuard", "fromInterface", "owner", ALLOWED},
+        new String[] {"fixture.OverridesUnderCustomGuard", "fromInterface", "admin", ALLOWED},
+        new String[] {"fixture.OverridesUnderCustomGuard", "fromSuperclassNative", "reader", DENIED},
+        new String[] {"fixture.OverridesUnderInheritedGuard", "fromSuperclassNative", "reader", ALLOWED},
+        new String[] {"fixture.OverridesUnderInheritedGuard", "fromSuperclassNative", "exporter", DENIED},
+        // a composed restriction on the method wins over the class-level one (JS-SEC-154)
+        new String[] {"fixture.ComposedOnMethod", "composed", "reader", DENIED},
+        new String[] {"fixture.ComposedOnMethod", "composed", "admin", ALLOWED},
+        new String[] {"fixture.ComposedOnMethod", "classLevel", "reader", ALLOWED});
+
+    List<String> wrong = new ArrayList<>();
+    JCustosServiceResolver.setDenyByDefault(false);
+    for (String[] expectation : expectations) {
+      Class<?> fixture = harness.load(expectation[0]);
+      Object wrapper = harness.newWrapper(expectation[0]);
+      Method method = guardedSurface(fixture).stream()
+          .filter(candidate -> candidate.getName().equals(expectation[1]))
+          .findFirst()
+          .orElseThrow(() -> new AssertionError(expectation[0] + " has no " + expectation[1]));
+      assertTrue(SUBJECTS.containsKey(expectation[2]), "unknown subject " + expectation[2]);
+      List<Set<String>> grants = SUBJECTS.get(expectation[2]);
+      if (grants == null) {
+        GeneratedWrapperHarness.unbindSubject();
+      } else {
+        GeneratedWrapperHarness.bindSubject(expectation[2], grants.get(0), grants.get(1));
+      }
+      String runTime = decide(() -> runTimeCheck(fixture, method));
+      String generated = decide(() -> GeneratedWrapperHarness.call(wrapper, method.getName()));
+      String where = expectation[0] + "#" + expectation[1] + " subject=" + expectation[2];
+      if (!expectation[3].equals(runTime)) {
+        wrong.add(where + ": run-time path " + runTime + ", expected " + expectation[3]);
+      }
+      if (!expectation[3].equals(generated)) {
+        wrong.add(where + ": generated wrapper " + generated + ", expected " + expectation[3]);
+      }
+    }
+    assertTrue(wrong.isEmpty(), String.join("\n", wrong));
   }
 
   // ── helpers ──────────────────────────────────────────────────────

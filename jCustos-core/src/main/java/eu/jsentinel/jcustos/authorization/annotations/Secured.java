@@ -29,8 +29,10 @@ import static java.lang.annotation.ElementType.TYPE;
  * during compilation. The generated wrapper overrides every public,
  * non-final, non-static method of the original and inserts a
  * {@link eu.jsentinel.jcustos.authorization.api.JCustosEnforcer}
- * call ahead of the {@code super.<method>(...)} delegate when the method
- * (or the class) carries one of the method-security annotations:
+ * call ahead of the {@code super.<method>(...)} delegate of
+ * <em>every</em> overridden method (JS-SEC-156). A restriction written on
+ * the method or on the class itself with one of these annotations is
+ * lowered into the explicit enforcer API:
  *
  * <ul>
  *   <li>{@link RequiresRole}</li>
@@ -39,6 +41,16 @@ import static java.lang.annotation.ElementType.TYPE;
  *   <li>{@link RequiresAllPermissions}</li>
  *   <li>{@link RequiresPolicy}</li>
  * </ul>
+ *
+ * <p>Everything else goes through
+ * {@code JCustosEnforcer.enforce(Method, Class)}, the call behind
+ * {@code SecuredProxy}, so that both paths decide alike:
+ * {@link ProtectedBy @ProtectedBy}, consumer-defined and composed
+ * restriction annotations (JS-SEC-154), a restriction inherited from a
+ * supertype, a restriction on a supertype declaration the class overrides
+ * without repeating it (JS-SEC-159), and a method without any restriction,
+ * which deny-by-default then denies unless it carries
+ * {@link PublicRoute @PublicRoute}.
  *
  * <p>This annotation itself does <strong>not</strong> trigger
  * runtime enforcement and carries no {@link JCustosAnnotation}
@@ -57,9 +69,11 @@ import static java.lang.annotation.ElementType.TYPE;
  *   <li>The annotated type must not be {@code final} (the wrapper
  *       extends it).</li>
  *   <li>Methods to be guarded must be {@code public}, non-final and
- *       non-static. Method-security annotations on {@code final},
- *       {@code private} or {@code static} methods raise a compile
- *       error.</li>
+ *       non-static. A restriction annotation on a method the wrapper does
+ *       not override - {@code final}, {@code private}, {@code static},
+ *       {@code protected}, package-private, or excluded from the wrapper -
+ *       raises the compile error
+ *       {@code processing/unenforceable-security-annotation}.</li>
  *   <li>{@link Object} methods ({@code equals}, {@code hashCode},
  *       {@code toString}, {@code finalize}) are not wrapped.</li>
  * </ul>

@@ -805,8 +805,8 @@ native and a custom restriction on one element fail with `processing/multiple-se
 **Consumers:** builds that relied on such an annotation being ignored fail until the method is made
 public or the annotation is removed; with deny-by-default switched on, un-annotated methods of a
 generated wrapper are denied unless they carry `@PublicRoute`. A restriction on an interface or
-superclass method that the `@Secured` class overrides without repeating it is still not enforced by
-the wrapper — repeat the annotation on the overriding method. Verified by compiling, loading and
+superclass method that the `@Secured` class overrides without repeating it is enforced as well (see
+SA59 further down). Verified by compiling, loading and
 calling generated wrappers: 432 decisions over seven fixture classes are identical on the
 `SecuredProxy` path and in the wrapper.
 
@@ -1720,6 +1720,32 @@ PBKDF2 `PasswordHasher`: two formats, and the administrator could never log in. 
 on every call; an unknown name costs one KDF run, a verification shed by the KDF limiter is "try
 again later", and outdated hashes are upgraded on login. `DemoUserDirectory.passwordHasher()` is now
 `hashingService()`.
+
+## A restriction on an overridden supertype method is enforced by the `@Secured` wrapper, and a composed restriction is no longer lowered away (SA59, JS-SEC-159, CWE-862)
+
+The SA56 notes said that a restriction on an interface or superclass method which the `@Secured`
+class overrides without repeating the annotation is not enforced by the generated wrapper. Since the
+scanner honours overridden declarations (SA14), the wrapper's generic guard hands the overriding
+method and the `@Secured` class to `JCustosEnforcer.enforce`, so the restriction is enforced — but
+nothing pinned it. The parity test now covers interface methods with `@RequiresRole`,
+`@RequiresAnyPermission`, a consumer-defined restriction and a `default` method, and superclass
+methods with a native, an `@ProtectedBy` and a consumer-defined restriction, each overridden without
+annotation under no class-level restriction, a native, a custom and an inherited one, and with
+`@PublicRoute` on the override: 888 decisions over twelve fixture classes are identical on the
+`SecuredProxy` path and in the wrapper, and the decisions for these cases are also pinned
+explicitly. The run-time scanner is the reference: a class-level restriction of the `@Secured`
+class, declared or inherited, takes precedence over the restriction of the overridden declaration,
+and `@PublicRoute` on the overriding method opts out.
+
+The test also found a real gap: on a class with a native class-level restriction, a method carrying
+a composed restriction (`@RequiresRole("ADMIN") @interface AdminOnly`, JS-SEC-154) was guarded by
+the class-level restriction only, and the wrapper granted what `SecuredProxy` denied. The processor
+now resolves composed annotations one level deep, as the scanner does, and routes them through the
+generic guard; methods guarded only through an overridden declaration are listed in
+`META-INF/jcustos/generated-wrappers.idx`. **Consumers:** repeating the annotation on the overriding
+method is no longer needed. A composed restriction on a method the wrapper does not override is the
+compile error `processing/unenforceable-security-annotation`, and a composed next to a direct
+restriction is `processing/multiple-security-annotations`.
 
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 

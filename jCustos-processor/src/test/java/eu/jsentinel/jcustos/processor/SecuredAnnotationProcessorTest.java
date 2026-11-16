@@ -619,6 +619,58 @@ class SecuredAnnotationProcessorTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-154: a composed restriction is guarded generically and is recognised on an unwrapped method")
+  void composedRestrictionIsGuardedGenerically() {
+    JavaFileObject composed = JavaFileObjects.forSourceLines(
+        "demo.Auditors",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "import java.lang.annotation.Retention;",
+        "import java.lang.annotation.RetentionPolicy;",
+        "@Retention(RetentionPolicy.RUNTIME)",
+        "@RequiresRole(\"AUDITOR\")",
+        "public @interface Auditors { }");
+    JavaFileObject service = JavaFileObjects.forSourceLines(
+        "demo.LedgerService",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;",
+        "",
+        "@Secured",
+        "@RequiresPermission(\"ledger:read\")",
+        "public class LedgerService {",
+        "    @Auditors",
+        "    public void close() {}",
+        "}");
+
+    Compilation result = compile(composed, service);
+
+    assertThat(result).succeeded();
+    String body = methodBody(generatedFileContent(result, "demo.LedgerServiceSecured"),
+        "public void close(");
+    // Not the class-level permission: the composed restriction on the method decides.
+    assertContains(body, "JCustosEnforcer.enforce(JCUSTOS_GUARD_METHOD_0, LedgerService.class);");
+    if (body.contains("requirePermission")) {
+      throw new AssertionError("the class-level permission was lowered for close():\n" + body);
+    }
+
+    JavaFileObject hidden = JavaFileObjects.forSourceLines(
+        "demo.HiddenLedger",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "",
+        "@Secured",
+        "public class HiddenLedger {",
+        "    @Auditors",
+        "    protected void close() {}",
+        "}");
+    Compilation rejected = compile(composed, hidden);
+    assertThat(rejected).failed();
+    assertThat(rejected).hadErrorContaining(
+        "@Auditors (composed of @RequiresRole) on HiddenLedger#close cannot be enforced");
+  }
+
+  @Test
   @DisplayName("JS-SEC-156: a restriction annotation on a package-private method is a compile error")
   void annotatedPackagePrivateMethodRejected() {
     JavaFileObject source = JavaFileObjects.forSourceLines(
