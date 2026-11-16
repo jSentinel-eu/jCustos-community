@@ -1541,6 +1541,14 @@ scan with dated exceptions that reports "not run" instead of passing when OSV is
 optionally a byte-for-byte reproducibility check. A Forgejo workflow that runs the same gate is
 prepared but not yet a required check and has not run on a runner. **Consumers:** no change.
 
+## `.gitignore` keeps key material and local settings out of the repository (SA45, JS-SEC-145, CWE-538)
+
+Key stores, keys, signatures, environment files, local Maven settings, local tool state and release
+output are now ignored; the two synthetic test key stores of `jCustos-events` stay tracked as
+explicit exceptions. A security policy (`SECURITY.md`) is prepared, but its reporting channel,
+response times, disclosure deadline, supported versions and release-key fingerprint are still to be
+decided, and it is not part of this build yet. **Consumers:** no change.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

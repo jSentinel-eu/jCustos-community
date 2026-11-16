@@ -221,3 +221,49 @@ __MACOSX/
 /docs/v00.74.10/prompts/
 /docs/v00.74.20/prompts/
 /docs/v00.75.00/prompts/
+
+# --- Security analysis 2026-11-10, SA45 ---------------------------------------
+# Key material and credentials. None of it belongs in this repository; the
+# rules are a second line behind the secret scan, not a replacement for it.
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+*.key
+*.der
+*.gpg
+*.pgp
+*.asc
+*.sig
+*.kdbx
+id_rsa*
+id_ed25519*
+id_ecdsa*
+.env
+.env.*
+.netrc
+.npmrc
+# The one key store that is tracked on purpose: a synthetic key for the event
+# bus tests. New test keys need their own exception here, and so does a public
+# release key that is to be published in the repository (*.asc, *.gpg).
+!/jCustos-events/src/test/resources/test-eventbus.p12
+!/jCustos-events/src/test/resources/test-eventbus-two-producers.p12
+
+# Local Maven and tool settings (may hold registry tokens or a GPG passphrase).
+settings.xml
+settings-security.xml
+toolchains.xml
+.mvn/settings.xml
+.mvn/maven-user.properties
+
+# Local assistant and editor state.
+.claude/
+.vscode/
+*.code-workspace
+
+# Release output outside target/: bundles, manifests, signatures, deploy logs.
+central-bundle*.zip
+relocation-bundle*.zip
+*.manifest.txt
+jcustos-*-deploy.log
