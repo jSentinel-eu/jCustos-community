@@ -29,7 +29,9 @@ import java.util.Objects;
  * <p>
  * Tests can replace the directory via {@link #setDirectory(DemoUserDirectory)}
  * before exercising the SPI. Calling {@link #reset()} restores the default
- * in-memory implementation.
+ * in-memory implementation, which holds no account unless
+ * {@value InMemoryDemoUserDirectory#INSECURE_DEMO_ACCOUNTS_PROPERTY} is set
+ * (JS-SEC-137).
  */
 public final class DemoUserDirectoryProvider {
 

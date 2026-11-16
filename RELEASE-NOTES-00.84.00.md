@@ -1834,6 +1834,22 @@ public now, and the in-repo REST demos and the skill template use it. **Consumer
 written by a handler of your own goes through `RestDecisionContext.mapperOrDefault().apply(decision,
 response)`.
 
+## The Vaadin demos listen on loopback, and demo-vaadin has no fixed-password account by default (addition to SA37, JS-SEC-137, CWE-1188, CWE-798, CWE-319)
+
+`demo-vaadin` still created `user/user` and `demo/demo` on every start, and all six Vaadin demos
+started through `jetty:run` listened on every network interface. `demo-vaadin` now starts without
+any account: the first administrator comes from the setup flow, and the demo accounts exist only
+with `-Djcustos.demo.insecureDemoAccounts=true`, the switch of the Vaadin skill demos; the demo
+refuses to start with it in any mode other than `DEVELOPMENT`. The Jetty Maven plugin of every
+Vaadin demo binds its connector to `127.0.0.1`; `-Djcustos.demo.http.host=<address>` binds it
+elsewhere and is meant only for a TLS reverse proxy on another machine — the session cookie is
+`Secure`, so a login over plain HTTP from another machine does not work. The port still follows
+`-Djetty.http.port` (default 8080; `demo-vaadin-rest-client` stays on 9090). The `jcustos-vaadin`
+skill's POM snippet carries the same Jetty stanza. **Consumers:** start `demo-vaadin` with the
+switch to get the old demo accounts, or create the administrator through `/setup`; pass
+`-Djcustos.demo.http.host` to reach a demo from another machine; the alias `-Djetty.port` no longer
+sets the port.
+
 ## Test hygiene: Vaadin sessions in unit tests are strongly referenced
 
 `CurrentInstance` holds the current `VaadinSession` through a `WeakReference`. Four Vaadin

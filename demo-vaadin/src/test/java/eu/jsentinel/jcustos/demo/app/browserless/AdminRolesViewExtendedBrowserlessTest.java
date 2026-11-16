@@ -22,6 +22,7 @@ import eu.jsentinel.jcustos.audit.UserDeleted;
 import eu.jsentinel.jcustos.test.RecordingAuditSink;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.demo.app.TestDirectories;
 import eu.jsentinel.jcustos.demo.app.security.bootstrap.BootstrapWiring;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
@@ -75,7 +76,9 @@ class AdminRolesViewExtendedBrowserlessTest extends BrowserlessTest {
     resetBootstrapWiringSingleton();
 
     JCustosServiceResolver.resetAll();
-    DemoUserDirectoryProvider.reset();
+    // The grid flows need the demo accounts user (id 2) and demo (id 3),
+    // which exist only behind the development switch (JS-SEC-137).
+    TestDirectories.installWithDemoAccounts();
     DemoUserDirectoryProvider.directory().addUser("admin", "admin",
         new MyUser(1L, "Admin",
             EnumSet.of(AuthorizationRole.ADMIN, AuthorizationRole.USER)));

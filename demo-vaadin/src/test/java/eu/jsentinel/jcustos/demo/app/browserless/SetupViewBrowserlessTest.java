@@ -20,7 +20,10 @@ import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.demo.app.security.bootstrap.BootstrapWiring;
+import eu.jsentinel.jcustos.demo.app.security.model.Credentials;
+import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectory;
 import eu.jsentinel.jcustos.demo.app.security.model.DemoUserDirectoryProvider;
+import eu.jsentinel.jcustos.demo.app.security.model.InMemoryDemoUserDirectory;
 import eu.jsentinel.jcustos.demo.app.security.model.MyUser;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.demo.app.views.MyLoginView;
@@ -44,6 +47,7 @@ import java.util.EnumSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -277,6 +281,28 @@ class SetupViewBrowserlessTest extends BrowserlessTest {
         .orElseThrow(() -> new AssertionError(
             "the administrator created by the setup must be able to log in"));
     assertTrue(admin.roles().contains(AuthorizationRole.ADMIN), "roles: " + admin.roles());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-137: on the shipped directory, without demo accounts, the setup creates the only account")
+  void setupCreatesTheOnlyAccountWithoutDemoAccounts() {
+    assertFalse(InMemoryDemoUserDirectory.insecureDemoAccountsRequested());
+    DemoUserDirectory directory = DemoUserDirectoryProvider.directory();
+    assertEquals(0L, directory.all().count(), "the shipped directory starts without accounts");
+
+    navigate(SetupView.class);
+    setValue(PasswordField.class, "Bootstrap token", KNOWN_TOKEN);
+    setValue(PasswordField.class, "New password", "Adm1n-setup-pass");
+    setValue(PasswordField.class, "Repeat password", "Adm1n-setup-pass");
+    submit();
+    assertNotification("Administrator 'admin' created. You can now log in.");
+
+    assertEquals(1L, directory.all().count(), "the administrator is the only account");
+    MyUser admin = directory.findByCredentials(new Credentials("admin", "Adm1n-setup-pass"))
+        .orElseThrow(() -> new AssertionError("the administrator must verify"));
+    assertTrue(admin.roles().contains(AuthorizationRole.ADMIN), "roles: " + admin.roles());
+    assertTrue(directory.findByCredentials(new Credentials("user", "user")).isEmpty());
+    assertTrue(directory.findByCredentials(new Credentials("demo", "demo")).isEmpty());
   }
 
   @SuppressWarnings("unchecked")

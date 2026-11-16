@@ -20,6 +20,16 @@
         <maven.deploy.skip>true</maven.deploy.skip>
         <maven.install.skip>true</maven.install.skip>
         <gpg.skip>true</gpg.skip>
+        <!--
+            JS-SEC-137 (CWE-1188, CWE-319): jetty:run listens on the loopback
+            interface only. The demo speaks plain HTTP and marks its session
+            cookie Secure. A TLS reverse proxy on the same machine reaches it
+            as it is; only for a proxy on another machine pass
+            -Djcustos.demo.http.host=<address> (0.0.0.0: every interface).
+        -->
+        <jcustos.demo.http.host>127.0.0.1</jcustos.demo.http.host>
+        <!-- An explicit connector does not read -Djetty.http.port by itself. -->
+        <jetty.http.port>8080</jetty.http.port>
     </properties>
 
     <dependencies>
@@ -127,6 +137,11 @@
                 <version>${jetty.version}</version>
                 <configuration>
                     <scan>2</scan>
+                    <!-- Loopback unless jcustos.demo.http.host says otherwise (JS-SEC-137). -->
+                    <httpConnector>
+                        <host>${jcustos.demo.http.host}</host>
+                        <port>${jetty.http.port}</port>
+                    </httpConnector>
                     <webApp>
                         <allowDuplicateFragmentNames>true</allowDuplicateFragmentNames>
                     </webApp>

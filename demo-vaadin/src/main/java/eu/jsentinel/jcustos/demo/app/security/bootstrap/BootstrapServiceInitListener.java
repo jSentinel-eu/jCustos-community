@@ -20,9 +20,11 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.demo.app.security.model.InMemoryDemoUserDirectory;
 import eu.jsentinel.jcustos.demo.app.security.permissions.DemoPermission;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.demo.app.security.services.DemoSessionStoreProvider;
+import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.vaadin.bootstrap.VaadinSecurity;
 import eu.jsentinel.jcustos.policy.api.JCustosPolicies;
@@ -30,6 +32,7 @@ import eu.jsentinel.jcustos.starter.profile.VaadinJCustosStarter;
 import com.vaadin.flow.server.ServiceInitEvent;
 import com.vaadin.flow.server.VaadinServiceInitListener;
 
+import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -45,8 +48,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code @JCustosAutoService}-registered SPIs through {@code ServiceLoader}
  * and printing the resulting {@link JCustosRuntime#log()} so the operator
  * sees which services are active at startup.
+ * <p>
+ * JS-SEC-137 (CWE-798, CWE-1188): the demo starts without accounts; the
+ * fixed-password demo accounts exist only with
+ * {@code -D}{@value InMemoryDemoUserDirectory#INSECURE_DEMO_ACCOUNTS_PROPERTY}{@code =true},
+ * and the listener refuses to start with that switch in any mode other
+ * than {@code DEVELOPMENT}.
  */
 public class BootstrapServiceInitListener implements VaadinServiceInitListener, HasLogger {
+
+  /**
+   * Bootstrap mode of this demo. The insecure demo accounts are refused in
+   * every other mode.
+   */
+  public static final JCustosBootstrapMode MODE = JCustosBootstrapMode.DEVELOPMENT;
 
   /**
    * Name of the demo policy registered through the V00.73 sub-builder so
@@ -59,15 +74,44 @@ public class BootstrapServiceInitListener implements VaadinServiceInitListener, 
 
   private static final AtomicBoolean DX_BOOTSTRAP_DONE = new AtomicBoolean();
 
+  private final JCustosBootstrapMode mode;
+
+  /** The listener {@code ServiceLoader} creates: starts in {@link #MODE}. */
+  public BootstrapServiceInitListener() {
+    this(MODE);
+  }
+
+  /**
+   * @param mode the bootstrap mode to start in; tests start the listener in
+   *             another mode than {@link #MODE}
+   */
+  BootstrapServiceInitListener(JCustosBootstrapMode mode) {
+    this.mode = Objects.requireNonNull(mode, "mode");
+  }
+
   @Override
   public void serviceInit(ServiceInitEvent event) {
+    refuseInsecureDemoAccountsOutsideDevelopment(mode);
     BootstrapWiring.instance();
     if (DX_BOOTSTRAP_DONE.compareAndSet(false, true)) {
-      runDxBootstrap();
+      runDxBootstrap(mode);
     }
   }
 
-  private static void runDxBootstrap() {
+  /**
+   * Refuses the start when the fixed-password demo accounts are requested in
+   * a mode other than {@code DEVELOPMENT} (JS-SEC-137) - before the bootstrap
+   * wiring issues a setup token and before the security bootstrap runs.
+   */
+  private static void refuseInsecureDemoAccountsOutsideDevelopment(JCustosBootstrapMode mode) {
+    if (InMemoryDemoUserDirectory.insecureDemoAccountsRequested()
+        && mode != JCustosBootstrapMode.DEVELOPMENT) {
+      throw new IllegalStateException(InMemoryDemoUserDirectory.INSECURE_DEMO_ACCOUNTS_PROPERTY
+          + " is a development switch and is refused in " + mode + " mode");
+    }
+  }
+
+  private static void runDxBootstrap(JCustosBootstrapMode mode) {
     AuthenticationService<?, ?> authn = ServiceLoader.load(AuthenticationService.class)
         .findFirst().orElse(null);
     AuthorizationService<?> authz = ServiceLoader.load(AuthorizationService.class)
@@ -83,6 +127,7 @@ public class BootstrapServiceInitListener implements VaadinServiceInitListener, 
     // already uses internally so it shows up in JCustosRuntime.services().
     JCustosRuntime runtime = VaadinSecurity.bootstrap()
         .use(VaadinJCustosStarter.developmentDefaults())
+        .mode(mode)
         .authentication(authn)
         .authorization(authz)
         .loginRoute("login")

@@ -27,6 +27,9 @@ Flow application. The end state is a working app with:
   `LoginAttemptPolicy` itself (JS-SEC-124)
 - an application-specific, `HttpOnly`, `Secure`, `SameSite=Lax` session
   cookie (`src/main/webapp/WEB-INF/web.xml`)
+- a development server (`jetty:run`) that listens on the loopback
+  interface only, unless `-Djcustos.demo.http.host=<address>` says
+  otherwise (JS-SEC-137)
 - an AppLayout `MainLayout` shell (drawer, navbar, logout via
   `VaadinLogoutService`) hosting both a **public** `PublicHomeView`
   at `/` (no auth required) and a **private** `DashboardView` at
@@ -63,12 +66,14 @@ skill emits the same shape, parameterised on the target app's package
    substituted (see "Rendering templates" below).
 4. **Apply the POM patch** — merge the deps + annotationProcessorPaths
    stanzas into the Vaadin module's `pom.xml` (do NOT overwrite the
-   whole file).
-5. **Register the SPI files** under `src/main/webapp/WEB-INF/web.xml           ← session cookie {{SESSION_COOKIE_NAME}}, HttpOnly, Secure, SameSite=Lax
-
-src/main/resources/META-INF/services/`.
+   whole file). If the module runs with `jetty:run`, merge the optional
+   Jetty stanza too: it binds the development server to `127.0.0.1`.
+5. **Register the SPI files** under `src/main/resources/META-INF/services/`.
 6. **Verify** with `./mvnw -pl <module> -am compile` and (if Jetty is
    wired) `./mvnw -pl <module> jetty:run`. Open `http://localhost:8080/login`.
+   The server listens on the loopback interface only (JS-SEC-137);
+   `-Djcustos.demo.http.host=<address>` exposes it — only for a TLS
+   reverse proxy on another machine.
 
 Default to fully-automatic execution. The single checkpoint is the
 slot echo in step 2.
@@ -115,6 +120,8 @@ src/main/resources/META-INF/services/
 ├── eu.jsentinel.jcustos.authorization.LoginListener
 ├── eu.jsentinel.jcustos.authorization.api.AccessEvaluator
 └── com.vaadin.flow.server.VaadinServiceInitListener
+
+src/main/webapp/WEB-INF/web.xml           ← session cookie {{SESSION_COOKIE_NAME}}, HttpOnly, Secure, SameSite=Lax
 ```
 
 **Distribution of registration mechanisms** — match the demo exactly:

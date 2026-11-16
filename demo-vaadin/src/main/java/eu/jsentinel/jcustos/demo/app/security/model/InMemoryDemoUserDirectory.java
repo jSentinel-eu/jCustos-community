@@ -45,9 +45,19 @@ import java.util.stream.Stream;
  * In-memory {@link DemoUserDirectory}. Demo-only — never use as a
  * production user store.
  * <p>
- * Pre-populates {@code user/user} (USER) and {@code demo/demo} (NERD).
- * The administrator entry is intentionally absent — the bootstrap flow
- * creates the first administrator.
+ * <strong>No account exists by default</strong> (JS-SEC-137; CWE-798,
+ * CWE-1188). The bootstrap flow creates the first administrator
+ * ({@code SetupView}). The well-known demo accounts
+ * <ul>
+ *   <li>{@code user / user} — USER role</li>
+ *   <li>{@code demo / demo} — NERD role</li>
+ * </ul>
+ * are created only when the JVM is started with
+ * {@code -D}{@value #INSECURE_DEMO_ACCOUNTS_PROPERTY}{@code =true}, and a
+ * warning is logged when they are. The demo refuses to start with the
+ * switch outside {@code DEVELOPMENT} mode
+ * ({@code BootstrapServiceInitListener}). Never set it outside a local
+ * development machine.
  * <p>
  * Passwords are hashed and verified through the credential pipeline the
  * bootstrap configured ({@link ConfiguredHashingService}, JS-SEC-134) - the
@@ -59,21 +69,50 @@ import java.util.stream.Stream;
  */
 public final class InMemoryDemoUserDirectory implements DemoUserDirectory {
 
+  /**
+   * System property that seeds the well-known demo accounts. Off unless it
+   * is set to {@code true}; the same switch as in the Vaadin skill demos.
+   */
+  public static final String INSECURE_DEMO_ACCOUNTS_PROPERTY =
+      "jcustos.demo.insecureDemoAccounts";
+
   private final PasswordHashingService hashing;
   private final Map<String, StoredUser> byUsername = new ConcurrentHashMap<>();
   private final Map<Long, MyUser> byId = new ConcurrentHashMap<>();
 
+  /**
+   * The directory the demo ships with: hashes through the configured
+   * pipeline and seeds the demo accounts only when
+   * {@value #INSECURE_DEMO_ACCOUNTS_PROPERTY} is {@code true}.
+   */
   public InMemoryDemoUserDirectory() {
-    this(ConfiguredHashingService.INSTANCE);
+    this(ConfiguredHashingService.INSTANCE, insecureDemoAccountsRequested());
   }
 
   /**
-   * @param hashing the credential pipeline to hash and verify with
+   * @param hashing          the credential pipeline to hash and verify with
+   * @param seedDemoAccounts {@code true} to create the well-known demo
+   *                         accounts; never in a deployment
    */
-  public InMemoryDemoUserDirectory(PasswordHashingService hashing) {
+  public InMemoryDemoUserDirectory(PasswordHashingService hashing, boolean seedDemoAccounts) {
     this.hashing = Objects.requireNonNull(hashing, "hashing");
+    if (!seedDemoAccounts) {
+      HasLogger.staticLogger().info("InMemoryDemoUserDirectory starts without accounts; "
+          + "create the first administrator through /setup. Start the JVM with -D{}=true "
+          + "to create the demo accounts on a local development machine.",
+          INSECURE_DEMO_ACCOUNTS_PROPERTY);
+      return;
+    }
+    HasLogger.staticLogger().warn("INSECURE DEMO ACCOUNTS: {}=true creates accounts with "
+        + "publicly known passwords. Never use this switch outside a local development "
+        + "machine.", INSECURE_DEMO_ACCOUNTS_PROPERTY);
     addUser("user", "user", createMyUser(2L, "Herr User", AuthorizationRole.USER));
     addUser("demo", "demo", createMyUser(3L, "Herr Demo", AuthorizationRole.NERD));
+  }
+
+  /** @return whether {@value #INSECURE_DEMO_ACCOUNTS_PROPERTY} is set to {@code true} */
+  public static boolean insecureDemoAccountsRequested() {
+    return Boolean.getBoolean(INSECURE_DEMO_ACCOUNTS_PROPERTY);
   }
 
   // ── Public API ────────────────────────────────────────────────

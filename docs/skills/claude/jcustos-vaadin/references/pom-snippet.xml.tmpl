@@ -72,3 +72,32 @@
         </annotationProcessorPaths>
     </configuration>
 </plugin>
+
+<!--
+  Optional <build><plugins><plugin>, only when the module runs with
+  `jetty:run` during development. If the module already declares the
+  plugin, merge the <httpConnector> into its <configuration>.
+
+  JS-SEC-137 (CWE-1188, CWE-319): the development server listens on the
+  loopback interface only. It speaks plain HTTP and the session cookie is
+  Secure. A TLS reverse proxy on the same machine reaches it as it is;
+  only for a proxy on another machine pass
+  -Djcustos.demo.http.host=<address> (0.0.0.0: every interface).
+
+  Required <properties> for this stanza:
+    <jetty.version>12.1.15</jetty.version>
+    <jcustos.demo.http.host>127.0.0.1</jcustos.demo.http.host>
+    <jetty.http.port>8080</jetty.http.port>
+-->
+<plugin>
+    <groupId>org.eclipse.jetty.ee11</groupId>
+    <artifactId>jetty-ee11-maven-plugin</artifactId>
+    <version>${jetty.version}</version>
+    <configuration>
+        <!-- An explicit connector without a <port> listens on a random port. -->
+        <httpConnector>
+            <host>${jcustos.demo.http.host}</host>
+            <port>${jetty.http.port}</port>
+        </httpConnector>
+    </configuration>
+</plugin>

@@ -26,6 +26,7 @@ import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2Defaults;
 import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2ParameterNames;
 import eu.jsentinel.jcustos.credential.password.policy.DefaultPasswordHashPolicy;
 import eu.jsentinel.jcustos.credential.password.policy.PasswordHashPolicy;
+import eu.jsentinel.jcustos.demo.app.TestDirectories;
 import eu.jsentinel.jcustos.demo.app.security.roles.AuthorizationRole;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -53,7 +54,7 @@ class InMemoryDemoUserDirectoryRehashTest {
   @DisplayName("a stored hash is the pipeline's envelope and verifies; no drift → stored hash unchanged")
   void noDrift_noRehash() {
     InMemoryDemoUserDirectory directory =
-        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
+        TestDirectories.withDemoAccounts(PasswordHashingServices.defaults());
 
     String before = directory.storedPasswordHash("user").orElseThrow();
     assertTrue(before.startsWith("$pwh$"), "the pipeline's envelope, not a legacy hash: " + before);
@@ -74,7 +75,7 @@ class InMemoryDemoUserDirectoryRehashTest {
 
     PasswordHashingService newer = PasswordHashingServices.defaults(pbkdf2Policy(2,
         Pbkdf2Defaults.DEFAULT_ITERATIONS));
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(newer);
+    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(newer, false);
     HashSet<AuthorizationRole> roles = new HashSet<>();
     roles.add(AuthorizationRole.USER);
     directory.registerWithHashedPassword(
@@ -93,7 +94,7 @@ class InMemoryDemoUserDirectoryRehashTest {
   @DisplayName("findByCredentials with wrong password → no rehash")
   void wrongPassword_noRehash() {
     InMemoryDemoUserDirectory directory =
-        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
+        TestDirectories.withDemoAccounts(PasswordHashingServices.defaults());
     String before = directory.storedPasswordHash("user").orElseThrow();
 
     Optional<MyUser> resolved = directory.findByCredentials(new Credentials("user", "wrong"));
@@ -106,7 +107,7 @@ class InMemoryDemoUserDirectoryRehashTest {
   @DisplayName("findByCredentials with unknown username → empty, no side effects")
   void unknownUser_empty() {
     InMemoryDemoUserDirectory directory =
-        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults());
+        new InMemoryDemoUserDirectory(PasswordHashingServices.defaults(), false);
 
     Optional<MyUser> resolved = directory.findByCredentials(new Credentials("nobody", "anything"));
 
@@ -118,7 +119,7 @@ class InMemoryDemoUserDirectoryRehashTest {
   void shedVerificationIsUnavailable() {
     KdfExecutionLimiter limiter = new SemaphoreKdfExecutionLimiter(
         new KdfResourceBudget(1, Duration.ofMillis(20)));
-    InMemoryDemoUserDirectory directory = new InMemoryDemoUserDirectory(
+    InMemoryDemoUserDirectory directory = TestDirectories.withDemoAccounts(
         PasswordHashingServices.defaults(Pbkdf2Defaults.referencePolicy(), limiter));
     Optional<KdfExecutionLimiter.Lease> held = limiter.acquire();
     try {
