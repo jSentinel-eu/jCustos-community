@@ -606,7 +606,9 @@ public interface LoginAttemptStoreContract {
             decided.countDown();
             if (admitted) {
               // every guess is decided before the first failure is reported
-              decided.await(30, TimeUnit.SECONDS);
+              if (!decided.await(30, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("not every guess was decided in time");
+              }
               node.recordFailure(guess);
             }
             return admitted;

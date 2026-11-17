@@ -528,7 +528,7 @@ public interface RateLimitStoreContract {
     try {
       for (int round = 0; round < rounds; round++) {
         RateLimitKey k = key("login:block-round-" + round);
-        if (round % 2 == 1) {
+        if (round % 2 != 0) {
           store.recordEvent(k, T0); // a key with events and a key without
         }
         CountDownLatch ready = new CountDownLatch(threads);

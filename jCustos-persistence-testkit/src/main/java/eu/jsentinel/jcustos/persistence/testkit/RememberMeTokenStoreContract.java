@@ -36,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -335,8 +336,8 @@ public interface RememberMeTokenStoreContract {
     assertThrows(IllegalArgumentException.class, () -> store.markRotated("", T0));
     assertThrows(IllegalArgumentException.class, () -> store.markRotated(null, T0));
     assertThrows(NullPointerException.class, () -> store.markRotated("h1", null));
-    assertThrows(IllegalArgumentException.class, () -> store.findRotated(""));
-    assertThrows(IllegalArgumentException.class, () -> store.findRotated(null));
+    assertThrows(IllegalArgumentException.class, () -> assertNotNull(store.findRotated("")));
+    assertThrows(IllegalArgumentException.class, () -> assertNotNull(store.findRotated(null)));
   }
 
   // ── JS-SEC-129: atomic rotation and the "invalid before" mark ────────

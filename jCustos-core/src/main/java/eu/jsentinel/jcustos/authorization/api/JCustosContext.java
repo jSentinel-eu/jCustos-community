@@ -112,6 +112,8 @@ public final class JCustosContext {
   private static final AtomicInteger NOOP_LOGOUT_WARNINGS = new AtomicInteger();
   private final AtomicReference<LoginAttemptPolicy> loginAttemptPolicyRef =
       new AtomicReference<>();
+  /** Guards the creation of the secure default login policy; never the reference itself. */
+  private final Object loginAttemptPolicyDefaultLock = new Object();
   /** JS-SEC-124: the policy {@link #loginAttemptPolicy()} created as its secure default, if any. */
   private volatile LoginAttemptPolicy defaultedLoginAttemptPolicy;
   /** JS-SEC-065: the policy {@link #sessionPolicy()} created as its secure default, if any. */
@@ -506,12 +508,12 @@ public final class JCustosContext {
    * diagnostics can tell a default from a registration; registering
    * {@link NoopLoginAttemptPolicy} explicitly remains the opt-out and is announced.
    *
-   * <p>Created under the context's monitor so that two first callers cannot end up with two
+   * <p>Created under a lock of the context so that two first callers cannot end up with two
    * defaults, one of which would then pass for a registration. The default publishes its audit
    * events through this context, not through the process-wide one.
    */
   private LoginAttemptPolicy secureDefaultLoginAttemptPolicy() {
-    synchronized (loginAttemptPolicyRef) {
+    synchronized (loginAttemptPolicyDefaultLock) {
       LoginAttemptPolicy current = loginAttemptPolicyRef.get();
       if (current != null) {
         return current;

@@ -66,7 +66,7 @@
        deserialization (final cannot be re-assigned without readObject
        machinery); the project does NOT use Java session serialization (Eclipse-
        Store / JSON per the policy), so the array/field is never actually
-       serialized. Scoped to the four concrete classes so the rule stays strict.
+       serialized. Scoped to these concrete classes so the rule stays strict.
   -->
   <Match>
     <Or>
@@ -74,6 +74,8 @@
       <Class name="eu.jsentinel.jcustos.components.SecuredButton"/>
       <Class name="eu.jsentinel.jcustos.components.SecuredRouterLink"/>
       <Class name="eu.jsentinel.jcustos.session.vaadin.JCustosVersionEnforcerListener"/>
+      <!-- V00.84.00 ER01: the view keeps the Revoke handler's Requirement, a value object. -->
+      <Class name="eu.jsentinel.jcustos.components.SessionManagementView"/>
     </Or>
     <Bug pattern="SE_BAD_FIELD"/>
   </Match>
@@ -147,6 +149,12 @@
   <Match>
     <Class name="~eu\.jsentinel\.jcustos\.demo\..*"/>
     <Bug pattern="MS_EXPOSE_REP"/>
+  </Match>
+  <!-- V00.84.00: the setter half of the same swappable static test seam
+       (JCustosStorageProvider.setStorage in the skill demos). -->
+  <Match>
+    <Class name="~eu\.jsentinel\.jcustos\.demo\..*"/>
+    <Bug pattern="EI_EXPOSE_STATIC_REP2"/>
   </Match>
   <Match>
     <Class name="~eu\.jsentinel\.jcustos\.demo\..*"/>

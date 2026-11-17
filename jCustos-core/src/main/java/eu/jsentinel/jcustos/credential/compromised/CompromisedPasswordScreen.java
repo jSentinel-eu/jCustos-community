@@ -79,9 +79,6 @@ public final class CompromisedPasswordScreen implements HasLogger {
     UNAVAILABLE
   }
 
-  private static final CompromisedPasswordScreen NONE = new CompromisedPasswordScreen(
-      NoOpCompromisedPasswordChecker.INSTANCE, CompromisedPasswordPolicy.disabled());
-
   private final CompromisedPasswordChecker checker;
   private final CompromisedPasswordPolicy policy;
 
@@ -107,7 +104,8 @@ public final class CompromisedPasswordScreen implements HasLogger {
    * @return the step that never asks a checker - the default of the password services
    */
   public static CompromisedPasswordScreen none() {
-    return NONE;
+    return new CompromisedPasswordScreen(
+        NoOpCompromisedPasswordChecker.INSTANCE, CompromisedPasswordPolicy.disabled());
   }
 
   /**

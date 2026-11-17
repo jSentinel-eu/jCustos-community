@@ -425,6 +425,10 @@ class JCustosResetAllGuardTest {
     if (type.isPrimitive() || type == String.class || type.isEnum()) {
       return Kind.CONSTANT;
     }
+    if (type == Object.class) {
+      // a final plain Object is a lock or a sentinel: it carries no state a reset could clear
+      return Kind.CONSTANT;
+    }
     if (type == JCustosContext.class) {
       return Kind.CONTEXT;
     }

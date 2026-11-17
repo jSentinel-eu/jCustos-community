@@ -28,6 +28,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -127,6 +128,7 @@ public interface AtomicLoginAttemptStoreContract extends LoginAttemptStoreContra
     CountDownLatch gatePassed = new CountDownLatch(threads);
     CountDownLatch done = new CountDownLatch(threads);
     AtomicInteger admitted = new AtomicInteger();
+    AtomicBoolean gateTimedOut = new AtomicBoolean();
 
     for (int i = 0; i < threads; i++) {
       Thread thread = new Thread(() -> {
@@ -137,7 +139,9 @@ public interface AtomicLoginAttemptStoreContract extends LoginAttemptStoreContra
           gatePassed.countDown();
           if (!blocked) {
             admitted.incrementAndGet();
-            gatePassed.await(10, TimeUnit.SECONDS);
+            if (!gatePassed.await(10, TimeUnit.SECONDS)) {
+              gateTimedOut.set(true);
+            }
             store.completeFailure(k, t0, limits);
           }
         } catch (InterruptedException interrupted) {
@@ -152,6 +156,7 @@ public interface AtomicLoginAttemptStoreContract extends LoginAttemptStoreContra
     assertTrue(ready.await(10, TimeUnit.SECONDS));
     go.countDown();
     assertTrue(done.await(60, TimeUnit.SECONDS), "all attempts must finish");
+    assertFalse(gateTimedOut.get(), "every attempt must pass the gate before the failures land");
 
     assertEquals(limits.failureThreshold(), admitted.get());
     assertEquals(limits.failureThreshold(), store.failureCount(k));
