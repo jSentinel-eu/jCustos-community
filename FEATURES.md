@@ -1,14 +1,28 @@
 # jCustos — Feature Catalogue
 
 Vollständige Auflistung aller Funktionen und Erweiterungspunkte
-in jCustos 00.70.00 (Stand 2026-05-31, **V00.70.00
-feature-complete** — alle acht Phasen aus `Konzept-V00.70.00.md` sind
-gemerged: Tenant/Resource-Modell, 11 Persistence-Store-SPIs, Contract-
-Testkit + Eclipse-Store-Referenz-Impl, `JCustosVersion`-Drift-
+in jCustos 00.84.00 (Stand 2026-11-17). Grundlage ist der
+V00.70.00-Kernstand (Tenant/Resource-Modell, 11 Persistence-Store-SPIs,
+Contract-Testkit + Eclipse-Store-Referenz-Impl, `JCustosVersion`-Drift-
 Detection inkl. automatischem Capture im `LoginView`, Policy-API +
 `jCustos-processor`, RoleHierarchy + Any/All-Permission-Annotationen,
 Account-Lifecycle / API-Keys / RefreshTokens / Rate-Limit, Phase-8
 Secured-Komponenten + `SessionManagementView` + OpenAPI-Metadaten).
+§ 18 ergänzt das V00.80.00-Delta, und jede Änderung aus 00.84.00 ist mit
+**V00.84** markiert.
+
+00.84.00 behebt die Befunde der Eingangsprüfung und der
+Sicherheitsanalyse und bringt außerdem: Login-Throttling als Default mit
+Kontoschlüssel im store-backed Pfad, optionalem Adresslimit und
+Credential-Check-Gate; Korrelations-IDs in Audit-Datensätzen und
+-Zeilen; eine https-Regel und einen begrenzten JSON-Leser für alle
+ausgehenden Verbindungen; Pepper aus PKCS12-/PKCS#11-Keystore oder
+Schlüsseldateien; Passwort-Blocklisten; ein Sliding-Window mit
+korrektem `Retry-After` und optionaler Eskalation (`Blocked`); einen
+Origin-Guard gegen CSRF für REST; das sofortige Ende einer Vaadin-Session
+bei Versionswechsel; einen Fehlerbehandler, der nur eine Referenz zeigt;
+einen Betriebsleitfaden für mehrere Knoten; Vaadin 25.3.3.
+
 Geordnet nach Reaktor-Modul und Funktionsbereich. Jeder Eintrag nennt
 das Modul, den vollqualifizierten Java-Namen und — wo sinnvoll — die
 SPI-Datei unter `META-INF/services/`.
@@ -31,7 +45,7 @@ SPI-Datei unter `META-INF/services/`.
 
 | Modul | Artefakt | Zweck |
 |---|---|---|
-| `jCustos-core` | `jCustos-core` | Framework-neutrale Kern-Typen, alle SPIs, alle 11 Persistence-Store-Interfaces (Phase 2), `JCustosVersion`-Stack (Phase 4), Audit-Pipeline (27 Variants), Bootstrap, `JCustosEnforcer`, Account-Lifecycle- / Token- / RateLimit-Services (Phase 7) |
+| `jCustos-core` | `jCustos-core` | Framework-neutrale Kern-Typen, alle SPIs, alle 11 Persistence-Store-Interfaces (Phase 2), `JCustosVersion`-Stack (Phase 4), Audit-Pipeline (27 Variants, seit V00.71 31), Bootstrap, `JCustosEnforcer`, Account-Lifecycle- / Token- / RateLimit-Services (Phase 7) |
 | `jCustos-vaadin` | `jCustos-vaadin` | Vaadin-Flow-Adapter: Navigation, Login, Session, Logout — plus Phase-8 `SecuredButton` / `SecuredRouterLink` / `SecuredMenuItem` / `SessionManagementView` und Phase-4c `JCustosVersionEnforcerListener` |
 | `jCustos-rest` | `jCustos-rest` | Framework-light REST-Adapter (Filter, BearerToken, HTTP-Status-Mapping, Step-Up `WWW-Authenticate`) — plus Phase-4c `RestJCustosVersionFilter` und Phase-8d `OpenApiJCustosMetadataGenerator` |
 | `jCustos-standalone` | `jCustos-standalone` | Plain-Java / Desktop / CLI Adapter (ThreadLocal-Subject, `SecuredProxy` Dynamic-Proxy) |
@@ -62,6 +76,23 @@ mehrere registrierte Implementierungen sind der ERROR
 `ambiguous-authentication-service`/`ambiguous-authorization-service`
 (`ambiguous-rest-subject-resolver`).
 
+### DX-Bootstrap-Befunde (neu oder geändert in V00.84)
+
+`install()` meldet Fehlkonfigurationen als Befunde; ein ERROR lässt den
+Start scheitern. Neu oder geändert in 00.84.00 (Auswahl; die übrigen
+Befunde dieses Releases stehen bei ihrem Baustein):
+
+| Befund | Schweregrad | Auslöser |
+|---|---|---|
+| `authorization/allow-by-omission` | ERROR in STRICT, WARNING in PRODUCTION | `.denyByDefault(true)` fehlt (JS-SEC-085); die Starter-Profile `productionDefaults()`/`strictDefaults()` setzen es selbst |
+| `bruteforce/in-memory-with-shared-sessions` | WARNING in PRODUCTION und STRICT | Sessions store-backed, Login-Policy aber `InMemoryLoginAttemptPolicy` (auch der Resolver-Default) — jeder Knoten zählt für sich (JS-SEC-166, siehe `docs/security/deployment/cluster.md`) |
+| `bruteforce/address-limit-without-resolver` | WARNING | Policy mit Adresslimit, aber kein `ClientAddressResolver` registriert; ohne Proxy bestätigt `.clientAddress(ClientAddressResolver.remoteAddress())` den Verbindungs-Peer (JS-SEC-062) |
+| `audit/no-subject-id-resolver` | ERROR in STRICT, sonst WARNING | Vaadin-Bootstrap ohne eindeutig auflösbaren `SubjectIdResolver` (JS-SEC-097) |
+| `credentials/pepper-active-key-unresolvable` | ERROR | aktive Key-ID des Peppers löst nicht auf mindestens 32 Byte auf (JS-SEC-162) |
+| `rest/credentialed-cors-without-origin-guard` | WARNING in PRODUCTION und STRICT, sonst INFO | CORS mit `allowCredentials(true)` ohne installierten `RestOriginGuard` (JS-SEC-163) |
+| `rest/session-revocation-inert` | WARNING | `.storeBacked(...)` am REST-Bootstrap, aber der `RestSubjectResolver` behält den Default von `resolveSessionId` (JS-SEC-131) |
+| `jwks/uri-not-https` (seit V00.84 verschärft) | ERROR | JWKS-URI ohne https; `http` zu einem Loopback-Host nur mit `-Djcustos.dev=true` (dann INFO), auch im DEVELOPMENT-Modus (JS-SEC-098) |
+
 ### Authentifizierung & Autorisierung
 
 | SPI | Modul | Default | Zweck |
@@ -81,14 +112,25 @@ mehrere registrierte Implementierungen sind der ERROR
 |---|---|---|---|
 | `JCustosAuditService` | core | `DefaultCompositeAuditService` | Audit-Service mit `publish(AuditEvent)` + `query(AuditQuery)` |
 | `AuditSink` | core | `RingBufferAuditSink` + `LoggingAuditSink` | Write-only-Sink für Audit-Pipeline |
+| `CorrelationIdResolver` ⚠️ | core/audit | `TrustedPeerCorrelationIdResolver` | **V00.84** (JS-SEC-066, CWE-778): entscheidet die Korrelations-ID eines Requests. Der Default übernimmt `X-Request-ID` nur, wenn der Verbindungs-Peer ein Proxy ist, dem der registrierte `ClientAddressResolver` vertraut (`trustsPeer`), nur aus genau einer Headerzeile und nur mit 1–128 Zeichen aus `[A-Za-z0-9._:-]` (`AuditEnvelope.MAX_CORRELATION_ID_LENGTH`, `isValidCorrelationId`); sonst erzeugt der Server eine UUID. Auflösung über `JCustosServiceResolver.correlationIdResolver()` / `findCorrelationIdResolver()` / `setCorrelationIdResolver(...)`, DX `.correlationIds(resolver)` |
 
 ### Brute-Force & Sessions
 
 | SPI | Modul | Default | Zweck |
 |---|---|---|---|
-| `LoginAttemptPolicy` | core | `InMemoryLoginAttemptPolicy` (seit **V00.84 auch Resolver-Default** statt `NoopLoginAttemptPolicy`: fünf Fehlversuche in 15 min sperren 15 min, verdoppelnd bis 4 h; ein ausdrücklich registrierter Noop meldet `bruteforce/noop-policy` — JS-SEC-124) | Login-Throttling + Lockout-Entscheidungen. Seit **V00.84** (JS-SEC-123) reserviert ein erlaubtes `beforeAttempt` den Versuch; danach folgt genau eines von `confirmSuccess`/`recordSuccess`, `recordFailure` oder `abandonAttempt`, `peek` liest ohne Reservierung. `recordFailure(context[, reason])` ist der einzige Audit-Punkt für `LoginFailed`; die Schlüssel laufen über `SubjectKeyCanonicalizer` (`alice` = `ALICE`) |
-| `ClientAddressResolver` | core | `DefaultClientAddressResolver` (Verbindungs-Peer, kein Header) | **V00.84** (JS-SEC-061, CWE-348): entscheidet, welche Adresse Throttling, Abuse-Erkennung und Audit-Zeilen schlüsselt. `TrustedProxyClientAddressResolver` wertet `X-Forwarded-For` nur von konfigurierten Proxys (Adressen/CIDR) aus, liest von rechts, ignoriert `Forwarded`/`X-Real-IP`. Adapter: `VaadinClientAddress`, `RestClientAddress`, `RestRequest.remoteAddress()`, DX `.clientAddress(...)`. Doku: `docs/security/deployment/reverse-proxy.md` |
+| `LoginAttemptPolicy` | core | `InMemoryLoginAttemptPolicy` (seit **V00.84 auch Resolver-Default** statt `NoopLoginAttemptPolicy`: fünf Fehlversuche in 15 min sperren 15 min, verdoppelnd bis 4 h; ein ausdrücklich registrierter Noop meldet `bruteforce/noop-policy` — JS-SEC-124) | Login-Throttling + Lockout-Entscheidungen. Seit **V00.84** (JS-SEC-123) reserviert ein erlaubtes `beforeAttempt` den Versuch; danach folgt genau eines von `confirmSuccess`/`recordSuccess`, `recordFailure` oder `abandonAttempt`, `peek` liest ohne Reservierung. `recordFailure(context[, reason])` ist der einzige Audit-Punkt für `LoginFailed`; die Schlüssel laufen über `SubjectKeyCanonicalizer` (`alice` = `ALICE`). Ebenfalls seit **V00.84**: die Default-Methode `credentialCheckGate()` liefert ein `CredentialCheckGate` (Default unbegrenzt, JS-SEC-063), und beide mitgelieferten Policies nehmen ihre Grenzwerte als `LoginAttemptLimits` inklusive optionalem Adresslimit (JS-SEC-062) — siehe den folgenden Abschnitt |
+| `ClientAddressResolver` | core | `DefaultClientAddressResolver` (Verbindungs-Peer, kein Header) | **V00.84** (JS-SEC-061, CWE-348): entscheidet, welche Adresse Throttling, Abuse-Erkennung und Audit-Zeilen schlüsselt. `TrustedProxyClientAddressResolver` wertet `X-Forwarded-For` nur von konfigurierten Proxys (Adressen/CIDR) aus, liest von rechts, ignoriert `Forwarded`/`X-Real-IP`. Default-Methode `trustsPeer(request)` (für `TrustedPeerCorrelationIdResolver`, JS-SEC-066); `ClientAddressResolver.remoteAddress()` bestätigt ohne Proxy ausdrücklich den Verbindungs-Peer. Adapter: `VaadinClientAddress`, `RestClientAddress`, `RestRequest.remoteAddress()`, DX `.clientAddress(...)`. Doku: `docs/security/deployment/reverse-proxy.md`, für eingebettetes Jetty `docs/security/deployment/reverse-proxy-embedded-jetty.md` |
 | `SessionPolicy<U>` | core | `TimeoutSessionPolicy` (seit **V00.84 auch Resolver-Default**: 30 min Leerlauf, 12 h Gesamtlebensdauer, Rotation nach Login, Login-Route aus dem Resolver — JS-SEC-065; `NoopSessionPolicy` ist der ausdrückliche Opt-out) | Lifecycle-Hooks + Idle/Absolute-Timeout |
+
+### Login-Throttling: Grenzwerte, Schlüssel und Gate (seit V00.84 — ⚠️)
+
+| Klasse | Modul | Zweck |
+|---|---|---|
+| `LoginAttemptLimits` + `LoginAttemptLimits.AddressLimit` | core/bruteforce | Nachfolger der unveränderten `LoginAttemptConfiguration` (JS-SEC-062, CWE-307): Grenzwerte pro Konto (`perAccount`), optionales Adresslimit (`perAddress`) und das Credential-Check-Gate (`maxConcurrentCredentialChecks`, `gateWait`, `gateRetryAfter`). `defaults()`, `withAddressLimit(...)`, `withMaxConcurrentCredentialChecks(...)`, `withGateWait(...)`, `withGateRetryAfter(...)`; neue Konstruktoren beider Policies. Mit Adresslimit führen beide Policies einen dritten Zähler nur auf der Client-Adresse (eigener Schwellwert, eigenes Fenster, eigene Sperre); eine Adresssperre wird als `BruteForceLimitReached` mit leerem Benutzernamen auditiert. Konfiguration auch über `security.login.attempts.address.threshold` (plus `.window`, `.initial-lockout`, `.max-lockout`) und `LoginAttemptConfigurationLoader.loadLimits()`. Ohne Konfiguration ändert sich nichts; `StandaloneLoginFlow` kennt keine Client-Adresse |
+| `CredentialCheckGate` | core/bruteforce | Begrenzt gleichzeitige Credential-Prüfungen (JS-SEC-063, CWE-770). `enter()` liefert `Admission.Entered` (nach der Prüfung schließen) oder `Admission.Deferred(retryAfter)`: findet ein Login innerhalb von `gateWait` (Default 250 ms, höchstens 10 s) keinen freien Platz, wird er zurückgestellt — keine Prüfung, Reservierung zurückgegeben, kein Fehlversuch gezählt, `RateLimitExceeded` mit dem Scope `login:credential-check` (`AUDIT_SCOPE`). `LoginView` und `StandaloneLoginFlow` betreten das Gate nach `beforeAttempt`; Konfiguration über `security.login.attempts.max-concurrent-checks`, `.gate-wait`, `.gate-retry-after` |
+| `LoginAttemptKey.forAccount(tenant, name)` / `.forAddress(tenant, ip)` | core/bruteforce | Reservierte Schlüssel des store-backed Pfads: Kontoschlüssel mit User-ID `#account:` + kanonischer Name und Adresse `#any` (`accountScoped()`, JS-SEC-166), Adressschlüssel mit User-ID `#address` (JS-SEC-062). Benutzernamen, die mit `#` beginnen, maskiert `accountUserId(...)`. Ein eigener `LoginAttemptStore` muss diese Schlüssel unverändert speichern |
+| `ConstantCostCredentialCheck.verify(storedHash, password, pipeline)` | core/credential/password | Zeitvertrag für `checkCredentials` (JS-SEC-064, CWE-208): prüft gegen den gespeicherten Hash und führt ohne Konto (oder bei leerem Hash) die Dummy-Verifikation der Pipeline unter derselben Policy und demselben KDF-Limiter aus; ein unbekanntes Konto kostet etwa so viel wie ein bekanntes mit falschem Passwort. Ein abgewiesener Dummy-Lauf ergibt `TEMPORARILY_UNAVAILABLE` |
+| `CredentialCheckDeferredException` | standalone | Unterklasse von `CredentialVerificationUnavailableException` mit `retryAfter()`; wirft `StandaloneLoginFlow`, wenn das Gate den Login zurückstellt |
 
 ### Logout
 
@@ -108,6 +150,18 @@ mehrere registrierte Implementierungen sind der ERROR
 | `AdministratorAccountStore` | core | anwendungsdefiniert | Persistierung des Bootstrap-Admins |
 | `BootstrapTokenStore` | core | `InMemoryBootstrapTokenStore` / `FileBootstrapTokenStore` | Token-Persistenz für First-Run-Bootstrap; `FileBootstrapTokenStore` übernimmt seit **V00.84** nur eine Datei, die er selbst geschrieben haben kann (POSIX: reguläre Datei des Prozessnutzers ohne Rechte für Gruppe/andere; Token im Generatorformat), sonst entsteht ein neuer Token (JS-SEC-130) |
 | `BootstrapTokenOutput` | core | `ConsoleBootstrapTokenOutput` / `FileBootstrapTokenOutput` | Token-Ausgabe an Operator |
+
+### Credential-Pipeline: Pepper und kompromittierte Passwörter (seit V00.84 — ⚠️)
+
+| Klasse | Modul | Zweck |
+|---|---|---|
+| `KeyStorePepperService` | core/credential/password/pepper | Pepper-Schlüssel aus einer PKCS12-Datei (`fromPkcs12(path, password)`) oder einem von der Anwendung geladenen Keystore, etwa einem PKCS#11-Token (`fromKeyStore(keyStore, entryPassword)`); `activeAlias(...)`, beliebig viele `retiredAlias(...)`, dann `load()`. Key-ID ist der Alias, zeichengenau verglichen (JS-SEC-162, CWE-916/CWE-522) |
+| `FilePepperService` | core/credential/password/pepper | Ein Base64-Schlüssel pro Datei und Key-ID aus einem Verzeichnis wie `/run/secrets` (`fromDirectory(dir)`, `activeKeyId(...)`, `retiredKeyId(...)`, `load()`). Wie der Keystore-Pfad scheitert `load()` geschlossen: fehlende, fremde, für Gruppe oder andere lesbare, verlinkte, zu große oder nicht Base64-kodierte Datei, oder ein Schlüssel unter 32 Byte stoppt den Start; kein Schlüsselmaterial in Meldungen, Logs oder `toString()` |
+| `BouncyCastleHashingServices.modern(PepperService)` / `modern(policy, limiter, pepper)` | crypto-bc | Argon2id mit Pepper. Der DX-Bootstrap setzt `.pepper(p)` in die Pipeline von `.modern()` oder `.pbkdf2Defaults()` ein und listet ihn in `JCustosRuntime.services()`; bestehende Hashes ohne Pepper melden `PEPPER_KEY_ROTATED` und werden beim nächsten Login neu kodiert. Neben `.hashing(instance)` bleibt `dx/credential-pepper-recorded-not-wired` |
+| `LocalBlocklistCompromisedPasswordChecker.fromFile(path)` / `.fromLines(stream)` | core/credential/compromised | Lokale Blocklist aus einer Datei: strikt UTF-8, ein Passwort pro Zeile, Leerzeilen und `#`-Kommentare übersprungen, Grenzen `MAX_FILE_BYTES` (64 MiB), `MAX_ENTRIES` (2 000 000), `MAX_LINE_LENGTH` (256); eine Liste jenseits einer Grenze wird als Ganzes abgelehnt, die Meldung nennt nie eine Zeile. Verglichen wird in `PasswordNormalizer.comparisonForm` (NFKC, dann Kleinschreibung unter `Locale.ROOT`). jCustos liefert keine Liste mit (JS-SEC-164, CWE-521) |
+| `CompositeCompromisedPasswordChecker.of(CheckFailurePolicy, ...)` | core/credential/compromised | Fragt seine Prüfer der Reihe nach (etwa lokale Liste, dann `HaveIBeenPwnedCompromisedPasswordChecker`) und liefert den ersten Treffer; ein ausgefallener Prüfer zählt unter `ALLOW`/`WARN` als unauffällig und wird unter `BLOCK` als `CheckFailed` zurückgegeben |
+| `CompromisedPasswordScreen` | core/credential/compromised | Der Prüfschritt, den `PasswordChangeService` und `credential.reset.PasswordResetService` nach `withCompromisedPasswordCheck(checker, policy)` ausführen — nach der Strukturprüfung, vor dem ersten KDF-Lauf; öffentlich für Adapter, die Passwörter an anderer Stelle setzen. Ein gelistetes Passwort ergibt beim Ändern `NewPasswordRejected(PasswordInputViolation.COMPROMISED)`, beim Reset `Failed`, ohne den Token zu verbrauchen; eine nicht durchführbare Prüfung folgt `CompromisedPasswordPolicy.onFailure()` |
+| `PasswordInputViolation.COMPROMISED` | core/credential/input | Neue Konstante; ein erschöpfendes `switch` braucht einen weiteren Zweig |
 
 ### Rollenmodell (optional)
 
@@ -132,9 +186,9 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 
 | Store | Modul / Package | Record / Key | Zweck |
 |---|---|---|---|
-| `AuditEventStore` | core/audit | `AuditEnvelope` | Persistente Audit-Events; Query-API |
+| `AuditEventStore` | core/audit | `AuditEnvelope` | Persistente Audit-Events; Query-API. Seit **V00.84** (JS-SEC-066) trägt `AuditEnvelope` die vierte Komponente `correlationId` (der Drei-Argument-Konstruktor bleibt, Record-Patterns mit drei Komponenten kompilieren nicht mehr); neue Methode `append(TenantId, AuditEvent, String correlationId)` — ihr Default verwirft die ID, ein eigener Store muss sie überschreiben (`AuditEventStoreContract` prüft das). In-Memory- und Eclipse-Store-Store speichern die ID; ältere Envelopes laden ohne |
 | `SessionStore` | core/session | `SessionRecord` keyed on `SessionId` | Persistente Sessions + `findAll()` für Admin-Views; seit **V00.84** (JS-SEC-131) liest die Widerrufsprüfung (`VaadinSessionRevocation`, `RestSessionRevocation`) den Datensatz pro Request — `REVOKED` oder ein gesehener und danach entfernter Datensatz beendet die Session, `EXPIRED` allein nicht; Datensätze unter `SessionRef.of(id)` statt der Live-ID ablegen (JS-SEC-117) |
-| `LoginAttemptStore` | core/bruteforce | `LoginAttemptKey(username, clientAddress)` | Brute-Force-Versuche, store-backed flacher Lockout; seit **V00.84** vier atomare Versuchs-Operationen als `default`-Methoden, der In-Memory-Store ist hart begrenzt und verdrängt keinen gesperrten Schlüssel (JS-SEC-122, JS-SEC-123) |
+| `LoginAttemptStore` | core/bruteforce | `LoginAttemptKey(tenant, userId, ip)` | Brute-Force-Versuche, store-backed flacher Lockout; seit **V00.84** vier atomare Versuchs-Operationen als `default`-Methoden, der In-Memory-Store ist hart begrenzt und verdrängt keinen gesperrten Schlüssel (JS-SEC-122, JS-SEC-123). Neben dem Tupel-Schlüssel (Benutzername, Adresse) speichert der Store seit **V00.84** die reservierten Schlüssel `LoginAttemptKey.forAccount(...)` (Konto über alle Adressen, JS-SEC-166) und `forAddress(...)` (Adresslimit, JS-SEC-062); der In-Memory-Store und der Eclipse-Store-Adapter führen die Grenzwerte von Konto- und Adressschlüsseln getrennt. `LoginAttemptStoreContract` prüft zwei Knoten auf einem Store (`secondNodeStore(store)`) |
 | `RoleAssignmentStore` | core/authorization/api/roles | `RoleAssignmentKey(tenant, subjectId)` → `Set<RoleName>` | Persistente Rollen-Zuordnungen |
 | `BootstrapStateStore` | core/bootstrap | `BootstrapState` per Tenant | "Ist das System bootstrapped?" — idempotent |
 | `RememberMeTokenStore` | core/authentication | `RememberMeTokenRecord` (hash-only) | Persistent-Login-Tokens; seit **V00.84** `markRotated`/`findRotated` als Spur getauschter Tokens für die Replay-Erkennung — beide mitgelieferten Stores führen sie (JS-SEC-128) |
@@ -142,7 +196,7 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | `EmailVerificationTokenStore` | core/accountlifecycle | `EmailVerificationTokenRecord` (hash-only, single-use); `InMemoryEmailVerificationTokenStore` seit **V00.84** kapazitätsbegrenzt (JS-SEC-074) | Email-Verifikations-Flow |
 | `ApiKeyStore` | core/authentication | `ApiKeyRecord` (hash-only, mit Scopes) | Long-Lived API-Keys |
 | `RefreshTokenStore` | core/authentication | `RefreshTokenRecord` (hash-only, rotating mit `markReplaced`) | Rotating Refresh-Tokens mit Replay-Defense; seit **V00.84** atomares `rotate(oldHash, successor, now)` und eine „invalid before“-Marke nach `revokeAll` (JS-SEC-129) |
-| `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter; seit **V00.84** prüft und zählt `tryAdmit(key, at, since, limit)` in einem Schritt (CWE-367) — atomar im In-Memory- und im Eclipse-Store-Store, Events mit gleichem Zeitpunkt zählen einzeln, es werden genau `limit` Anfragen zugelassen (JS-SEC-078, JS-SEC-118). Beide Stores sind begrenzt, verdrängen den am längsten nicht benutzten Schlüssel und halten höchstens 10 000 Events pro Schlüssel (`InMemoryRateLimitStore.DEFAULT_MAX_EVENTS_PER_KEY`; an der Grenze lehnt `tryAdmit` ab) |
+| `RateLimitStore` | core/ratelimiting | Events unter `RateLimitKey(tenant, scope)` | Event-basierter Sliding-Window-Counter; seit **V00.84** prüft und zählt `tryAdmit(key, at, since, limit)` in einem Schritt (CWE-367) — atomar im In-Memory- und im Eclipse-Store-Store, Events mit gleichem Zeitpunkt zählen einzeln, es werden genau `limit` Anfragen zugelassen (JS-SEC-078, JS-SEC-118). Beide Stores sind begrenzt, verdrängen den am längsten nicht benutzten Schlüssel und halten höchstens 10 000 Events pro Schlüssel (`InMemoryRateLimitStore.DEFAULT_MAX_EVENTS_PER_KEY`; an der Grenze lehnt `tryAdmit` ab); `maxEventsPerKey()` nennt die Grenze, und `InMemoryRateLimitPolicy` lehnt ein höheres Limit beim Bau ab. Ebenfalls seit **V00.84** (JS-SEC-165): `Admission` trägt `oldestInWindow` (`Optional<Instant>`) für ein korrektes `retryAfter`, und die Default-Methoden `blockedUntil(key)` / `block(key, until)` halten die Sperren einer `RateLimitEscalation` — beide mitgelieferten Stores atomar, der Eclipse-Store-Store über einen Neustart hinweg; die Defaults werfen `UnsupportedOperationException`. `RateLimitStoreContract` prüft ältestes Event, Sperren und zwei Knoten auf einem Store (`reportsOldestInWindow()`, `keepsBlocks()` als Opt-out) |
 
 ### JCustosVersion / Drift Detection (Phase 4 — ⚠️)
 
@@ -151,6 +205,8 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 | `JCustosVersionStore` | core/session | `InMemoryJCustosVersionStore` + Eclipse-Store-Impl | Monotonic counter pro `(TenantId, SubjectId)`; `current` / `increment` / `reset` |
 | `JCustosVersionCheck` | core/session | — (pure helper) | Vergleicht Session-Snapshot vs. Store-Current → `JCustosVersionStatus(Current \| Drifted)` |
 | `JCustosVersionEnforcer` | core/session | — (pure helper) | Adapter-neutral; emittiert `SessionStale`-Audit; `EnforcementOutcome(Continue \| SessionStale)` |
+| `JCustosVersionChangeListener` | core/session | — | **V00.84** (R8, JS-SEC-167, CWE-613): `onChange(JCustosVersionKey, JCustosVersion)` — Benachrichtigung über eine Versionsänderung |
+| `ObservableJCustosVersionStore` | core/session | — (Opt-in-Dekorator) | **V00.84** (R8, JS-SEC-167): speichert über den umhüllten Store und benachrichtigt danach seine Listener (`addListener`/`removeListener`) auf dem aufrufenden Thread — nach `increment` mit der neuen Version, nach `reset` mit `INITIAL`. Eine vom Store abgelehnte Änderung wird nicht gemeldet; ein werfender Listener wird geloggt, die Änderung bleibt bestehen. Knotenlokal: andere Knoten am selben Store bemerken die Änderung erst bei ihrem nächsten Request. Registrierung: `.sessions(s -> s.securityVersion(new ObservableJCustosVersionStore(store)))`, Versionen nur noch über diese Instanz ändern; Vaadin-Gegenstück `VaadinJCustosVersionChangeBridge` (§ 8) |
 
 ### Account Lifecycle / Notifications (Phase 7 — ⚠️)
 
@@ -172,7 +228,8 @@ beide verifiziert über `jCustos-persistence-testkit`-Contract-Tests.
 
 | SPI / Klasse | Modul | Default | Zweck |
 |---|---|---|---|
-| `RateLimitPolicy` | core/ratelimiting | `InMemoryRateLimitPolicy` (Sliding-Window) | Per-Scope Rate-Limit (getrennt von `LoginAttemptPolicy`); `tryAcquire(RateLimitKey)` → `RateLimitDecision(Allowed \| Throttled)`; `tryAcquire` nutzt seit **V00.84** `RateLimitStore.tryAdmit` und lässt je Fenster genau `limit` Anfragen zu, auch bei parallelen Aufrufen (JS-SEC-078, JS-SEC-118) |
+| `RateLimitPolicy` | core/ratelimiting | `InMemoryRateLimitPolicy` (Sliding-Window) | Per-Scope Rate-Limit (getrennt von `LoginAttemptPolicy`); `tryAcquire(RateLimitKey)` → `RateLimitDecision(Allowed \| Throttled \| Blocked)`; `tryAcquire` nutzt seit **V00.84** `RateLimitStore.tryAdmit` und lässt je Fenster genau `limit` Anfragen zu, auch bei parallelen Aufrufen (JS-SEC-078, JS-SEC-118). Seit **V00.84** (JS-SEC-165) ist `Throttled.retryAfter` die Zeit, bis das älteste Event das Fenster verlässt (`oldest + window - now` plus `MIN_RETRY_AFTER`, eine Nanosekunde), statt des ganzen Fensters; ein Store ohne `oldestInWindow` liefert weiter das ganze Fenster. `Blocked` tritt nur mit einer `RateLimitEscalation` auf. Wer nur auf `instanceof Throttled` prüft, lässt ein `Blocked` durch — alles ablehnen, was nicht `Allowed` ist, oder `RestRateLimit.respond` nutzen (§ 9). `.rateLimit(...)` an den DX-Bootstraps bleibt aufgezeichnet, aber nicht verdrahtet (JS-SEC-055) |
+| `RateLimitEscalation` | core/ratelimiting | — (Opt-in) | **V00.84** (JS-SEC-165, CWE-799): `new RateLimitEscalation(throttleThreshold, escalationWindow, blockDuration)` im Konstruktor von `InMemoryRateLimitPolicy` sperrt einen Schlüssel, der innerhalb von `escalationWindow` `throttleThreshold`-mal gedrosselt wurde, für `blockDuration`. Während der Sperre antwortet die Policy mit `Blocked`, zählt nichts und publiziert `RateLimitExceeded` für jede Ablehnung; `reset` hebt die Sperre auf. Die Drosselungen zählt derselbe Store unter dem reservierten Scope-Präfix `#throttled:` (`THROTTLE_SCOPE_PREFIX`) über `tryAdmit`; ein Store ohne `blockedUntil`/`block` wird beim Bau abgelehnt |
 
 ### Store-backed Services (Phase 4b — ⚠️)
 
@@ -182,12 +239,26 @@ sie die Security-Flow-Auswertung nie blockieren.
 
 | Service | Modul | Backing-Store |
 |---|---|---|
-| `StoreBackedJCustosAuditService` | core/audit | `AuditEventStore` |
-| `StoreBackedLoginAttemptPolicy` | core/bruteforce | `LoginAttemptStore` (flacher Lockout); seit **V00.84** Konstruktor mit Audit-Service, `recordFailure` publiziert `LoginFailed`, ein Zähler verfällt nach einem vollen `window()` ohne Fehlversuch (JS-SEC-122, JS-SEC-123) |
+| `StoreBackedJCustosAuditService` | core/audit | `AuditEventStore`; speichert seit **V00.84** die Korrelations-ID des Requests mit dem Envelope (`AuditCorrelation`, JS-SEC-066) |
+| `StoreBackedLoginAttemptPolicy` | core/bruteforce | `LoginAttemptStore` (flacher Lockout); seit **V00.84** Konstruktor mit Audit-Service, `recordFailure` publiziert `LoginFailed`, ein Zähler verfällt nach einem vollen `window()` ohne Fehlversuch (JS-SEC-122, JS-SEC-123), und eine Sperre, die ein Fehlversuch auslöst, wird als `BruteForceLimitReached` auditiert. Seit **V00.84** (JS-SEC-166, CWE-307) zählt die Policy jeden Versuch zusätzlich auf dem Kontoschlüssel `LoginAttemptKey.forAccount(tenant, name)` — ein Konto wird nach `failureThreshold` Fehlversuchen von beliebigen Adressen für `initialLockout` gesperrt – so sperrt auch die In-Memory-Policy seit jeher; einen Schalter dagegen gibt es nicht. Gefragt werden Tupel, Konto und — mit Adresslimit — Adresse in dieser Reihenfolge; eine Ablehnung gibt die bereits gemachten Reservierungen zurück. Jeder Versuch belegt zwei Store-Schlüssel (drei mit Adresslimit). Knoten, die einen Store teilen, wirken als eine Drossel: `docs/security/deployment/cluster.md` |
 | `StoreBackedSubjectSessionRegistry` | core/logout | `SessionStore` + optionaler `JCustosVersionStore` (Phase-4c-Snapshot beim Register); seit **V00.84** bindet `register` eine wiederverwendete Session-ID bei fremdem Subjekt oder nicht-aktivem Status neu statt aufzufrischen (JS-SEC-075) |
 | `StoreBackedRoleAuthorizationService<U>` | core/authorization/api/roles | `RoleAssignmentStore` (generic über Subject-Type) |
 | `StoreBackedRememberMeService` | core/authentication | `RememberMeTokenStore` + `PasswordHasher`; seit **V00.84** tauscht `rotate` das Token bei jeder Nutzung, ein bereits getauschtes Token widerruft alle Remember-me-Tokens des Subjekts und auditiert `SessionInvalidated` mit Grund `RememberMeTokenReplay` (JS-SEC-128) |
 | `StoreBackedBootstrapStateService` | core/bootstrap | `BootstrapStateStore` (idempotentes `markCompleted`) |
+
+### Ausgehende Verbindungen: eine https-Regel, ein JSON-Leser, ein Form-POST (seit V00.84 — ⚠️)
+
+Seit **V00.84** (ER31, JS-SEC-098, CWE-1041/CWE-770) gibt es jede dieser
+Regeln genau einmal in `jCustos-core`; die Release-Gate-Stufe
+`definitions` (`scripts/single-definitions.py`) schlägt fehl, sobald eine
+davon in den Library-Quellen eine zweite Definition bekommt.
+
+| Klasse | Modul / Package | Zweck |
+|---|---|---|
+| `EndpointSecurity` | core/net | `requireHttps(uri, errorCode)` ist die eine Regel für alle ausgehenden Endpunkte — Token, PAR, Revocation, Introspection, Device, Discovery, UserInfo, JWKS, HIBP-Range-API und die Token-Endpunkte der Propagation: `https` mit Host, oder `http` zu einem Loopback-Host nur mit `-Djcustos.dev=true` (`DEV_MODE_PROPERTY`, `devModeEnabled()`). `isLoopbackHost(host)` erkennt Loopback allein aus der URI, ohne Namensauflösung (`localhost`, `127.0.0.0/8`, `[::1]`); `localhost.example`, `127.0.0.1.example` oder `http://localhost@host` werden abgelehnt. Seit 00.84.00 gilt das auch für `HttpJwksClient` und den HIBP-Prüfer, die Loopback-`http` vorher ohne Schalter annahmen; der Schalter gehört nie in die Produktion. Die Redirect-URI-Prüfung der OAuth2/OIDC-Bootstraps nutzt `isLoopbackHost` ohne Schalter (RFC 8252) |
+| `BoundedJson` | core/util/json | Der eine JSON-Leser für jede Antwort (intern, öffentlich nur für die Identity-, OAuth2- und Propagation-Module): höchstens 1 MiB (`MAX_INPUT_CHARS`), Verschachtelung höchstens 64 Ebenen (`MAX_DEPTH`), ein wiederholter Schlüssel verwirft das Dokument, RFC-8259-Grammatik, alle Escapes dekodiert; `parseObject(json)` liefert ein `Result`. `OAuth2Json` bleibt als Fassade, `OidcJson` entfällt |
+| `OAuth2FormPost` | core/oauth2/http | Der eine Form-POST an Token-Endpunkte — Client-Authentifizierung, 10 s Zeitlimit (`TIMEOUT`), Antwort höchstens 1 MiB (`MAX_RESPONSE_BYTES`); trägt `HttpTokenEndpointClient`, PAR, Revocation, Introspection, Device-Grant und beide Propagation-Strategien. Liegt seit 00.84.00 in `jCustos-core` (vorher `oauth2.internal.OAuth2FormPost`) |
+| `JoseLimits` | core/jwt/api | Gemeinsame Größengrenzen der JOSE-Parser und der eine Segmentzähler `countSegments` |
 
 ---
 
@@ -312,16 +383,24 @@ die Regel „eine Einschränkung pro Element“ bleibt.
 | `Continue` | — | Request darf weiterlaufen |
 | `SessionStale` | `status (Drifted)` | Request muss abgelehnt werden — Audit ist bereits emittiert |
 
-### `RateLimitDecision` (Phase 7c)
+### `RateLimitDecision` (Phase 7c, ⚠️)
 
 | Variant | Felder | Bedeutung |
 |---|---|---|
 | `Allowed` | `eventsInWindow`, `limit`, `window` | Event wurde gezählt, Request läuft weiter |
-| `Throttled` | `eventsInWindow`, `limit`, `window`, `retryAfter` | Limit erreicht; `retryAfter` liefert die Lower-Bound für den `Retry-After`-Header |
+| `Throttled` | `eventsInWindow`, `limit`, `window`, `retryAfter` | Limit erreicht; `retryAfter` ist seit **V00.84** (JS-SEC-165) die Zeit, bis das älteste Event im Fenster dieses verlässt — eine Anfrage zu `now + retryAfter` wird zugelassen. Vorher war es stets das ganze Fenster |
+| `Blocked` | `eventsInWindow`, `limit`, `window`, `retryAfter`, `throttledCount` | **V00.84** (JS-SEC-165): Schlüssel gesperrt, weil er innerhalb des Eskalationsfensters `throttledCount`-mal gedrosselt wurde; `retryAfter` ist die Zeit bis zum Ende der Sperre. Nur mit `RateLimitEscalation`; ein erschöpfendes `switch` braucht einen dritten Zweig |
+
+### `CredentialCheckGate.Admission` (seit V00.84, ⚠️)
+
+| Variant | Felder | Bedeutung |
+|---|---|---|
+| `Entered` | — (`AutoCloseable`) | Platz vergeben; Credential-Prüfung ausführen, danach `close()` |
+| `Deferred` | `retryAfter` | Innerhalb von `gateWait` kein Platz frei; Login zurückgestellt, nichts gezählt |
 
 ---
 
-## 6. Audit Events (27 sealed Records)
+## 6. Audit Events (31 sealed Records)
 
 Alle implementieren `AuditEvent` (sealed interface) und sind über
 `AuditQuery.matches(AuditEvent)` pattern-match-fähig.
@@ -334,9 +413,9 @@ Alle implementieren `AuditEvent` (sealed interface) und sind über
 | `LoginFailed` | `username`, `clientAddress`, `reason` | `recordFailure` der drei mitgelieferten Policies (`InMemoryLoginAttemptPolicy`, `StoreBackedLoginAttemptPolicy`, `NoopLoginAttemptPolicy`) — seit **V00.84** der einzige Audit-Punkt: genau ein Event pro abgelehntem Login, auch hinter dem Vaadin-`LoginView` und den REST-Handlern (JS-SEC-123, JS-SEC-124). `LoginView` und `StandaloneLoginFlow` publizieren selbst nur für einen Login, den die Policy nach der Credential-Prüfung verweigert (Sperre während der Prüfung) |
 | `LogoutPerformed` | `subjectId`, `sessionId`, `scope` | `SubjectClearingLogoutService` |
 | `AccessGranted` | `subjectId`, `route` | `AuthorizationListener` (Vaadin), `RestAuthorizationFilter` |
-| `AccessDenied` | `subjectId`, `route`, `reason` | dito; seit **V00.84** auch `RestAuthenticationFilter` für eine Anfrage ohne Subjekt (`Unauthenticated:no-subject`, JS-SEC-086) |
-| `ActionDenied` | `subjectId`, `actionName` | `StaticActionAuthorizationService.requireAllowed` |
-| `BruteForceLimitReached` | `username`, `clientAddress`, `failedAttempts`, `lockoutDuration` | `InMemoryLoginAttemptPolicy` |
+| `AccessDenied` | `subjectId`, `route`, `reason` | dito; seit **V00.84** auch `RestAuthenticationFilter` für eine Anfrage ohne Subjekt (`Unauthenticated:no-subject`, JS-SEC-086) und `RestOriginGuard` für eine fremde Herkunft (`csrf:origin-mismatch`, JS-SEC-163) |
+| `ActionDenied` | `subjectId`, `actionName` | `StaticActionAuthorizationService.requireAllowed`; seit **V00.84** auch `SecuredUi.action(...)` für einen Klick, dessen Anforderung nicht mehr erfüllt ist (JS-SEC-168) |
+| `BruteForceLimitReached` | `username`, `clientAddress`, `failedAttempts`, `lockoutDuration` | `InMemoryLoginAttemptPolicy`; seit **V00.84** auch `StoreBackedLoginAttemptPolicy` (JS-SEC-122), eine Sperre wird einmal auditiert; eine Adresssperre (Adresslimit, JS-SEC-062) mit leerem `username` |
 | `SessionCreated` | `subjectId`, `sessionId` | `TimeoutSessionPolicy.onLogin` — seit **V00.84** (JS-SEC-060) mit der **post-Rotations-ID**, da `LoginView` vor `onLogin` rotiert |
 | `SessionExpired` | `subjectId`, `sessionId`, `reason` | `TimeoutSessionPolicy`, `SessionLifetimeListener`, REST-Filter |
 | `SessionInvalidated` | `subjectId`, `sessionId (alt)`, `reason` | `LoginSessionRotation.afterLogin` aus `LoginView` und `AbstractOAuth2CallbackView` (B3-Rotation; seit V00.84 nach `SessionCreated` mit der neuen ID); seit **V00.84** zusätzlich mit den Gründen `Revoked` (`VaadinSessionRevocation`, `RestSessionRevocation`, JS-SEC-131), `RotationAfterLoginFailed` (JS-SEC-146), `LoginNotConfirmed` (`LoginView`, JS-SEC-123) und `RememberMeTokenReplay` (JS-SEC-128) |
@@ -353,7 +432,7 @@ Alle implementieren `AuditEvent` (sealed interface) und sind über
 
 | Event | Wichtige Felder | Wird emittiert von |
 |---|---|---|
-| `SessionStale` | `subjectId`, `sessionId`, `route`, `snapshotVersion`, `currentVersion` | `JCustosVersionEnforcer` bei Drift (Phase 4c) |
+| `SessionStale` | `subjectId`, `sessionId`, `route`, `snapshotVersion`, `currentVersion` | `JCustosVersionEnforcer` bei Drift (Phase 4c); seit **V00.84** auch beim proaktiven Session-Ende durch `VaadinJCustosVersionChangeBridge` (JS-SEC-167) — publiziert vom Thread, der die Version geändert hat, oder vom Request der belegten Session |
 | `PasswordResetRequested` | `subjectId`, `tokenHash` | `PasswordResetService.request` (Phase 7a); seit **V00.84** auch `credential.reset.PasswordResetService.issue` (mit dem öffentlichen Selektor, nie dem Verifier — JS-SEC-074) |
 | `PasswordResetCompleted` | `subjectId`, `tokenHash` | `PasswordResetService.consume`; seit **V00.84** auch `credential.reset.PasswordResetService.consume` |
 | `EmailVerificationRequested` | `subjectId`, `email`, `tokenHash` | `EmailVerificationService.request` |
@@ -361,7 +440,14 @@ Alle implementieren `AuditEvent` (sealed interface) und sind über
 | `ApiKeyUsed` | `subjectId`, `keyName`, `keyHash` | `ApiKeyAuthenticationService.authenticate` (Phase 7b) |
 | `ApiKeyDenied` | `subjectId`, `keyHash`, `reason` (Unknown/ForeignTenant/Revoked/Expired) | dito |
 | `TokenRotated` | `subjectId`, `oldHash`, `newHash` | `TokenService.rotate` |
-| `RateLimitExceeded` | `scope`, `subjectId`, `limit`, `window`, `eventsInWindow` | `InMemoryRateLimitPolicy.tryAcquire` bei Throttle (Phase 7c) |
+| `RateLimitExceeded` | `scope`, `subjectId`, `limit`, `window`, `eventsInWindow` | `InMemoryRateLimitPolicy.tryAcquire` bei Throttle (Phase 7c), seit **V00.84** auch für jede Ablehnung eines gesperrten Schlüssels (`Blocked`, JS-SEC-165) und für einen vom `CredentialCheckGate` zurückgestellten Login (Scope `login:credential-check`, JS-SEC-063) |
+
+### V00.71 (Credential-Pipeline)
+
+| Event | Wird emittiert von |
+|---|---|
+| `CredentialVerificationSucceeded`, `CredentialVerificationFailed`, `CredentialRehashed` | `CredentialAuditPublisher` der Credential-Pipeline (siehe `RELEASE-NOTES-00.71.00.md`); `CredentialVerificationFailed` mit der Klassifikation `REFRESH_TOKEN_REPLAY` seit **V00.84** auch von `TokenService` bei einem Refresh-Token-Replay (JS-SEC-071) |
+| `CredentialStatusChanged` | `CredentialLifecycleService`, `MassCredentialStatusChange` |
 
 Seit **V00.84** (JS-SEC-117) tragen `SessionCreated`, `SessionExpired`,
 `SessionInvalidated`, `SessionStale` und `LogoutPerformed` im Feld
@@ -370,9 +456,20 @@ des SHA-256 (`SessionRef.of(id)`) —, nie die Live-Session-ID; die
 Kern-Produzenten, die REST-Filter und der Vaadin-Adapter reduzieren schon
 beim Erzeugen.
 
+Seit **V00.84** (JS-SEC-066) gehört jeder Audit-Datensatz zu dem Request,
+der ihn ausgelöst hat: `AuditEnvelope.correlationId` speichert die
+Korrelations-ID, die `CorrelationIdResolver` für den Request entschieden
+hat, und `LoggingAuditSink` beendet die Zeile mit `corr=<id>`. Außerhalb
+eines Requests — Hintergrund-Threads, `UI.access` aus einem anderen
+Thread, Standalone-Anwendungen — fehlt das Feld; es wird keine ID
+erfunden. Hinter einem Reverse Proxy soll der Proxy `X-Request-ID` setzen
+und einen vom Client gesendeten Wert ersetzen (Caddy:
+`header_up X-Request-ID {http.request.uuid}`); der Proxy wird mit
+`ClientAddressResolver.trustedProxies(...)` registriert.
+
 `AuditQuery(types, subjectId, from, to, limit)` mit Factories
 `all()`, `ofType(...)`, `forSubject(...)`. `AuditQuery.subjectIdOf`
-und `LoggingAuditSink` decken alle 27 Varianten ab.
+und `LoggingAuditSink` decken alle 31 Varianten ab.
 
 ---
 
@@ -386,7 +483,9 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `CompositeAuditService` | core | RingBuffer + zusätzliche Sinks; query gegen den RingBuffer |
 | `DefaultCompositeAuditService` | core | No-arg, SPI-registrierbar; RingBuffer + LoggingAuditSink |
 | `RingBufferAuditSink` | core | Default-Cap 256 Events, älteste fliegen raus, thread-safe |
-| `LoggingAuditSink` | core | JUL-basierter Sink, kompaktes `AUDIT type=… field=value …`-Format; seit **V00.84** `sessionRef=` (`sref-` + 16 Hex-Zeichen SHA-256, `SessionRef`) statt der Live-Session-ID (JS-SEC-079, CWE-532) |
+| `LoggingAuditSink` | core | JUL-basierter Sink, kompaktes `AUDIT type=… field=value …`-Format; seit **V00.84** `sessionRef=` (`sref-` + 16 Hex-Zeichen SHA-256, `SessionRef`) statt der Live-Session-ID (JS-SEC-079, CWE-532) und am Zeilenende `corr=<id>`, bereinigt wie jedes andere Feld (JS-SEC-066) |
+| `AuditCorrelation` ⚠️ | core/audit | **V00.84** (JS-SEC-066): trägt die Korrelations-ID für den Thread, der einen Request bedient — `current()`, `open(id)` / `openFor(request)` liefern einen `Scope` (`AutoCloseable`), `newId()` erzeugt eine serverseitige UUID. Geöffnet wird der Scope von `VaadinAuditCorrelation` (§ 8) und `RestAuditCorrelation` (§ 9) |
+| `TrustedPeerCorrelationIdResolver` ⚠️ | core/audit | **V00.84**: Default-`CorrelationIdResolver` (§ 2) — `X-Request-ID` (`X_REQUEST_ID`, Headername konfigurierbar) nur von einem vertrauenswürdigen Proxy |
 | `SessionRef` ⚠️ | core | **V00.84** (JS-SEC-117, CWE-532): `SessionRef.of(id)` / `ofNullable(id)` bildet die Session-Referenz (`PREFIX` `sref-` + `HEX_LENGTH` 16 Hex-Zeichen SHA-256, 21 Zeichen); ein Wert dieser Form bleibt unverändert, `isReference(value)` erkennt ihn. Gemeinsame Referenz für Log-Zeile, Audit-Events, Session-Datensätze und Dashboards |
 
 ---
@@ -397,7 +496,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 
 | Klasse | Zweck |
 |---|---|
-| `LoginView` (abstract) | Login-Form mit username/password/remember-me/Login/Cancel + Custom-Slot; seit **V00.84** (JS-SEC-124) fährt die View das Throttling-Protokoll der registrierten `LoginAttemptPolicy` selbst um `checkCredentials()` — `beforeAttempt`, dann genau eines von `confirmSuccess`, `recordFailure`, `abandonAttempt`, geschlüsselt auf Benutzername und die Adresse des `ClientAddressResolver`; Hooks `reactOnLockedOut(lockout)` und `reactOnVerificationUnavailable()`, Opt-out über `throttleLoginAttempts()` für einen `AuthenticationService`, der die Policy selbst aufruft |
+| `LoginView` (abstract) | Login-Form mit username/password/remember-me/Login/Cancel + Custom-Slot; seit **V00.84** (JS-SEC-124) fährt die View das Throttling-Protokoll der registrierten `LoginAttemptPolicy` selbst um `checkCredentials()` — `beforeAttempt`, dann genau eines von `confirmSuccess`, `recordFailure`, `abandonAttempt`, geschlüsselt auf Benutzername und die Adresse des `ClientAddressResolver`; Hooks `reactOnLockedOut(lockout)` und `reactOnVerificationUnavailable()`, Opt-out über `throttleLoginAttempts()` für einen `AuthenticationService`, der die Policy selbst aufruft. Seit **V00.84** (JS-SEC-063) betritt die View nach `beforeAttempt` das `CredentialCheckGate` der Policy und verlässt es, sobald `checkCredentials` zurückkehrt; ein zurückgestellter Login ruft `reactOnCredentialCheckDeferred(Duration)` (Default: `reactOnVerificationUnavailable()`). Eine View mit `throttleLoginAttempts() == false` betritt das Gate nicht |
 | `LoginListener<U>` (abstract) | `BeforeEnterListener` mit Rollen-/Subject-Lifecycle-Hooks; erkennt seit **V00.84** über `RouteRestrictionResolver` auch eine Route, die nur ihr Layout schützt |
 | `LoginListeners` | Statischer Resolver für `LoginListener` (SPI + Cache + `setLoginListener`) |
 | `AuthorizationListener` (`@ListenerPriority(MAX_VALUE - 1)`) | Annotation-basierter Routenschutz pro Navigation; seit **V00.84** müssen die Einschränkungen des Ziels **und** jedes Router-Layouts der Kette gewähren (JS-SEC-154, `@PublicRoute` hebt keine Layout-Einschränkung auf), und jede Ablehnung ohne erreichbares Reroute-Ziel — nicht registrierte Route oder die abgelehnte View selbst — endet in der Error-View für `SecurityException` (JS-SEC-152, JS-SEC-158) |
@@ -412,6 +511,8 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `RouteRestrictionResolver` ⚠️ (`authorization/impl`) | **V00.84** (JS-SEC-154): löst die Einschränkungen einer Navigation auf — Ziel plus jedes Router-Layout der Kette, alle müssen gewähren; gemeinsame Quelle für `AuthorizationListener`, `LoginListener` und die Start-up-Discovery |
 | `LoginSessionRotation` ⚠️ | **V00.84** (JS-SEC-146, CWE-384): die öffentliche Post-Login-Sequenz `afterLogin(...)` — Session-ID-Rotation, `SessionPolicy.onLogin`, Rotations-Audit, Hook `onSessionRotated`, Security-Version-Snapshot; genutzt von `LoginView` und `AbstractOAuth2CallbackView` (der Callback scheitert geschlossen: ohne Rotation wird der Login zurückgenommen, `SessionInvalidated(RotationAfterLoginFailed)`) |
 | `VaadinSessionRevocation` ⚠️ (`session/vaadin`) | **V00.84** (JS-SEC-131, CWE-613): `revoke(record)` / `terminate(sessionId, …)` beenden die Live-Session auf demselben Knoten sofort (Subjekt, Snapshot und Token-Credential gelöscht, `SessionInvalidated(Revoked)`, Vaadin-Session geschlossen, HTTP-Session invalidiert); `useSessionStore(store)` registriert den Store für die Prüfung pro Request — der Bootstrap übernimmt diese Registrierung bei `.sessions(s -> s.storeBacked(...))` (`bootstrap-session-revocation`). Vergleicht über `SessionRef`, findet also Datensätze unter Referenz und unter Live-ID |
+| `CurrentSubject` ⚠️ (core, `authorization/api`) | **V00.84** (ER30, JS-SEC-097, CWE-1041/CWE-532): die eine Fassade für Subjekt-Lookup und Subjekt-ID — `subjectType()`, `current()`, `currentPropagatingFailures()`, `subjectIdOf(Object)`, `currentJCustosSubject()`, `clear()`. Regel: der Wert des registrierten `SubjectIdResolver`; ohne Resolver, bei einem Fehler oder leerem Wert das Identitäts-Handle `SimpleClassName@identityHash`; nie `toString()`, nie leer. Lookups werfen nicht und lesen Fehler als „kein Subjekt“; die Lebensdauerprüfung nutzt `currentPropagatingFailures()`, damit ein unlesbarer Subject-Store den Request weiter stoppt. Genutzt von `VaadinAccessContextFactory`, `SecuredVisibility`, `LoginSessionRotation`/`LoginView`, `SessionLifetimeListener`, `JCustosVersionEnforcerListener`, `AuthorizationListener`, `LoginListener`, der OIDC-Logout-View und `JCustosEnforcer` |
+| `VaadinAuditCorrelation` ⚠️ (`net/vaadin`) | **V00.84** (JS-SEC-066): Request-Interceptor, den jCustos-vaadin per `META-INF/services` als `VaadinServiceInitListener` registriert; öffnet für jeden Request den `AuditCorrelation`-Scope und schließt ihn am Ende. Ein Request-Interceptor der Anwendung, der aus einem später geladenen Service-Init-Listener stammt, auditiert ohne ID |
 | `RouteNameCheck` ⚠️ (`jCustos-dx-vaadin`) | **V00.84** (JS-SEC-152): prüft einen Routennamen gegen die Route-Registry (`REGISTERED` / `UNREGISTERED` / `UNAVAILABLE`); Grundlage der Bootstrap-Befunde `vaadin/login-route-unresolved` und `vaadin/step-up-route-unresolved`. Die Registry ist auch aus `VaadinServiceInitListener.serviceInit` lesbar, nur nicht außerhalb eines Service (`ServletContextListener`, `main`) |
 
 ### Login-View-Features
@@ -428,17 +529,29 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 |---|---|
 | `VaadinJCustosVersionContext` (Package `session/vaadin`) | Per-VaadinSession Snapshot-Carrier (`record(subjectId, tenant, snapshot, sessionId)` / `current()` / `clear()`). Survives Session-Rotation. |
 | `JCustosVersionEnforcerListener` (`@ListenerPriority(Integer.MAX_VALUE)`) | BeforeEnter-Listener vor `AuthorizationListener`. On Drift: clear snapshot + reroute zur konfigurierten LoginView-Klasse. Seit **V00.84** (JS-SEC-082, JS-SEC-155) auch `RequestHandler` und `VaadinRequestInterceptor`: `register(ServiceInitEvent)` verdrahtet alle drei Eintrittspunkte, dann wird Drift auf jeder Client-Nachricht unter dem Session-Lock durchgesetzt (Subjekt löschen, Snapshot leeren, `SessionStale`, Session schließen, Request verbrauchen — der Client erhält Vaadins Session-expired-Meldung) |
+| `VaadinJCustosVersionChangeBridge` ⚠️ (Package `session/vaadin`) | **V00.84** (R8, JS-SEC-167, CWE-613): beendet eine offene Session, sobald sich die Security-Version ihres Subjekts ändert — ohne auf den nächsten Request zu warten. Als `JCustosVersionChangeListener` eines `ObservableJCustosVersionStore` registriert (`register(ServiceInitEvent, ObservableJCustosVersionStore)`), merkt sie sich den Subjekt-Schlüssel jeder UI und führt bei einer Änderung `UI.access` aus: eine gedriftete Session wird wie bei der Prüfung pro Request beendet (Subjekt, Snapshot und Token-Credential gelöscht, `SessionStale` mit Session-Referenz und offener Route, jede UI der Session per `Page.setLocation` auf das Reroute-Ziel geschickt und gepusht, Session geschlossen, HTTP-Session invalidiert); eine Session ohne Drift bekommt ihre Secured-Komponenten neu ausgewertet. Mit `@Push` verlässt der Browser die Seite ohne Klick; ohne Push endet die Session serverseitig sofort, der Browser erhält beim nächsten Request Vaadins Session-expired-Antwort. `VaadinJCustosStarter.serviceInit(...)` registriert die Bridge, wenn der registrierte Store beobachtbar ist |
 
 ### Phase-8a/b Components (`jCustos-vaadin/components/` — ⚠️)
 
 | Klasse | Zweck |
 |---|---|
-| `SecuredVisibility` + `SecuredVisibilityMode` (HIDE / DISABLE) | Zentraler Decision-Point. `Requirement(requiredRoles, requiredPermissions)` (AND-composed), `Target`-Interface, `apply()` + `isAllowed()`. SPI-backed `currentJCustosView()` resolved via `AuthenticationService.subjectType()` + `SubjectStore` + `AuthorizationService`. Missing SPI → denial. Seit **V00.84**: ohne gebundenes Subjekt wird jede Anforderung abgelehnt, `SecuredUi.requiresRole()`/`requiresPermission()` lehnen ein leeres Array mit `IllegalArgumentException` ab (JS-SEC-135), und eine abgelehnte Komponente ohne `HasEnabled` (`Composite`, eigene `@Tag`-Komponente, `Icon`) wird im HIDE-Modus tatsächlich verborgen (JS-SEC-153). |
+| `SecuredVisibility` + `SecuredVisibilityMode` (HIDE / DISABLE) | Zentraler Decision-Point. `Requirement(requiredRoles, requiredPermissions)` (AND-composed), `Target`-Interface, `apply()` + `isAllowed()`. SPI-backed `currentJCustosView()` resolved via `AuthenticationService.subjectType()` + `SubjectStore` + `AuthorizationService`. Missing SPI → denial. Seit **V00.84**: ohne gebundenes Subjekt wird jede Anforderung abgelehnt, `SecuredUi.requiresRole()`/`requiresPermission()` lehnen ein leeres Array mit `IllegalArgumentException` ab (JS-SEC-135), und eine abgelehnte Komponente ohne `HasEnabled` (`Composite`, eigene `@Tag`-Komponente, `Icon`) wird im HIDE-Modus tatsächlich verborgen (JS-SEC-153). Ebenfalls seit **V00.84**: das Subjekt kommt über `CurrentSubject`, Rollen und Permissions werden vor der Herausgabe der Sicht aufgelöst — ein fehlschlagender `AuthorizationService` lehnt ab, statt aus `apply(...)` zu werfen (JS-SEC-097); `SecuredVisibility.refreshAll(UI)` wertet alle Secured-Bindings einer UI neu aus (JS-SEC-167), innerhalb von `ui.access(...)` aufrufen, etwa nach einer Rollenänderung ohne Versionssprung. |
+| `SecuredBindingRegistry` ⚠️ | **V00.84** (R8, JS-SEC-167): Register pro UI (als Komponentendaten gehalten, Komponenten schwach referenziert) aller Secured-Bindings — `SecuredButton`, `SecuredRouterLink`, `SecuredMenuItem` und die `SecuredUi`-Bindings des Starters inklusive `requiresPolicy(...)`. `refreshAll(UI)` verwirft eingesammelte und inzwischen an eine andere UI gehängte Komponenten und verbirgt eine Komponente, deren Neuauswertung wirft |
+| `ComponentTarget` ⚠️ | **V00.84** (ER30, JS-SEC-097): das eine öffentliche `SecuredVisibility.Target` für eine Vaadin-`Component` mit der Semantik von JS-SEC-153; ersetzt die vier bisherigen privaten Adapter |
 | `SecuredButton` (Default DISABLE) | Vaadin-Button-Subklasse. Checkt auf Konstruktor und onAttach; `refresh()` für manuelle Re-Checks. |
 | `SecuredRouterLink` (Default HIDE) | Vaadin-RouterLink-Subklasse. Router-explicit Konstruktor für headless tests. |
-| `SecuredMenuItem.bind(MenuItem, Requirement, …)` | Binding-Helper, da MenuItem vom Parent-MenuBar erzeugt wird (kein Subclass-Pattern möglich). |
+| `SecuredMenuItem.bind(MenuItem, Requirement, …)` | Binding-Helper, da MenuItem vom Parent-MenuBar erzeugt wird (kein Subclass-Pattern möglich). Seit **V00.84** bei jedem Attach neu ausgewertet, wie `SecuredButton` und `SecuredRouterLink` (JS-SEC-167). |
 | `SessionManagementView` | Reusable Composite. Grid über `SessionStore.findAll()` (Tenant/Subject/SessionId/Status/Created/LastActivity/Version/Action). Per-Row Revoke via `Consumer<SessionRecord>`. Apps subclassen mit `@Route` + `@RequiresPermission`. **V00.84 (JS-SEC-068, CWE-306):** Drei-Argument-Konstruktor mit `Requirement`; der Revoke-Handler prüft das aktuelle Subjekt serverseitig gegen die Anforderung, auditiert eine Ablehnung als `AccessDenied` und lässt den Store unberührt. **V00.84 (JS-SEC-131):** mit `VaadinSessionRevocation::revoke` als Revoke-Callback beendet „Revoke“ die Session beim Klick; die Spalte „Session id“ zeigt `SessionRef.of(...)` statt der Live-ID. |
 | `SessionManagementRoute` + `SessionManagementAccess` (`jCustos-dx-vaadin`) | Vom Bootstrap aktivierte Route `/session-management`. **V00.84 (JS-SEC-068):** trägt `@ProtectedBy(SessionManagementAccess)`; der Evaluator prüft die mit `.sessionManagementView(Requirement)` veröffentlichte Anforderung — ohne Anforderung fail-closed (`Forbidden`), ohne Subjekt `Unauthenticated`. `.sessionManagementView()` ohne Anforderung ist deprecated und meldet `session-management-view-without-requirement` (ERROR in PRODUCTION/STRICT, WARNING sonst). Die frühere Deny-by-Default-Ausnahme in `AuthorizationListener` und die Discovery-Ausnahme sind entfallen. Seit JS-SEC-131 ist das echte Beenden der Session (`VaadinSessionRevocation`) der Standard-Revoke der Route. |
+
+### Vaadin-Starter (`jCustos-vaadin-starter`, seit V00.84 erweitert)
+
+| Klasse | Zweck |
+|---|---|
+| `VaadinJCustosStarter` (`starter/profile`) | Profile `developmentDefaults()` / `productionDefaults()` / `strictDefaults()`. Seit **V00.84** (JS-SEC-168, CWE-1188) setzen `productionDefaults()` und `strictDefaults()` zusätzlich `.denyByDefault(true)` und, wenn eindeutig, `.loginRoute(...)` — die Route der einen registrierten `LoginView`-Route bzw. der vom registrierten `LoginListener` genannten; `developmentDefaults()` setzt nur den Modus. Ein späteres `.loginRoute(...)` nach `.use(profile)` gewinnt; eine nicht annotierte Route ist unter diesen Profilen erst mit `@PublicRoute` öffentlich |
+| `VaadinJCustosStarter.serviceInit(event, rerouteTarget[, options])` (implementiert von `VaadinJCustosServiceInit` ⚠️) | **V00.84** (JS-SEC-168): ein Aufruf aus dem `VaadinServiceInitListener` nach `install()` verdrahtet die Service-Teile (`VaadinJCustosServiceInit.Part`): `JCustosVersionEnforcerListener.register(...)` bei registriertem `JCustosVersionStore`, `VaadinJCustosVersionChangeBridge` bei einem `ObservableJCustosVersionStore`, `JCustosErrorHandler.install(...)` und — mit `Options.withOidcSessionRegistry(...)` — `VaadinSessionRegistryCleanup` des OIDC-Moduls (per Name geladen, ohne Abhängigkeit). `Options.defaults().withoutErrorHandler()` lässt den Fehlerbehandler weg. Liefert und loggt die installierten Teile und meldet jeden übersprungenen; handgeschriebene Init-Listener für dieselben Teile entfallen, sonst werden sie doppelt registriert |
+| `SecuredUi.action(component, onClick)` ⚠️ (`starter/ui`) | **V00.84** (JS-SEC-168): wertet die Anforderung beim Binden, beim Attach, aus `refreshAll(UI)` **und beim Eintreffen des Klicks** aus. Der Klick eines Subjekts, das sie nicht mehr erfüllt, führt `onClick` nicht aus, wertet das Steuerelement sofort neu aus (Default deaktiviert, mit `hideWhenDenied()` verborgen), wird als `secured-ui/action-refused` geloggt und als `ActionDenied` auditiert; eine werfende Prüfung lehnt den Klick ab. `SecuredUi.button(...).onClick(...)` führt den Klick weiterhin aus, sobald Vaadin ihn zustellt. `SecuredUi.component(...).bind()` wird seit **V00.84** bei jedem Attach neu ausgewertet |
+| `JCustosErrorHandler` ⚠️ (`starter/errors`) | **V00.84** (R7, JS-SEC-067, CWE-209): opt-in `ErrorHandler`, `JCustosErrorHandler.install(ServiceInitEvent)` aus dem `VaadinServiceInitListener`; jede danach erzeugte Session bekommt ihn. Fragt zuerst `ErrorHandlerUtil.handleErrorByRedirectingToErrorView(...)` wie Vaadins Default, sodass etwa eine `AccessDeniedException` die `HasErrorParameter`-View erreicht; sonst zieht er eine 16-stellige Base32-Referenz aus `SecureRandom`, loggt `Unhandled error, reference <ref>` mit Stacktrace auf ERROR und zeigt dem Nutzer nur die Referenz (`jcustos.error.reference`, `{0}` = Referenz, sonst englischer Text). Abgebrochene Verbindungen werden nicht gemeldet, der Handler rekursiert nicht; `showReference(UI, String)` überschreibbar |
 
 ---
 
@@ -458,6 +571,10 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | `RestHeaderLines` ⚠️ | **V00.84** (JS-SEC-113, CWE-348): Helfer für Adapter, die mehrzeilige Header liefern — `joined(...)` baut `headers()` regelkonform, `values(...)` liefert alle Zeilen, `rejectDuplicates(...)` antwortet `400` auf einen wiederholten `Authorization`-, `X-Api-Key`- oder `Cookie`-Header |
 | `RestDecisionContext` | Hält den vom Bootstrap publizierten Decision-Mapper; **V00.84** (JS-SEC-086): `mapperOrDefault()` ist öffentlich (publizierter Mapper, sonst `HttpStatusDecisionMapper`) — eigene Ablehnungen eines Handlers laufen über `RestDecisionContext.mapperOrDefault().apply(decision, response)` |
 | `RestSessionRevocation` ⚠️ | **V00.84** (JS-SEC-131, CWE-613): Widerrufsprüfung der drei REST-Filter. Mit registriertem `SessionStore` (`.sessions(s -> s.storeBacked(...))` am `RestSecurity.bootstrap()` oder `useSessionStore(...)`) und einem Resolver mit `resolveSessionId` beendet ein `REVOKED`- oder ein gesehener und dann entfernter Datensatz die Session: `401` über den Mapper, `SessionInvalidated(Revoked)`, kein Handler. `EXPIRED` allein beendet nichts, Store-Fehler werden geloggt; Gedächtnis gesehener Datensätze pro Knoten 10 000 (`SEEN_CAPACITY`), für mehrere Knoten `requireRecord(true)` |
+| `RestAuditCorrelation` ⚠️ | **V00.84** (JS-SEC-066): `run(request, action)` / `call(request, supplier)` öffnen den `AuditCorrelation`-Scope eines REST-Requests; innerhalb eines bereits geöffneten Scopes gilt dessen ID. `RestAuthenticationFilter`, `RestAuthorizationFilter` und `RestJCustosVersionFilter` entscheiden darin, ebenso `RestSessionRevocation.allow(...)`; eigene Login- oder Token-Handler und eigene Router umhüllen ihren Dispatch damit, wie in `demo-rest` und in den Routern der REST-Skill-Demos |
+| `RestOriginGuard` ⚠️ | **V00.84** (JS-SEC-163, CWE-352): Opt-in-Schutz gegen CSRF für REST-Sessions, die auf einem Cookie laufen. Prüft jeden Request mit unsicherer Methode (`GET`, `HEAD`, `OPTIONS`, `TRACE` passieren): `Sec-Fetch-Site: same-origin` oder `none` passiert, sonst muss `Origin` die eigene Herkunft aus `Host` oder einen Eintrag der Allowlist nennen (Schema, Host und Port exakt); `null`, Pfad, User-Info, Query, Fragment und ein wiederholtes `Origin` werden abgelehnt. Ohne beide Header passiert ein Nicht-Browser-Client, außer mit `MissingHeaders.REFUSE`. Ablehnung: `403` über den Decision-Mapper und `AccessDenied` mit `csrf:origin-mismatch`. `RestOriginGuard.sameOrigin()`, `withAllowedOrigins(Set)` (ersetzt den `Host`-Vergleich, hinter einem Proxy nötig), `withMissingHeaders(...)`; `RestSecurity.bootstrap().originGuard(guard)` installiert ihn prozessweit (`install`, `installed`, `reset`, `bootstrap-origin-guard`), der Router ruft `RestOriginGuard.installed()` als ersten Schritt, die drei REST-Filter führen einen installierten Guard vor ihren eigenen Prüfungen aus. Für Bearer-Tokens nicht nötig; `OidcLogoutHandler` nutzt `originAccepted(...)`. Doku: `docs/security/csrf.md` |
+| `RestRateLimit` ⚠️ | **V00.84** (JS-SEC-165, CWE-799): `respond(decision, response[, body])` schreibt für `Allowed` nichts und liefert `false`, beantwortet `Throttled` und `Blocked` gleich (429, `Retry-After`, derselbe generische Body) und liefert `true` — `if (RestRateLimit.respond(policy.tryAcquire(key), response)) return;`. Einen REST-Filter für Rate-Limits gibt es nicht |
+| `RestThrottleResponses` ⚠️ | **V00.84** (JS-SEC-063): `tooManyRequests(response, retryAfter[, body])` antwortet `429` mit `Retry-After` in ganzen Sekunden, aufgerundet, mindestens 1 (`retryAfterValue`); für das Credential-Check-Gate eines eigenen Login-Handlers und für `RestRateLimit` |
 | `RestJCustosVersionContext` + `RestJCustosVersionFilter` (Phase 4c, ⚠️) | Drift-Filter; `RestSubjectResolver.resolveJCustosVersionContext` als opt-in Default-Methode. Bei Drift: `401 + WWW-Authenticate: SessionStale` (RFC 7235-Style) und Audit-Event; Status und Body über den publizierten Decision-Mapper (JS-SEC-086). Seit **V00.84** läuft vor der Drift-Prüfung die Widerrufsprüfung (`RestSessionRevocation`, JS-SEC-131), und das `SessionStale`-Event trägt `sessionReference(sessionId)` statt des Bearer-Tokens (JS-SEC-117). |
 
 ### Phase-8d OpenAPI-Metadaten (`jCustos-rest/openapi/` — ⚠️)
@@ -475,7 +592,7 @@ und `LoggingAuditSink` decken alle 27 Varianten ab.
 | Klasse | Zweck |
 |---|---|
 | `ThreadLocalSubjectStore` | `SubjectStore`-Default — per-Thread-Bindings, **nicht** inherited |
-| `StandaloneLoginFlow<T, U>` | Login-Treiber: konsultiert `LoginAttemptPolicy` → `AuthenticationService` → bindet Subject → emittiert `LoginSucceeded`; `LoginFailed` publiziert seit **V00.84** die Policy in `recordFailure` (Grund `REASON_NO_SUBJECT` bzw. `REASON_CREDENTIALS_REJECTED`), der Flow selbst nur für einen Login, den die Policy nach der Prüfung verweigert (JS-SEC-123). Eine vom KDF-Limiter abgewiesene Prüfung gibt den Versuch zurück, zählt keinen Fehlschlag und reicht `CredentialVerificationUnavailableException` an den Aufrufer weiter (JS-SEC-126) |
+| `StandaloneLoginFlow<T, U>` | Login-Treiber: konsultiert `LoginAttemptPolicy` → `AuthenticationService` → bindet Subject → emittiert `LoginSucceeded`; `LoginFailed` publiziert seit **V00.84** die Policy in `recordFailure` (Grund `REASON_NO_SUBJECT` bzw. `REASON_CREDENTIALS_REJECTED`), der Flow selbst nur für einen Login, den die Policy nach der Prüfung verweigert (JS-SEC-123). Eine vom KDF-Limiter abgewiesene Prüfung gibt den Versuch zurück, zählt keinen Fehlschlag und reicht `CredentialVerificationUnavailableException` an den Aufrufer weiter (JS-SEC-126). Seit **V00.84** betritt der Flow nach `beforeAttempt` das `CredentialCheckGate` der Policy; ein zurückgestellter Login wirft `CredentialCheckDeferredException` mit `retryAfter()` (JS-SEC-063) |
 | `SecuredProxy.wrap(Interface, impl)` | JDK Dynamic Proxy — enforce per Methode oder Klasse via `JCustosEnforcer.enforce(method, declaringClass)`; Einschränkungen auf Super-Interfaces werden vererbt, und unter `setDenyByDefault(true)` wird eine Methode ohne Einschränkung abgelehnt, sofern sie oder ihr Interface nicht `@PublicRoute` trägt (seit V00.84, JS-SEC-081); eine geerbte Methode wird seit V00.84 so geprüft, wie sie auf der übergebenen Klasse läuft (`JCustosAnnotationScanner.scan(Method, Class)`, JS-SEC-114) |
 | `SecuredProxy.requireAllowed(Class, methodName)` | Single-shot Enforcement für Lambdas/Callbacks |
 | `LoginResult<U>` (sealed) | `Success` / `Rejected` / `LockedOut` |
@@ -523,7 +640,16 @@ eine Einschränkung auf einer Methode, die der Wrapper nicht überschreibt
 ausgeschlossen), ist der Compile-Fehler
 `processing/unenforceable-security-annotation`; eine native und eine
 eigene (oder zusammengesetzte) Einschränkung auf einem Element sind
-`processing/multiple-security-annotations`.
+`processing/multiple-security-annotations`. Außerdem seit **V00.84**
+(JS-SEC-156, JS-SEC-159): Eine nicht annotierte Überschreibung einer
+eingeschränkten Supertyp-Methode, die der Wrapper auslässt, und eine
+Klassen-Einschränkung auf einer ausgeschlossenen öffentlichen Methode
+ergeben ebenfalls `processing/unenforceable-security-annotation`; eine
+ausgeschlossene öffentliche Methode ganz ohne Einschränkung ergibt die
+Warnung `processing/deny-by-default-not-applied`; eine Einschränkung, die
+über mehr als eine Ebene zusammengesetzt ist, ergibt
+`processing/nested-composed-security-annotation`. `@PropagateToken` zählt
+nicht als Einschränkung.
 
 ---
 
@@ -698,6 +824,16 @@ Alle Module grün.
 | `JCustosAnnotationScanner.scan(Class/Method/AnnotatedElement)` / `.scan(Method, Class)` | core | Annotation-Resolution mit Cache; `scan(Method, Class)` seit **V00.84** für Methoden, wie sie auf einer bestimmten Klasse laufen (JS-SEC-114) |
 | `SessionRef.of(id)` / `.ofNullable(id)` / `.isReference(value)` | core | **V00.84** (JS-SEC-117): Session-Referenz `sref-…` für Audit, Logs, Session-Datensätze und Dashboards |
 | `SubjectKeyCanonicalizer.defaults()` / `.exact()` | core | **V00.84** (JS-SEC-123, CWE-178): ein Schlüssel pro Konto — Default NFKC, Kleinschreibung (`Locale.ROOT`), getrimmt; `exact()` für Verzeichnisse mit Groß-/Kleinschreibung. Dieselbe Instanz an Login-Policies, `InMemoryCredentialStore` und `InMemoryAbuseDetectionService` übergeben |
+| `CurrentSubject.current()` / `.subjectIdOf(subject)` / `.clear()` | core | **V00.84** (JS-SEC-097): Subjekt-Lookup und Subjekt-ID nach einer Regel — Resolver-Wert, sonst Identitäts-Handle, nie `toString()` |
+| `EndpointSecurity.requireHttps(uri, errorCode)` / `.isLoopbackHost(host)` / `.devModeEnabled()` | core | **V00.84** (JS-SEC-098): die eine https-Regel für ausgehende Endpunkte; `http` zu Loopback nur mit `-Djcustos.dev=true` |
+| `BoundedJson.parseObject(json)` | core | **V00.84** (JS-SEC-098): der begrenzte JSON-Leser (intern, ⚠️) |
+| `OAuth2FormPost.post(...)` / `.postWithoutClientAuthentication(...)` | core | **V00.84** (JS-SEC-098): der eine Form-POST an Token-Endpunkte |
+| `AuditCorrelation.current()` / `.open(id)` / `.openFor(request)` | core | **V00.84** (JS-SEC-066): Korrelations-ID des aktuellen Requests |
+| `RestAuditCorrelation.run(request, action)` / `.call(request, supplier)` | rest | **V00.84** (JS-SEC-066): Korrelations-Scope für eigene REST-Handler und Router |
+| `RestRateLimit.respond(decision, response)` | rest | **V00.84** (JS-SEC-165): 429 mit `Retry-After` für `Throttled` und `Blocked` |
+| `RestOriginGuard.install(guard)` / `.installed()` / `.reset()` | rest | **V00.84** (JS-SEC-163): prozessweiter Origin-Guard |
+| `SecuredVisibility.refreshAll(UI)` | vaadin | **V00.84** (JS-SEC-167): alle Secured-Bindings einer UI neu auswerten |
+| `VaadinJCustosStarter.serviceInit(event, rerouteTarget)` | vaadin-starter | **V00.84** (JS-SEC-168): Versionsprüfung, Versions-Bridge, Fehlerbehandler und OIDC-Cleanup in einem Aufruf |
 | `RestDecisionContext.mapperOrDefault()` | rest | **V00.84** (JS-SEC-086): Decision-Mapper, über den eigene REST-Ablehnungen gerendert werden |
 | `RestHeaderLines.joined(...)` / `.rejectDuplicates(...)` | rest | **V00.84** (JS-SEC-113): mehrzeilige Header für `RestRequest`-Adapter |
 | `Secured.wrap(Class, impl)` / `Secured.requireAllowed(Class, methodName)` | standalone | Dynamic-Proxy-Enforcement |
@@ -707,11 +843,24 @@ Alle Module grün.
 ## 16. Was nicht im Scope ist (Roadmap-Negativliste)
 
 - ❌ **Spring Security / Jakarta Security Replacement** — bewusst minimalistisch.
-- ❌ **OAuth2 / OIDC / SAML / LDAP / Kerberos** — kann als eigener Adapter
-  obendrauf gebaut werden, aber nicht im Kern.
-- ❌ **Cluster-Mode out-of-the-box** — Default-Implementations sind
-  in-memory + single-node. Die SPIs sind aber so geschnitten, dass
-  Redis-/DB-/IAM-Backends als Drop-in laufen würden.
+- ❌ **SAML / LDAP / Kerberos** — kann als eigener Adapter obendrauf gebaut
+  werden, aber nicht im Kern. OAuth2, OIDC und JWT sind dagegen
+  inzwischen im Scope: die Verträge liegen in `jCustos-core`
+  (`oauth2/api`, `oidc/api`, `jwt/api`), die Implementierungen in eigenen
+  Modulen (`jCustos-jwt`, `jCustos-oauth2*`, `jCustos-identity-oidc*`,
+  sechs Hersteller-Profile `jCustos-identity-vendor-*`).
+- ❌ **Eigener Cluster-Store** — jCustos liefert keinen JDBC-, Redis- oder
+  Hazelcast-Adapter; die In-Memory-Defaults sind single-node, und Eclipse
+  Store ist eine eingebettete Speicherung für einen Prozess, kein
+  Cluster-Store. Mehrere Knoten sind seit **V00.84** dennoch ein
+  dokumentierter Betriebsfall (JS-SEC-166):
+  `docs/security/deployment/cluster.md` nennt die Stores, die alle Knoten
+  teilen müssen, die Bausteine, die bewusst pro Knoten bleiben
+  (Abuse-Erkennung, KDF-Limiter, Credential-Check-Gate), und was ein Store
+  für mehrere Knoten garantieren muss. Die Contract-Suites
+  (`LoginAttemptStoreContract`, `RateLimitStoreContract`) prüfen zwei
+  Knoten auf einem Store, und `StoreBackedLoginAttemptPolicy` sperrt pro
+  Konto über alle Adressen.
 - ❌ **Policy-Composing-DSL** — Annotationen und Code sind die
   Konfigurations-Schicht.
 - ❌ **`security-javafx`** — geplant, wartet auf realen JavaFX-Bedarf.
@@ -733,6 +882,12 @@ Alle Module grün.
   `jCustos-crypto-bc`
 - **Lizenz:** EUPL v1.2
 - **Aktuelle Version:** `00.84.00` (§1–§17 dokumentieren den V00.70.00-Kernstand, ergänzt um die mit **V00.84** markierten Änderungen; § 18 das V00.80.00-Delta Betrieb & Forensik; alles Weitere in den `RELEASE-NOTES-*.md`)
+- **Betriebsleitfäden (V00.84):** `docs/security/deployment/reverse-proxy.md`,
+  `docs/security/deployment/reverse-proxy-embedded-jetty.md` (eingebettetes
+  Jetty 12 hinter einem TLS-Proxy: Connector auf Loopback, Cookie-Attribute,
+  kein Server-Banner, `X-Request-ID`, Adresslimit, Origin-Guard),
+  `docs/security/deployment/cluster.md`, `docs/security/csrf.md`,
+  `docs/security/release-verification.md`
 
 ---
 
