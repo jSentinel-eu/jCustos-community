@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Correlation scope of a REST request (R5, JS-SEC-066, CWE-778): audit events
@@ -29,10 +30,12 @@ import java.util.Objects;
  * <p>
  * {@link RestAuthenticationFilter} and {@link RestAuthorizationFilter} run
  * through {@link #run(RestRequest, Runnable)}, so a request that passes them
- * is covered from the filter to the end of the handler. An application that
- * audits before or outside these filters — its own login handler, the
- * {@code RestJCustosVersionFilter} — wraps the request handling itself, ideally
- * as the outermost step:
+ * is covered from the filter to the end of the handler;
+ * {@link RestJCustosVersionFilter} and {@link RestOriginGuard} decide inside
+ * {@link #call(RestRequest, java.util.function.Supplier)}. An application that
+ * audits before or outside these filters — its own login handler on a route
+ * without a jCustos filter, say — wraps the request handling itself, ideally
+ * as the outermost step, so that every filter of the request uses one id:
  * <pre>{@code
  * RestAuditCorrelation.run(request, () -> router.dispatch(request, response));
  * }</pre>
@@ -68,6 +71,31 @@ public final class RestAuditCorrelation {
     try (AuditCorrelation.Scope ignored =
              AuditCorrelation.openFor(RestClientAddress.view(request))) {
       action.run();
+    }
+  }
+
+  /**
+   * {@link #run(RestRequest, Runnable)} for an action with a result: a filter decision such as
+   * {@link RestJCustosVersionFilter#allow(RestRequest, RestResponse)}, or a router that returns
+   * whether it still has a response to write. The scope rules are the same: one is opened when
+   * none is open on this thread and closed in a {@code finally} block, whatever the action
+   * throws; inside an open scope the action runs unchanged; a {@code null} request runs the
+   * action without a scope.
+   *
+   * @param request the request whose correlation id applies, may be {@code null}
+   * @param action  what to run; non-null
+   * @param <T>     the result type
+   * @return what {@code action} returned
+   * @since 00.84.00
+   */
+  public static <T> T call(RestRequest request, Supplier<T> action) {
+    Objects.requireNonNull(action, "action");
+    if (request == null || AuditCorrelation.current().isPresent()) {
+      return action.get();
+    }
+    try (AuditCorrelation.Scope ignored =
+             AuditCorrelation.openFor(RestClientAddress.view(request))) {
+      return action.get();
     }
   }
 }

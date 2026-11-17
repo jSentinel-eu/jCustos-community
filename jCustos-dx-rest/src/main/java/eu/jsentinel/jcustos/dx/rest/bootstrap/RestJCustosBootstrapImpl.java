@@ -18,6 +18,7 @@ import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
+import eu.jsentinel.jcustos.rest.RestOriginGuard;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestSessionRevocation;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
@@ -48,6 +49,18 @@ final class RestJCustosBootstrapImpl
    */
   static final String CODE_SESSION_REVOCATION_INERT = "rest/session-revocation-inert";
 
+  /**
+   * CORS allows credentials, so browsers call the API with a cookie from other origins, and no
+   * {@link RestOriginGuard} is installed: WARNING in PRODUCTION and STRICT, INFO otherwise.
+   *
+   * @since 00.84.00
+   */
+  static final String CODE_CREDENTIALED_CORS_WITHOUT_ORIGIN_GUARD =
+      "rest/credentialed-cors-without-origin-guard";
+
+  /** Source under which {@code .originGuard(...)} lists the installed guard. */
+  static final String SOURCE_ORIGIN_GUARD = "bootstrap-origin-guard";
+
   private static final String RESOLVE_SESSION_ID = "resolveSessionId";
 
   private RestSubjectResolver subjectResolver;
@@ -56,6 +69,7 @@ final class RestJCustosBootstrapImpl
   private RestErrorBodyStrategy errorBodies;
   private RestCorsConfiguration corsConfiguration;
   private RestOpenApiMetadata openApiMetadata;
+  private RestOriginGuard originGuard;
   private boolean installed;
 
   @Override
@@ -117,6 +131,52 @@ final class RestJCustosBootstrapImpl
   public RestJCustosBootstrap discoverHandlers(RestHandlerDiscovery discovery) {
     this.handlerDiscovery = Objects.requireNonNull(discovery, "discovery");
     return this;
+  }
+
+  @Override
+  public RestJCustosBootstrap originGuard(RestOriginGuard guard) {
+    this.originGuard = Objects.requireNonNull(guard, "guard");
+    return this;
+  }
+
+  /**
+   * CSRF (CWE-352): installs the guard configured through {@code .originGuard(...)}. Without
+   * one nothing is touched - an application may have installed a guard itself.
+   */
+  private void installOriginGuard(List<RegisteredJCustosService> services) {
+    if (originGuard == null) {
+      return;
+    }
+    RestOriginGuard.install(originGuard);
+    services.add(new RegisteredJCustosService(
+        RestOriginGuard.class, RestOriginGuard.class, SOURCE_ORIGIN_GUARD, false));
+  }
+
+  /**
+   * CSRF (CWE-352): {@code allowCredentials(true)} says that browsers call this API from the
+   * pages of other origins and send their cookies along. If the session rides on such a
+   * cookie, every state-changing endpoint can be triggered by any page the user visits - CORS
+   * decides who may <em>read</em> a response, not who may <em>send</em> a request. Reported
+   * when no {@link RestOriginGuard} is installed, by {@code .originGuard(...)} or by the
+   * application.
+   */
+  private void reportCredentialedCorsWithoutOriginGuard(List<JCustosBootstrapWarning> warnings) {
+    if (!corsConfiguration.allowCredentials() || RestOriginGuard.installed().isPresent()) {
+      return;
+    }
+    Severity severity = switch (state.mode()) {
+      case PRODUCTION, STRICT -> Severity.WARNING;
+      default -> Severity.INFO;
+    };
+    warnings.add(new JCustosBootstrapWarning(
+        severity,
+        CODE_CREDENTIALED_CORS_WITHOUT_ORIGIN_GUARD,
+        "CORS allows credentials, but no RestOriginGuard is installed: if the REST session "
+            + "rides on a cookie, any web page can send state-changing requests in the "
+            + "user's name (CSRF).",
+        "Install the guard with .originGuard(RestOriginGuard.sameOrigin().withAllowedOrigins("
+            + "Set.of(...))), naming the API's own public origin and the allowed CORS origins; "
+            + "with bearer tokens only, drop allowCredentials(true)."));
   }
 
   /**
@@ -318,6 +378,8 @@ final class RestJCustosBootstrapImpl
 
     publishSessionStore(services, warnings);
 
+    installOriginGuard(services);
+
     // V00.74 (A2.2): publish CORS configuration when configured.
     if (corsConfiguration != null) {
       // R009: a wildcard origin combined with allowCredentials(true) is an
@@ -353,6 +415,7 @@ final class RestJCustosBootstrapImpl
             RestCorsContext.class, RestCorsConfiguration.class,
             "bootstrap-cors", false));
       }
+      reportCredentialedCorsWithoutOriginGuard(warnings);
     }
     // V00.74 (A2.2): publish OpenAPI metadata when configured.
     if (openApiMetadata != null) {

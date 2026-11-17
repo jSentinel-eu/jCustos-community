@@ -102,6 +102,13 @@ Audit + sessions are in-memory (ring buffer + map). Layer 2
   repeated `Authorization`, `X-Api-Key` or `Cookie` header with 400
   before anything runs and builds the `RestRequest` with
   `RestHeaderLines` (JS-SEC-113).
+- **One correlation id per request, guard first.** The `Router` runs
+  guard, filters and handler inside `RestAuditCorrelation.call(...)`,
+  so the login handler's own `LoginSucceeded` and the version filter's
+  `SessionStale` carry the same `corr=` as the filters' events (R5).
+  Its first step is a `RestOriginGuard` installed with
+  `.originGuard(...)` - a no-op in this bearer-token skill, the CSRF
+  protection once the session moves into a cookie.
 - **Per-request session checks.** `MyRestSubjectResolver` reports
   session metadata (idle / absolute lifetime), the version snapshot
   (drift, layer 3) and `resolveSessionId`; the login saves a
@@ -141,6 +148,18 @@ grants access until logout, revocation, or the session policy's idle
 deployments add device binding or move to short-lived JWT +
 refresh-token flow (`jCustos-rest`'s `TokenService` shipping in
 V00.71).
+
+### Cookie sessions need the origin guard
+
+The skill authenticates with bearer tokens, which a browser never sends
+on its own: no CSRF exposure, nothing to configure. If you move the
+session into a cookie, every state-changing route becomes reachable
+from any page the user visits. Install the guard -
+`.originGuard(RestOriginGuard.sameOrigin())`, behind a proxy with
+`.withAllowedOrigins(Set.of("https://app.example"))` - and keep the
+`Router`'s first step. Credentialed CORS without a guard is reported as
+`rest/credentialed-cors-without-origin-guard`. Background and the
+interplay with `SameSite`: `docs/security/csrf.md`.
 
 ### Audit-sink at scale
 

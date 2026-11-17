@@ -66,6 +66,9 @@ import java.util.function.BooleanSupplier;
  * <p>R5 (JS-SEC-066, CWE-778): every overload runs the decision and the handler inside the
  * correlation scope of the request ({@link RestAuditCorrelation}), so the audit events of the
  * request carry its correlation id.
+ *
+ * <p>CSRF (CWE-352): a {@link RestOriginGuard} installed for the process runs first, public
+ * routes included; a request it refuses gets its {@code 403} and is not evaluated further.
  */
 public final class RestAuthorizationFilter {
 
@@ -306,6 +309,11 @@ public final class RestAuthorizationFilter {
       BooleanSupplier publicRoute,
       String operation,
       Map<String, Object> attributes) {
+    // CSRF (CWE-352): an installed RestOriginGuard runs before anything else is looked at and
+    // renders its 403 through this filter's mapper. A no-op unless a guard is installed.
+    if (RestOriginGuard.refuseIfCrossOrigin(request, response, decisionMapper(), auditService)) {
+      return;
+    }
     if (pair.isEmpty()) {
       // JS-SEC-024 (CWE-862): fail closed on an un-annotated handler when
       // deny-by-default is enabled, unless the element opts back in via

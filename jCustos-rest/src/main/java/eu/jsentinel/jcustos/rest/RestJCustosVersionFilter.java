@@ -68,6 +68,15 @@ import static java.util.Objects.requireNonNull;
  * filter runs in front of one of the other two, a revoked session is refused
  * here and the store is read once more for a session that is not.
  *
+ * <p>R5 (JS-SEC-066, CWE-778): {@code allow} decides inside the correlation
+ * scope of the request ({@link RestAuditCorrelation#call}), so its
+ * {@code SessionInvalidated} and {@code SessionStale} events carry the
+ * request's correlation id; inside a scope the application opened, that
+ * scope's id.
+ *
+ * <p>CSRF (CWE-352): a {@link RestOriginGuard} installed for the process runs
+ * first; {@code allow} returns {@code false} for a request it refuses.
+ *
  * <p>If the {@link RestSubjectResolver} does not surface a
  * {@link RestJCustosVersionContext} (the default), the drift check is
  * skipped and the filter returns {@code true} unless the session was
@@ -110,6 +119,17 @@ public final class RestJCustosVersionFilter {
   public boolean allow(RestRequest request, RestResponse response, String route) {
     requireNonNull(request, "request must not be null");
     requireNonNull(response, "response must not be null");
+    // R5 (JS-SEC-066, CWE-778): the SessionInvalidated and SessionStale events of this filter
+    // carry the request's correlation id, like the events of the other two filters.
+    return RestAuditCorrelation.call(request, () -> allowInScope(request, response, route));
+  }
+
+  private boolean allowInScope(RestRequest request, RestResponse response, String route) {
+    // CSRF (CWE-352): an installed RestOriginGuard runs before anything else is looked at and
+    // writes its 403 itself. A no-op unless a guard is installed.
+    if (RestOriginGuard.refuseIfCrossOrigin(request, response, null, null)) {
+      return false;
+    }
     // JS-SEC-131 (CWE-613): a revoked session is refused before anything else is looked at,
     // as in the other two filters. A no-op unless a SessionStore is registered and the resolver
     // reports a session id; RestSessionRevocation wrote the 401 and the audit event.

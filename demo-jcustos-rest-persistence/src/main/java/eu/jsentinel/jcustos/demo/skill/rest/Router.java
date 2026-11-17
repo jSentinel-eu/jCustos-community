@@ -6,10 +6,12 @@ import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
+import eu.jsentinel.jcustos.rest.RestAuditCorrelation;
 import eu.jsentinel.jcustos.rest.RestAuthorizationFilter;
 import eu.jsentinel.jcustos.rest.RestDecisionContext;
 import eu.jsentinel.jcustos.rest.RestHeaderLines;
 import eu.jsentinel.jcustos.rest.RestJCustosVersionFilter;
+import eu.jsentinel.jcustos.rest.RestOriginGuard;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
@@ -48,6 +50,15 @@ import java.util.Set;
  *   <li>The route is chosen by HTTP method and path pattern
  *       ({@code /api/users/{id}/roles/{role}}); the most specific
  *       pattern wins, a path with extra segments matches nothing.</li>
+ *   <li>Everything below runs inside one audit correlation scope
+ *       ({@link RestAuditCorrelation}, R5): the filters' events and the
+ *       handlers' own ones (login, logout) carry the same request id.</li>
+ *   <li>A {@link RestOriginGuard} installed with
+ *       {@code .originGuard(...)} runs first and refuses a
+ *       state-changing request from a foreign origin with 403 (CSRF).
+ *       This demo authenticates with bearer tokens, which a browser
+ *       never sends on its own, and installs none; an application whose
+ *       session rides on a cookie does.</li>
  *   <li>For a route that is not {@link PublicRoute @PublicRoute}, the
  *       {@link RestJCustosVersionFilter} refuses a session whose
  *       security version drifted (only when a version store is
@@ -114,16 +125,10 @@ public final class Router implements HttpHandler, HasLogger {
       exchange.setAttribute(REST_REQUEST_ATTRIBUTE, request);
       exchange.setAttribute(PATH_VARIABLES_ATTRIBUTE, match.get().variables());
 
-      if (versionFilter != null && !route.isPublic() && !versionFilter.allow(request, response)) {
-        response.writeTo(exchange);
-        return;
-      }
-      boolean[] invoked = {false};
-      authorization.authorizeAndHandle(request, response, (req, resp) -> {
-        invoked[0] = true;
-        route.invoke(exchange, resolver.resolveSubject(req).orElse(null));
-      }, route.method(), route.handlerClass());
-      if (!invoked[0]) {
+      // R5 (JS-SEC-066): one correlation scope for guard, filters and handler
+      boolean refused = RestAuditCorrelation.call(request,
+          () -> dispatch(exchange, request, route, response));
+      if (refused) {
         response.writeTo(exchange);
       }
     } catch (RuntimeException failure) {
@@ -133,6 +138,29 @@ public final class Router implements HttpHandler, HasLogger {
     } finally {
       exchange.close();
     }
+  }
+
+  /**
+   * Runs guard, filters and handler of a matched route.
+   *
+   * @return {@code true} when a filter refused the request and its buffered
+   *         answer still has to be written; the handler has not run
+   */
+  private boolean dispatch(HttpExchange exchange, RestRequest request, Route route,
+                           BufferedResponse response) {
+    // CSRF (CWE-352): the outermost filter; a no-op unless .originGuard(...) installed one.
+    if (RestOriginGuard.installed().map(guard -> !guard.allow(request, response)).orElse(false)) {
+      return true;
+    }
+    if (versionFilter != null && !route.isPublic() && !versionFilter.allow(request, response)) {
+      return true;
+    }
+    boolean[] invoked = {false};
+    authorization.authorizeAndHandle(request, response, (req, resp) -> {
+      invoked[0] = true;
+      route.invoke(exchange, resolver.resolveSubject(req).orElse(null));
+    }, route.method(), route.handlerClass());
+    return !invoked[0];
   }
 
   private Optional<Match> match(String method, String path) {

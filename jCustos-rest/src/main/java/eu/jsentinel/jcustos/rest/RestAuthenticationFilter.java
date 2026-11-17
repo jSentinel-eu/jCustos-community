@@ -59,6 +59,9 @@ import java.util.Optional;
  * R5 (JS-SEC-066, CWE-778): the filter and the handler run inside the
  * correlation scope of the request ({@link RestAuditCorrelation}), so every
  * audit event of the request carries its correlation id.
+ * <p>
+ * CSRF (CWE-352): a {@link RestOriginGuard} installed for the process runs
+ * first; a request it refuses gets its {@code 403} and is not looked at further.
  */
 public final class RestAuthenticationFilter {
 
@@ -74,6 +77,11 @@ public final class RestAuthenticationFilter {
   }
 
   private void authenticate(RestRequest request, RestResponse response, RestHandler handler) {
+    // CSRF (CWE-352): an installed RestOriginGuard runs before anything else is looked at and
+    // writes its 403 itself. A no-op unless a guard is installed.
+    if (RestOriginGuard.refuseIfCrossOrigin(request, response, null, null)) {
+      return;
+    }
     Optional<JCustosSubject> subject = subjectResolver.resolveSubject(request);
     if (subject.isEmpty()) {
       // JS-SEC-086 (CWE-778): render through the published mapper (status, challenge, body

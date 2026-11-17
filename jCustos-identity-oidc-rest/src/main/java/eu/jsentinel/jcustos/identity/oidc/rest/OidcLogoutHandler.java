@@ -21,17 +21,15 @@ import eu.jsentinel.jcustos.identity.oidc.RpInitiatedLogoutInitiator;
 import eu.jsentinel.jcustos.oidc.api.LogoutInitiator;
 import eu.jsentinel.jcustos.oidc.api.LogoutRequest;
 import eu.jsentinel.jcustos.rest.RestHandler;
+import eu.jsentinel.jcustos.rest.RestOriginGuard;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 
 import java.net.URI;
-import java.util.Locale;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
  * The REST-side OIDC RP-initiated-logout handler (V00.78). Builds the
@@ -56,7 +54,12 @@ import java.util.stream.Collectors;
  *       {@code POST}, non-browser clients need not.</li>
  * </ul>
  * Map the route as {@code POST} and trigger it from a form or {@code fetch} of the
- * application itself.
+ * application itself. Since 00.84.00 the {@code Origin} comparison is
+ * {@link RestOriginGuard#originAccepted(RestRequest)}, the one the opt-in
+ * {@code RestOriginGuard} applies to every state-changing request: an origin is compared
+ * exactly on scheme, host and port, and a value with a path, user information, query or
+ * fragment is refused. The handler does not consult {@code Sec-Fetch-Site}, writes its
+ * {@code 403} without a body and audits nothing, as before.
  *
  * <p><strong>Where the provider may send the user afterwards (JS-SEC-089, CWE-601).</strong>
  * Until 00.84.00 the two-argument constructor silently forwarded any
@@ -84,14 +87,12 @@ public final class OidcLogoutHandler implements RestHandler {
   private static final String METHOD_POST = "POST";
   private static final String HEADER_ALLOW = "Allow";
   private static final String HEADER_LOCATION = "Location";
-  private static final String HEADER_ORIGIN = "Origin";
-  private static final String HEADER_HOST = "Host";
 
   private final URI endSessionEndpoint;
   private final LogoutInitiator initiator;
   private final LogoutRequestResolver resolver;
-  /** Normalised {@code scheme://host[:port]} values; empty means "same host as the request". */
-  private final Set<String> allowedOrigins;
+  /** Decides the {@code Origin} header: the request's {@code Host}, or the allowed origins. */
+  private final RestOriginGuard originGuard;
 
   /**
    * A handler whose initiator has no redirect allowlist (JS-SEC-089, CWE-601): every
@@ -119,15 +120,15 @@ public final class OidcLogoutHandler implements RestHandler {
    */
   public OidcLogoutHandler(URI endSessionEndpoint, LogoutInitiator initiator,
       LogoutRequestResolver resolver) {
-    this(endSessionEndpoint, initiator, resolver, Set.of());
+    this(endSessionEndpoint, initiator, resolver, RestOriginGuard.sameOrigin());
   }
 
   private OidcLogoutHandler(URI endSessionEndpoint, LogoutInitiator initiator,
-      LogoutRequestResolver resolver, Set<String> allowedOrigins) {
+      LogoutRequestResolver resolver, RestOriginGuard originGuard) {
     this.endSessionEndpoint = Objects.requireNonNull(endSessionEndpoint, "endSessionEndpoint");
     this.initiator = Objects.requireNonNull(initiator, "initiator");
     this.resolver = Objects.requireNonNull(resolver, "resolver");
-    this.allowedOrigins = allowedOrigins;
+    this.originGuard = originGuard;
   }
 
   /**
@@ -139,18 +140,13 @@ public final class OidcLogoutHandler implements RestHandler {
    *                {@code https://app.example}; scheme and host are compared
    *                case-insensitively, a default port may be left out; non-null, not empty
    * @return a new handler; this one is unchanged
+   * @throws IllegalArgumentException when the set is empty or a value is not an origin
+   *                                  (see {@link RestOriginGuard#withAllowedOrigins(Set)})
    * @since 00.84.00
    */
   public OidcLogoutHandler withAllowedOrigins(Set<String> origins) {
-    Objects.requireNonNull(origins, "origins");
-    Set<String> normalised = origins.stream()
-        .map(origin -> normaliseOrigin(origin).orElseThrow(() -> new IllegalArgumentException(
-            "not an origin (scheme://host[:port]): " + origin)))
-        .collect(Collectors.toUnmodifiableSet());
-    if (normalised.isEmpty()) {
-      throw new IllegalArgumentException("origins must not be empty");
-    }
-    return new OidcLogoutHandler(endSessionEndpoint, initiator, resolver, normalised);
+    return new OidcLogoutHandler(endSessionEndpoint, initiator, resolver,
+        originGuard.withAllowedOrigins(origins));
   }
 
   @Override
@@ -162,7 +158,7 @@ public final class OidcLogoutHandler implements RestHandler {
       return;
     }
     // JS-SEC-147 (CWE-352): a cross-origin POST carries the foreign Origin.
-    if (!originAccepted(request)) {
+    if (!originGuard.originAccepted(request)) {
       response.status(HttpStatus.FORBIDDEN.code());
       return;
     }
@@ -170,78 +166,6 @@ public final class OidcLogoutHandler implements RestHandler {
     URI redirect = initiator.buildLogoutUri(endSessionEndpoint, logout);
     response.status(HttpStatus.FOUND.code());
     response.header(HEADER_LOCATION, redirect.toString());
-  }
-
-  private boolean originAccepted(RestRequest request) {
-    String origin = header(request, HEADER_ORIGIN);
-    if (origin == null || origin.isBlank()) {
-      return true;
-    }
-    Optional<String> normalised = normaliseOrigin(origin);
-    if (normalised.isEmpty()) {
-      // "null" (sandboxed frame, redirect chain) and anything unparsable
-      return false;
-    }
-    if (!allowedOrigins.isEmpty()) {
-      return allowedOrigins.contains(normalised.get());
-    }
-    String host = header(request, HEADER_HOST);
-    if (host == null || host.isBlank()) {
-      return false;
-    }
-    // the scheme of the request is not part of the abstraction; host and port decide
-    String originAuthority = normalised.get().substring(normalised.get().indexOf("://") + 3);
-    String requestHost = host.trim().toLowerCase(Locale.ROOT);
-    return originAuthority.equals(requestHost)
-        || originAuthority.equals(withoutDefaultPort(requestHost));
-  }
-
-  /** Header lookup that does not depend on how the adapter spells header names. */
-  private static String header(RestRequest request, String name) {
-    Map<String, String> headers = request.headers();
-    if (headers == null) {
-      return null;
-    }
-    for (Map.Entry<String, String> entry : headers.entrySet()) {
-      if (name.equalsIgnoreCase(entry.getKey())) {
-        return entry.getValue();
-      }
-    }
-    return null;
-  }
-
-  /** @return {@code scheme://host[:port]} in lower case without a default port, if it is an origin */
-  private static Optional<String> normaliseOrigin(String origin) {
-    if (origin == null) {
-      return Optional.empty();
-    }
-    try {
-      URI uri = URI.create(origin.trim());
-      String scheme = uri.getScheme();
-      String host = uri.getHost();
-      if (scheme == null || host == null) {
-        return Optional.empty();
-      }
-      scheme = scheme.toLowerCase(Locale.ROOT);
-      host = host.toLowerCase(Locale.ROOT);
-      int port = uri.getPort();
-      boolean defaultPort = port == -1
-          || ("https".equals(scheme) && port == 443)
-          || ("http".equals(scheme) && port == 80);
-      return Optional.of(scheme + "://" + host + (defaultPort ? "" : ":" + port));
-    } catch (IllegalArgumentException notAUri) {
-      return Optional.empty();
-    }
-  }
-
-  private static String withoutDefaultPort(String host) {
-    if (host.endsWith(":443")) {
-      return host.substring(0, host.length() - 4);
-    }
-    if (host.endsWith(":80")) {
-      return host.substring(0, host.length() - 3);
-    }
-    return host;
   }
 
   /**

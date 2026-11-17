@@ -10,7 +10,9 @@
  */
 package eu.jsentinel.jcustos.dx.rest.bootstrap;
 
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.dx.bootstrap.CommonJCustosBootstrap;
+import eu.jsentinel.jcustos.rest.RestOriginGuard;
 import eu.jsentinel.jcustos.rest.RestSubjectResolver;
 
 import java.util.function.Consumer;
@@ -98,4 +100,45 @@ public interface RestJCustosBootstrap
    * @since 00.82.00
    */
   RestJCustosBootstrap discoverHandlers(RestHandlerDiscovery discovery);
+
+  /**
+   * Installs a {@link RestOriginGuard} for the process (CSRF, CWE-352): state-changing
+   * requests ({@code POST}, {@code PUT}, {@code PATCH}, {@code DELETE}, …) that a browser
+   * sends on behalf of another origin are refused with {@code 403} through the published
+   * decision mapper and audited as {@code AccessDenied} with reason
+   * {@value RestOriginGuard#REASON_ORIGIN_MISMATCH}.
+   *
+   * <p>{@code install()} calls {@link RestOriginGuard#install(RestOriginGuard)} and lists the
+   * guard as {@code bootstrap-origin-guard}. jCustos ships no request pipeline, so the guard
+   * is registered, not wired: the application's router runs it as its outermost filter, the
+   * first step of every route, in front of the jCustos filters and the handler:
+   * <pre>{@code
+   * if (RestOriginGuard.installed().map(guard -> !guard.allow(request, response)).orElse(false)) {
+   *   return;                      // 403 written and audited
+   * }
+   * }</pre>
+   * The skill templates' {@code Router} does this. The jCustos REST filters run the installed
+   * guard before their own checks as well; a route that passes neither the router step nor a
+   * jCustos filter is not protected.
+   *
+   * <pre>{@code
+   * RestSecurity.bootstrap()
+   *     .cors(c -> c.allowedOrigins("https://app.example").allowCredentials(true))
+   *     .originGuard(RestOriginGuard.sameOrigin()
+   *         .withAllowedOrigins(Set.of("https://api.example", "https://app.example")))
+   *     .install();
+   * }</pre>
+   *
+   * <p>Only for cookie-based sessions: a bearer token is not sent by the browser on its own.
+   * Without the guard, a CORS configuration that allows credentials is reported as
+   * {@code rest/credentialed-cors-without-origin-guard} (WARNING in PRODUCTION and STRICT,
+   * INFO otherwise). Without this call nothing is touched: a guard the application installed
+   * itself stays.
+   *
+   * @param guard the guard; non-null
+   * @return this builder
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  RestJCustosBootstrap originGuard(RestOriginGuard guard);
 }

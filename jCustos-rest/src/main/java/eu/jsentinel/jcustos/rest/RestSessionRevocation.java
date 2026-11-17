@@ -220,7 +220,10 @@ public final class RestSessionRevocation {
     requireNonNull(resolver, "resolver must not be null");
     requireNonNull(request, "request must not be null");
     requireNonNull(response, "response must not be null");
-    return !refuseIfRevoked(resolver, request, response, null, null, null);
+    // R5 (JS-SEC-066): called outside the filters, so the SessionInvalidated it may publish
+    // needs a correlation scope of its own; inside an open scope that scope's id is kept.
+    return RestAuditCorrelation.call(request,
+        () -> !refuseIfRevoked(resolver, request, response, null, null, null));
   }
 
   /**

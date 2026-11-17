@@ -398,6 +398,32 @@ class RestSessionRevocationTest {
   }
 
   @Test
+  @DisplayName("R5: allow(...) outside the filters publishes its SessionInvalidated inside a correlation scope")
+  void standAloneCheck_auditsWithACorrelationId() {
+    RestSessionRevocation.useSessionStore(store);
+    store.save(record(SESSION, SessionStatus.REVOKED));
+    List<Optional<String>> idsAtPublish = new java.util.ArrayList<>();
+    JCustosServiceResolver.setJCustosAuditService(new JCustosAuditService() {
+      @Override public void publish(AuditEvent event) {
+        if (event instanceof SessionInvalidated) {
+          idsAtPublish.add(eu.jsentinel.jcustos.audit.AuditCorrelation.current());
+        }
+      }
+
+      @Override public List<AuditEvent> query(AuditQuery query) {
+        return List.of();
+      }
+    });
+
+    assertFalse(RestSessionRevocation.allow(resolver, request(TOKEN), new RecordingResponse()));
+
+    assertEquals(1, idsAtPublish.size(), "one SessionInvalidated for the refused request");
+    assertTrue(idsAtPublish.get(0).isPresent(), "the event must be published inside a correlation scope");
+    assertTrue(eu.jsentinel.jcustos.audit.AuditCorrelation.current().isEmpty(),
+        "the scope must not outlive the call");
+  }
+
+  @Test
   @DisplayName("the holder: a new store forgets the records seen in the old one; null switches the check off")
   void holderSemantics() {
     RestSessionRevocation.useSessionStore(store);
