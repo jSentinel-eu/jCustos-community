@@ -122,6 +122,17 @@
           </systemPropertyVariables>
         </configuration>
       </plugin>
+      <!-- PIT does not read Surefire's systemPropertyVariables; without the
+           property the suite is red before the first mutation. -->
+      <plugin>
+        <groupId>org.pitest</groupId>
+        <artifactId>pitest-maven</artifactId>
+        <configuration>
+          <jvmArgs>
+            <jvmArg>-Djcustos.test.proxybuilder.version=${proxybuilder.version}</jvmArg>
+          </jvmArgs>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>license-maven-plugin</artifactId>

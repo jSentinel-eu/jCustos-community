@@ -436,9 +436,10 @@ Library test totals as of V00.70.00:
 ./mvnw -pl :jCustos-core org.pitest:pitest-maven:mutationCoverage
 ```
 
-The parent POM pins `pitest-test-classes=com.svenruppert.*`. Reports
-land under `<module>/target/pit-reports/index.html`. Current state per
-library module (V00.70.00):
+The parent POM pins `pitest-prod-classes` and `pitest-test-classes` to
+`eu.jsentinel.jcustos.*`. Reports land under
+`<module>/target/pit-reports/index.html`. Last published state per
+library module (V00.70.00; a new baseline follows with 00.84.00):
 
 | Module | Coverage | Tests |
 |---|---:|---:|

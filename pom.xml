@@ -150,8 +150,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-        <pitest-prod-classes>com.svenruppert.*</pitest-prod-classes>
-        <pitest-test-classes>com.svenruppert.*</pitest-test-classes>
+        <pitest-prod-classes>eu.jsentinel.jcustos.*</pitest-prod-classes>
+        <pitest-test-classes>eu.jsentinel.jcustos.*</pitest-test-classes>
 
         <junit-platform-maven-plugin.timeout>300</junit-platform-maven-plugin.timeout>
 
