@@ -1,3 +1,4 @@
 eu.jsentinel.jcustos.ApplicationServiceInitListener
 eu.jsentinel.jcustos.authorization.impl.AuthorizationListener
 eu.jsentinel.jcustos.session.vaadin.SessionLifetimeListener
+eu.jsentinel.jcustos.net.vaadin.VaadinAuditCorrelation

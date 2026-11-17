@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.authorization.api;
 
 import eu.jsentinel.jcustos.action.ActionAuthorizationService;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.logout.LogoutService;
@@ -338,6 +339,44 @@ public final class JCustosServiceResolver {
    */
   public static void setClientAddressResolver(ClientAddressResolver resolver) {
     DEFAULT.setClientAddressResolver(resolver);
+  }
+
+  // ── CorrelationIdResolver ──────────────────────────────────────
+
+  /**
+   * Returns the registered {@link CorrelationIdResolver}, or the default if no
+   * SPI implementation is configured (R5, JS-SEC-066, CWE-778): a
+   * {@code TrustedPeerCorrelationIdResolver} that takes {@code X-Request-ID}
+   * only from a peer the registered {@link ClientAddressResolver} trusts and
+   * generates a UUID otherwise. Never throws.
+   *
+   * @return the resolver, never {@code null}
+   * @since 00.84.00
+   */
+  public static CorrelationIdResolver correlationIdResolver() {
+    return DEFAULT.correlationIdResolver();
+  }
+
+  /**
+   * Returns the registered {@link CorrelationIdResolver}, or empty if none is
+   * configured. Use {@link #correlationIdResolver()} for the default fallback.
+   *
+   * @return the SPI-registered or explicitly set resolver, or empty
+   * @since 00.84.00
+   */
+  public static Optional<CorrelationIdResolver> findCorrelationIdResolver() {
+    return DEFAULT.findCorrelationIdResolver();
+  }
+
+  /**
+   * Replaces the cached {@link CorrelationIdResolver}. Intended for the DX
+   * bootstrap, tests and applications that prefer programmatic wiring over SPI.
+   *
+   * @param resolver the resolver, or {@code null} to clear
+   * @since 00.84.00
+   */
+  public static void setCorrelationIdResolver(CorrelationIdResolver resolver) {
+    DEFAULT.setCorrelationIdResolver(resolver);
   }
 
   // ── SessionPolicy ──────────────────────────────────────────────

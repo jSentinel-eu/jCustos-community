@@ -33,6 +33,11 @@ import java.util.Objects;
  * ({@code eu.jsentinel.jcustos.audit}) — the {@code HasLogger} Shape-4
  * "audit/metrics stream" pattern — so operators can route it to its own
  * appender. The {@code (Logger)} constructor remains a test/injection seam.
+ * <p>
+ * R5 (JS-SEC-066, CWE-778): inside a request the line ends with
+ * {@code corr=<correlation id>} ({@link AuditCorrelation#current()}), scrubbed
+ * like every other field, so it can be matched with the reverse proxy's log
+ * line for the same request. Outside a request the field is absent.
  */
 public final class LoggingAuditSink implements AuditSink {
 
@@ -229,6 +234,8 @@ public final class LoggingAuditSink implements AuditSink {
         appendField(sb, "reason", e.reason());
       }
     }
+    // R5 (JS-SEC-066): last, so the fields before it keep their positions
+    appendField(sb, "corr", AuditCorrelation.current().orElse(null));
     return sb.toString();
   }
 

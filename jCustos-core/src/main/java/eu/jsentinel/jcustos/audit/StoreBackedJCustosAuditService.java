@@ -47,6 +47,10 @@ import static java.util.Objects.requireNonNull;
  * does propagate them — read-side failures are an explicit caller
  * concern. The {@code (Logger)} constructor is a test / injection seam
  * mirroring {@link LoggingAuditSink}.
+ *
+ * <p>R5 (JS-SEC-066, CWE-778): every event is appended with the correlation id
+ * of the request it was recorded in ({@link AuditCorrelation#current()}), or
+ * without one outside a request.
  */
 @ExperimentalJCustosApi
 public final class StoreBackedJCustosAuditService implements JCustosAuditService {
@@ -99,7 +103,7 @@ public final class StoreBackedJCustosAuditService implements JCustosAuditService
       return;
     }
     try {
-      store.append(tenant, event);
+      store.append(tenant, event, AuditCorrelation.current().orElse(null));
     } catch (RuntimeException ex) {
       // R036: never propagate — audit failure must not interrupt the security
       // flow — but a failing store is a persistent-audit-trail gap, so log it

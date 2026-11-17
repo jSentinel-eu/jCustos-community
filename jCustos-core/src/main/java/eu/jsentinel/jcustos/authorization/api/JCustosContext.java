@@ -19,7 +19,9 @@ package eu.jsentinel.jcustos.authorization.api;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.action.ActionAuthorizationService;
 import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.audit.TrustedPeerCorrelationIdResolver;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.logout.NoopLogoutService;
@@ -137,6 +139,12 @@ public final class JCustosContext {
       new AtomicReference<>();
   // V00.84 (JS-SEC-061, CWE-348): which address identifies the client.
   private final AtomicReference<ClientAddressResolver> clientAddressResolverRef =
+      new AtomicReference<>();
+  // V00.84 (R5, JS-SEC-066, CWE-778): which correlation id a request's audit records carry.
+  private final AtomicReference<CorrelationIdResolver> correlationIdResolverRef =
+      new AtomicReference<>();
+  /** R5: the resolver {@link #correlationIdResolver()} created as its default, if any. */
+  private final AtomicReference<CorrelationIdResolver> defaultedCorrelationIdResolverRef =
       new AtomicReference<>();
   private final AtomicReference<String> stepUpRouteNameRef =
       new AtomicReference<>();
@@ -673,6 +681,80 @@ public final class JCustosContext {
    */
   public void setClientAddressResolver(ClientAddressResolver resolver) {
     clientAddressResolverRef.set(resolver);
+  }
+
+  // ── CorrelationIdResolver ──────────────────────────────────────
+
+  /**
+   * Returns the registered {@link CorrelationIdResolver}, or the default if no
+   * SPI implementation is configured (R5, JS-SEC-066, CWE-778): a
+   * {@link TrustedPeerCorrelationIdResolver} that takes {@code X-Request-ID}
+   * only from a peer this context's {@link #clientAddressResolver()} trusts —
+   * looked up per request, so a client-address resolver registered later
+   * applies — and generates a UUID otherwise. This method <strong>never</strong>
+   * throws.
+   *
+   * @return the resolver, never {@code null}
+   * @since 00.84.00
+   */
+  public CorrelationIdResolver correlationIdResolver() {
+    CorrelationIdResolver cached = correlationIdResolverRef.get();
+    if (cached != null) {
+      return cached;
+    }
+
+    CorrelationIdResolver loaded = findSingleService(
+        CorrelationIdResolver.class,
+        ServiceLoader.load(CorrelationIdResolver.class))
+        .orElseGet(this::defaultCorrelationIdResolver);
+
+    correlationIdResolverRef.compareAndSet(null, loaded);
+    return correlationIdResolverRef.get();
+  }
+
+  /**
+   * One default instance per context, recorded before it is cached, so
+   * {@link #findCorrelationIdResolver()} recognises it even when two threads
+   * resolve the default at the same time.
+   */
+  private CorrelationIdResolver defaultCorrelationIdResolver() {
+    defaultedCorrelationIdResolverRef.compareAndSet(null, new TrustedPeerCorrelationIdResolver(
+        this::clientAddressResolver, TrustedPeerCorrelationIdResolver.X_REQUEST_ID));
+    return defaultedCorrelationIdResolverRef.get();
+  }
+
+  /**
+   * Returns the registered {@link CorrelationIdResolver}, or empty if none is
+   * configured. Use {@link #correlationIdResolver()} for the default fallback;
+   * diagnostics use this method to tell a default from a registration.
+   *
+   * @return the SPI-registered or explicitly set resolver, or empty
+   * @since 00.84.00
+   */
+  public Optional<CorrelationIdResolver> findCorrelationIdResolver() {
+    CorrelationIdResolver cached = correlationIdResolverRef.get();
+    if (cached != null) {
+      return cached == defaultedCorrelationIdResolverRef.get()
+          ? Optional.empty()
+          : Optional.of(cached);
+    }
+
+    Optional<CorrelationIdResolver> loaded = findSingleService(
+        CorrelationIdResolver.class,
+        ServiceLoader.load(CorrelationIdResolver.class));
+    loaded.ifPresent(resolver -> correlationIdResolverRef.compareAndSet(null, resolver));
+    return loaded;
+  }
+
+  /**
+   * Replaces the cached {@link CorrelationIdResolver}. Intended for the DX
+   * bootstrap, tests and applications that prefer programmatic wiring over SPI.
+   *
+   * @param resolver the resolver, or {@code null} to clear
+   * @since 00.84.00
+   */
+  public void setCorrelationIdResolver(CorrelationIdResolver resolver) {
+    correlationIdResolverRef.set(resolver);
   }
 
   // ── SessionPolicy ──────────────────────────────────────────────
@@ -1475,6 +1557,8 @@ public final class JCustosContext {
     securityVersionStoreRef.set(null);
     subjectIdResolverRef.set(null);
     clientAddressResolverRef.set(null);
+    correlationIdResolverRef.set(null);
+    defaultedCorrelationIdResolverRef.set(null);
     stepUpRouteNameRef.set(null);
     loginRouteNameRef.set(null);
     denyByDefaultRef.set(false);

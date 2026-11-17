@@ -26,6 +26,7 @@ import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
@@ -182,6 +183,12 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
   @Override
   public B clientAddress(ClientAddressResolver resolver) {
     state.clientAddressResolver(Objects.requireNonNull(resolver, "resolver"));
+    return self();
+  }
+
+  @Override
+  public B correlationIds(CorrelationIdResolver resolver) {
+    state.correlationIdResolver(Objects.requireNonNull(resolver, "resolver"));
     return self();
   }
 
@@ -1384,6 +1391,13 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       JCustosServiceResolver.setClientAddressResolver(state.clientAddressResolver());
       services.add(new RegisteredJCustosService(
           ClientAddressResolver.class, state.clientAddressResolver().getClass(),
+          "bootstrap-explicit", false));
+    }
+    if (state.correlationIdResolver() != null) {
+      // R5 (JS-SEC-066, CWE-778): the resolver decides which correlation id audit records carry.
+      JCustosServiceResolver.setCorrelationIdResolver(state.correlationIdResolver());
+      services.add(new RegisteredJCustosService(
+          CorrelationIdResolver.class, state.correlationIdResolver().getClass(),
           "bootstrap-explicit", false));
     }
     // R029: rateLimit / apiKeys / refreshTokens have no global resolver setter,

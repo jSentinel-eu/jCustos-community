@@ -51,9 +51,20 @@ final class EclipseStoreAuditEventStore implements AuditEventStore {
 
   @Override
   public AuditEnvelope append(TenantId tenant, AuditEvent event) {
+    return append(tenant, event, null);
+  }
+
+  /**
+   * Persists the correlation id with the envelope (R5, JS-SEC-066). Envelopes
+   * written before 00.84.00 had no such component; Eclipse Store maps them by
+   * component name and loads them with {@code null}.
+   */
+  @Override
+  public AuditEnvelope append(TenantId tenant, AuditEvent event, String correlationId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(event, "event must not be null");
-    AuditEnvelope envelope = new AuditEnvelope(UUID.randomUUID().toString(), tenant, event);
+    AuditEnvelope envelope =
+        new AuditEnvelope(UUID.randomUUID().toString(), tenant, event, correlationId);
     storage.update(() -> storage.tables().auditEnvelopes.append(envelope));
     return envelope;
   }

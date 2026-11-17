@@ -67,4 +67,11 @@ class DefaultClientAddressResolverTest {
     assertTrue(view.headers(null).isEmpty());
     assertTrue(ClientRequestView.of("203.0.113.5", (Map<String, String>) null).headers("X").isEmpty());
   }
+
+  @Test
+  @DisplayName("R5: the default trusts no peer, not even loopback")
+  void trustsNoPeer() {
+    assertTrue(!resolver.trustsPeer(ClientRequestView.of("127.0.0.1", Map.of())));
+    assertTrue(!resolver.trustsPeer(ClientRequestView.of("203.0.113.5", Map.of())));
+  }
 }

@@ -62,6 +62,10 @@ import java.util.function.BooleanSupplier;
  * {@link RestSessionRevocation}, a request to a restricted handler whose session record
  * was revoked is answered as unauthenticated and audited with {@code SessionInvalidated};
  * the handler does not run.
+ *
+ * <p>R5 (JS-SEC-066, CWE-778): every overload runs the decision and the handler inside the
+ * correlation scope of the request ({@link RestAuditCorrelation}), so the audit events of the
+ * request carry its correlation id.
  */
 public final class RestAuthorizationFilter {
 
@@ -282,6 +286,19 @@ public final class RestAuthorizationFilter {
   }
 
   private void authorize(
+      RestRequest request,
+      RestResponse response,
+      RestHandler handler,
+      Optional<AnnotationAccessEvaluatorPair<Annotation>> pair,
+      BooleanSupplier publicRoute,
+      String operation,
+      Map<String, Object> attributes) {
+    // R5 (JS-SEC-066): one correlation scope per request, closed when the handler returns
+    RestAuditCorrelation.run(request, () ->
+        authorizeInScope(request, response, handler, pair, publicRoute, operation, attributes));
+  }
+
+  private void authorizeInScope(
       RestRequest request,
       RestResponse response,
       RestHandler handler,

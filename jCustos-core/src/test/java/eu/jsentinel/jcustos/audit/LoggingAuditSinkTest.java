@@ -189,4 +189,20 @@ class LoggingAuditSinkTest {
     // Must not propagate — the WARN goes to the framework static logger.
     new LoggingAuditSink(throwing).accept(new LoginSucceeded(T0, "alice", "127.0.0.1", "S-1"));
   }
+
+  @Test
+  @DisplayName("R5: inside a correlation scope the line ends with corr=<id>; outside it has none")
+  void appendsTheCorrelationIdLast() {
+    RecordingSlf4jLogger logger = new RecordingSlf4jLogger();
+    LoggingAuditSink sink = new LoggingAuditSink(logger);
+    try (AuditCorrelation.Scope ignored = AuditCorrelation.open("req-9.a_b:c")) {
+      sink.accept(new LoginFailed(T0, "alice", "127.0.0.1", "bad-credentials"));
+    }
+    sink.accept(new LoginFailed(T0, "alice", "127.0.0.1", "bad-credentials"));
+
+    assertEquals("AUDIT type=LoginFailed user=alice client=127.0.0.1 reason=bad-credentials "
+        + "corr=req-9.a_b:c", logger.messages.get(0));
+    assertEquals("AUDIT type=LoginFailed user=alice client=127.0.0.1 reason=bad-credentials",
+        logger.messages.get(1));
+  }
 }

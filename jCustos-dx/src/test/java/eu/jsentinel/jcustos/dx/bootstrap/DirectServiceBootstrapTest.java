@@ -22,6 +22,8 @@ import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
+import eu.jsentinel.jcustos.audit.TrustedPeerCorrelationIdResolver;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
@@ -101,6 +103,32 @@ class DirectServiceBootstrapTest {
     assertTrue(JCustosServiceResolver.findClientAddressResolver().isEmpty());
     assertFalse(runtime.services().stream()
         .anyMatch(s -> ClientAddressResolver.class.equals(s.spi())));
+  }
+
+  @Test
+  @DisplayName(".correlationIds(resolver) registers via JCustosServiceResolver.setCorrelationIdResolver(...) (R5, JS-SEC-066)")
+  void correlationIdsWiresResolver() {
+    CorrelationIdResolver resolver = new TrustedPeerCorrelationIdResolver(
+        ClientAddressResolver.trustedProxies("127.0.0.1"), "X-Correlation-ID");
+    JCustosRuntime runtime = new TestBootstrap()
+        .correlationIds(resolver)
+        .install();
+    assertSame(resolver, JCustosServiceResolver.findCorrelationIdResolver().orElseThrow());
+    assertSame(resolver, JCustosServiceResolver.correlationIdResolver());
+    assertTrue(runtime.services().stream()
+        .anyMatch(s -> CorrelationIdResolver.class.equals(s.spi())));
+    assertThrows(NullPointerException.class, () -> new TestBootstrap().correlationIds(null));
+  }
+
+  @Test
+  @DisplayName("without .correlationIds(...) the resolver default applies and nothing is registered")
+  void correlationIdsDefaultToTrustedPeer() {
+    JCustosRuntime runtime = new TestBootstrap().install();
+    assertTrue(JCustosServiceResolver.findCorrelationIdResolver().isEmpty());
+    assertTrue(JCustosServiceResolver.correlationIdResolver()
+        instanceof TrustedPeerCorrelationIdResolver);
+    assertFalse(runtime.services().stream()
+        .anyMatch(s -> CorrelationIdResolver.class.equals(s.spi())));
   }
 
   @Test

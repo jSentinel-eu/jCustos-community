@@ -55,6 +55,10 @@ import java.util.Optional;
  * An audit sink that fails does not change the decision; since 00.84.00 the
  * failure is logged as {@code rest/audit-failed}, at most once per
  * {@link RestSessionRevocation#FAILURE_LOG_INTERVAL}.
+ * <p>
+ * R5 (JS-SEC-066, CWE-778): the filter and the handler run inside the
+ * correlation scope of the request ({@link RestAuditCorrelation}), so every
+ * audit event of the request carries its correlation id.
  */
 public final class RestAuthenticationFilter {
 
@@ -65,6 +69,11 @@ public final class RestAuthenticationFilter {
   }
 
   public void requireAuthenticated(RestRequest request, RestResponse response, RestHandler handler) {
+    // R5 (JS-SEC-066): one correlation scope per request, closed when the handler returns
+    RestAuditCorrelation.run(request, () -> authenticate(request, response, handler));
+  }
+
+  private void authenticate(RestRequest request, RestResponse response, RestHandler handler) {
     Optional<JCustosSubject> subject = subjectResolver.resolveSubject(request);
     if (subject.isEmpty()) {
       // JS-SEC-086 (CWE-778): render through the published mapper (status, challenge, body

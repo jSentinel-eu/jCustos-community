@@ -168,4 +168,26 @@ class InMemoryAuditEventStoreTest {
   void purgeOlderThanRejectsNull() {
     assertThrows(NullPointerException.class, () -> store.purgeOlderThan(null));
   }
+
+  // ── correlation id (R5, JS-SEC-066) ─────────────────────────────
+
+  @Test
+  @DisplayName("R5: append keeps the correlation id; the two-argument append keeps none")
+  void appendKeepsCorrelationId() {
+    AuditEnvelope withId = store.append(TenantId.DEFAULT,
+        loginSucceededAt(Instant.now(), "alice"), "req-42");
+    AuditEnvelope without = store.append(TenantId.DEFAULT, loginSucceededAt(Instant.now(), "bob"));
+
+    assertEquals("req-42", withId.correlationId());
+    assertEquals(null, without.correlationId());
+    assertEquals(List.of(withId, without), store.query(TenantId.DEFAULT, AuditQuery.all()));
+  }
+
+  @Test
+  @DisplayName("R5: a malformed correlation id is refused and nothing is stored")
+  void appendRefusesMalformedCorrelationId() {
+    assertThrows(IllegalArgumentException.class, () -> store.append(TenantId.DEFAULT,
+        loginSucceededAt(Instant.now(), "alice"), "bad id"));
+    assertEquals(0, store.size());
+  }
 }

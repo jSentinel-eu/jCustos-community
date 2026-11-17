@@ -19,6 +19,8 @@ package eu.jsentinel.jcustos.authorization.api;
 import eu.jsentinel.jcustos.action.ActionAuthorizationService;
 import eu.jsentinel.jcustos.action.ActionPermission;
 import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
+import eu.jsentinel.jcustos.audit.TrustedPeerCorrelationIdResolver;
 import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.LoginSucceeded;
@@ -36,6 +38,7 @@ import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
+import eu.jsentinel.jcustos.net.ClientRequestView;
 import eu.jsentinel.jcustos.net.DefaultClientAddressResolver;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
@@ -809,5 +812,46 @@ class JCustosServiceResolverTest {
     assertTrue(ctx.findLogoutService().isEmpty(),
         "a fresh NoopLogoutService must not read as a configured logout service");
     assertTrue(ctx.logoutService() instanceof NoopLogoutService);
+  }
+
+  // ── CorrelationIdResolver (R5, JS-SEC-066) ─────────────────────
+
+  @Test
+  @DisplayName("R5: correlationIdResolver defaults to TrustedPeerCorrelationIdResolver; find reports it as not configured")
+  void correlationIdResolver_defaultsToTrustedPeer() {
+    assertInstanceOf(TrustedPeerCorrelationIdResolver.class,
+        JCustosServiceResolver.correlationIdResolver());
+    assertSame(JCustosServiceResolver.correlationIdResolver(),
+        JCustosServiceResolver.correlationIdResolver(), "the default is cached");
+    assertTrue(JCustosServiceResolver.findCorrelationIdResolver().isEmpty());
+  }
+
+  @Test
+  @DisplayName("R5: setCorrelationIdResolver overrides both accessors; resetAll restores the default")
+  void setCorrelationIdResolver_overridesAndResets() {
+    CorrelationIdResolver fixed = request -> "fixed-id";
+    JCustosServiceResolver.setCorrelationIdResolver(fixed);
+
+    assertSame(fixed, JCustosServiceResolver.correlationIdResolver());
+    assertSame(fixed, JCustosServiceResolver.findCorrelationIdResolver().orElseThrow());
+
+    JCustosServiceResolver.resetAll();
+
+    assertTrue(JCustosServiceResolver.findCorrelationIdResolver().isEmpty());
+    assertInstanceOf(TrustedPeerCorrelationIdResolver.class,
+        JCustosServiceResolver.correlationIdResolver());
+  }
+
+  @Test
+  @DisplayName("R5: an isolated context has a default of its own that follows its own client-address resolver")
+  void isolatedContextDefaultFollowsItsOwnClientAddressResolver() {
+    JCustosContext isolated = JCustosContext.createIsolated();
+    isolated.setClientAddressResolver(ClientAddressResolver.trustedProxies("127.0.0.1"));
+    ClientRequestView fromProxy = ClientRequestView.of("127.0.0.1",
+        name -> "X-Request-ID".equalsIgnoreCase(name) ? List.of("proxy-id-1") : List.of());
+
+    assertEquals("proxy-id-1", isolated.correlationIdResolver().resolve(fromProxy));
+    assertNotEquals("proxy-id-1", JCustosServiceResolver.correlationIdResolver().resolve(fromProxy),
+        "the process-wide default still trusts no peer");
   }
 }

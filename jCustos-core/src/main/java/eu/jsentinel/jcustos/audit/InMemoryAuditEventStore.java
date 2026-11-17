@@ -51,9 +51,20 @@ public final class InMemoryAuditEventStore implements AuditEventStore {
 
   @Override
   public AuditEnvelope append(TenantId tenant, AuditEvent event) {
+    return append(tenant, event, null);
+  }
+
+  /**
+   * Stores the correlation id with the envelope (R5, JS-SEC-066).
+   *
+   * @since 00.84.00
+   */
+  @Override
+  public AuditEnvelope append(TenantId tenant, AuditEvent event, String correlationId) {
     requireNonNull(tenant, "tenant must not be null");
     requireNonNull(event, "event must not be null");
-    AuditEnvelope envelope = new AuditEnvelope(UUID.randomUUID().toString(), tenant, event);
+    AuditEnvelope envelope =
+        new AuditEnvelope(UUID.randomUUID().toString(), tenant, event, correlationId);
     lock.writeLock().lock();
     try {
       envelopes.add(envelope);

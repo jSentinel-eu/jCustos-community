@@ -51,6 +51,25 @@ public interface ClientAddressResolver {
   Optional<String> resolve(ClientRequestView request);
 
   /**
+   * Tells whether the connection peer of the request is a proxy whose request
+   * headers may be taken over (R5, JS-SEC-066). The default correlation-id
+   * resolver honours a proxy-supplied {@code X-Request-ID} only when this
+   * method says so, so the proxies trusted for {@code X-Forwarded-For} are
+   * the proxies trusted for the request id.
+   * <p>
+   * The default trusts no peer; {@link TrustedProxyClientAddressResolver}
+   * trusts its configured proxies. Like {@link #resolve}, an implementation
+   * must not throw and must not perform name resolution.
+   *
+   * @param request the request view
+   * @return {@code true} only if the peer is a trusted proxy
+   * @since 00.84.00
+   */
+  default boolean trustsPeer(ClientRequestView request) {
+    return false;
+  }
+
+  /**
    * The default: the connection peer, no header consulted.
    *
    * @return the shared default resolver

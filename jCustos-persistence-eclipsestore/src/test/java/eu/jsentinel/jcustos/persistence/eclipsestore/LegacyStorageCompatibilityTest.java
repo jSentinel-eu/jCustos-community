@@ -63,6 +63,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -85,6 +86,7 @@ class LegacyStorageCompatibilityTest {
   private static final LoginAttemptKey VICTIM =
       new LoginAttemptKey(TenantId.DEFAULT, "victim", "198.51.100.7");
   private static final RateLimitKey CLIENT = new RateLimitKey(TenantId.DEFAULT, "ip:203.0.113.5");
+  private static final String CORRELATION_ID = "4f1c2b9e-77aa-4c3e-9d0b-6a1f0c2d3e4f";
 
   @TempDir
   Path tempDir;
@@ -147,6 +149,10 @@ class LegacyStorageCompatibilityTest {
       storage.securityVersionStore().increment(new JCustosVersionKey(TenantId.DEFAULT, ALICE));
       storage.auditEventStore().append(TenantId.DEFAULT,
           new LoginFailed(later, "user-new", "192.0.2.99", "bad-credentials"));
+      // R5 (JS-SEC-066): an envelope with a correlation id next to the legacy ones
+      storage.auditEventStore().append(TenantId.DEFAULT,
+          new LoginFailed(later, "user-correlated", "192.0.2.98", "bad-credentials"),
+          CORRELATION_ID);
       assertTrue(storage.passwordResetTokenStore().markConsumed("pr-hash-open", later));
       assertTrue(storage.apiKeyStore().markUsed("ak-hash-1", later));
     }
@@ -169,8 +175,13 @@ class LegacyStorageCompatibilityTest {
       assertEquals(new JCustosVersion(3),
           reopened.securityVersionStore().current(new JCustosVersionKey(TenantId.DEFAULT, ALICE)));
       List<AuditEnvelope> audit = reopened.auditEventStore().query(TenantId.DEFAULT, AuditQuery.all());
-      assertEquals(5, audit.size());
+      assertEquals(6, audit.size());
       assertEquals("user-new", ((LoginFailed) audit.get(4).event()).username());
+      assertNull(audit.get(4).correlationId());
+      assertEquals("user-correlated", ((LoginFailed) audit.get(5).event()).username());
+      assertEquals(CORRELATION_ID, audit.get(5).correlationId(),
+          "the correlation id of an envelope appended after the upgrade survives the restart");
+      assertNull(audit.get(0).correlationId(), "a legacy envelope still loads without one");
       assertTrue(reopened.passwordResetTokenStore().findByHash("pr-hash-open")
           .orElseThrow().isConsumed());
       assertEquals(Optional.of(later),
@@ -184,10 +195,13 @@ class LegacyStorageCompatibilityTest {
     List<AuditEnvelope> defaultAudit = storage.auditEventStore().query(TenantId.DEFAULT, AuditQuery.all());
     assertEquals(List.of("user-0", "user-1", "user-2", "user-4"),
         defaultAudit.stream().map(envelope -> ((LoginFailed) envelope.event()).username()).toList());
+    // R5 (JS-SEC-066): envelopes written before the correlation id existed load without one
+    defaultAudit.forEach(envelope -> assertNull(envelope.correlationId(), envelope.id()));
     assertEquals(T0.plusSeconds(2), defaultAudit.get(2).event().timestamp());
     List<AuditEnvelope> acmeAudit = storage.auditEventStore().query(ACME, AuditQuery.all());
     assertEquals(1, acmeAudit.size());
     assertEquals("192.0.2.3", ((LoginFailed) acmeAudit.get(0).event()).clientAddress());
+    assertNull(acmeAudit.get(0).correlationId());
 
     // sessions, in insertion order
     SessionStore sessions = storage.sessionStore();

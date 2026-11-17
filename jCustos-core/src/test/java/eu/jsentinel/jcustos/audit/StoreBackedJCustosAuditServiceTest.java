@@ -151,4 +151,49 @@ class StoreBackedJCustosAuditServiceTest {
     StoreBackedJCustosAuditService service = new StoreBackedJCustosAuditService(store);
     assertThrows(NullPointerException.class, () -> service.query(null));
   }
+
+  @Test
+  @DisplayName("R5: publish appends with the current correlation id, and without one outside a scope")
+  void publishPassesTheCurrentCorrelationId() {
+    InMemoryAuditEventStore store = new InMemoryAuditEventStore();
+    StoreBackedJCustosAuditService service = new StoreBackedJCustosAuditService(store);
+
+    try (AuditCorrelation.Scope ignored = AuditCorrelation.open("req-7")) {
+      service.publish(loginSucceededAt(Instant.now(), "alice"));
+    }
+    service.publish(loginSucceededAt(Instant.now(), "bob"));
+
+    List<AuditEnvelope> envelopes = store.query(TenantId.DEFAULT, AuditQuery.all());
+    assertEquals("req-7", envelopes.get(0).correlationId());
+    assertEquals(null, envelopes.get(1).correlationId());
+  }
+
+  @Test
+  @DisplayName("R5: a store that only implements the two-argument append still persists, without the id")
+  void legacyStoreKeepsWorkingWithoutTheId() {
+    InMemoryAuditEventStore backing = new InMemoryAuditEventStore();
+    AuditEventStore legacy = new AuditEventStore() {
+      @Override
+      public AuditEnvelope append(TenantId tenant, AuditEvent event) {
+        return backing.append(tenant, event);
+      }
+
+      @Override
+      public List<AuditEnvelope> query(TenantId tenant, AuditQuery query) {
+        return backing.query(tenant, query);
+      }
+
+      @Override
+      public int purgeOlderThan(Instant cutoff) {
+        return backing.purgeOlderThan(cutoff);
+      }
+    };
+    try (AuditCorrelation.Scope ignored = AuditCorrelation.open("req-8")) {
+      new StoreBackedJCustosAuditService(legacy).publish(loginSucceededAt(Instant.now(), "alice"));
+    }
+    List<AuditEnvelope> envelopes = backing.query(TenantId.DEFAULT, AuditQuery.all());
+    assertEquals(1, envelopes.size());
+    assertEquals(null, envelopes.getFirst().correlationId(),
+        "the default method drops the id - the store contract makes that visible");
+  }
 }

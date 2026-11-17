@@ -156,4 +156,16 @@ class TrustedProxyClientAddressResolverTest {
     assertInstanceOf(TrustedProxyClientAddressResolver.class, ClientAddressResolver.trustedProxies(PROXY));
     assertInstanceOf(DefaultClientAddressResolver.class, ClientAddressResolver.remoteAddress());
   }
+
+  @Test
+  @DisplayName("R5: trustsPeer is true exactly for a configured proxy peer")
+  void trustsPeerOnlyForConfiguredProxies() {
+    assertTrue(loopbackProxy.trustsPeer(request(PROXY, Map.of())));
+    assertTrue(loopbackProxy.trustsPeer(request("::1", Map.of())));
+    assertTrue(!loopbackProxy.trustsPeer(request(CLIENT, Map.of(
+        "X-Forwarded-For", PROXY))), "a header never makes the peer trusted");
+    assertTrue(!loopbackProxy.trustsPeer(request(null, Map.of())));
+    assertTrue(!loopbackProxy.trustsPeer(request("proxy.example.org", Map.of())),
+        "a host name is never resolved, so it is never trusted");
+  }
 }

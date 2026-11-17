@@ -94,6 +94,9 @@ class JCustosResetAllGuardTest {
       + "earlier failures";
   private static final String CONSTANT = "constant set or lookup table, initialised once and "
       + "never mutated";
+  private static final String WARN_ONCE_CORRELATION = "R5 warn-once flag of a failing "
+      + "correlation-id resolver: JVM-wide by design, like the Noop fallback warnings, so a reset "
+      + "does not repeat the warning";
 
   /**
    * Static slots that deliberately survive {@link JCustosServiceResolver#resetAll()}, keyed by
@@ -119,7 +122,9 @@ class JCustosResetAllGuardTest {
       Map.entry("eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleService#ALLOWED",
           CONSTANT),
       Map.entry("eu.jsentinel.jcustos.credential.abuse.InMemoryAbuseDetectionService"
-          + "#VOLUME_DIMENSIONS", CONSTANT));
+          + "#VOLUME_DIMENSIONS", CONSTANT),
+      Map.entry("eu.jsentinel.jcustos.audit.AuditCorrelation#RESOLVER_FAILURE_WARNED",
+          WARN_ONCE_CORRELATION));
 
   /** Real instances for plain reference slots, keyed by the declared type of the slot. */
   private static final Map<Class<?>, Supplier<Object>> SAMPLES = Map.of(

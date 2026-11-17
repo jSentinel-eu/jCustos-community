@@ -110,6 +110,23 @@ public final class TrustedProxyClientAddressResolver implements ClientAddressRes
     return IpLiterals.parse(hops.get(0)).map(InetAddress::getHostAddress);
   }
 
+  /**
+   * {@code true} when the connection peer is one of the configured trusted
+   * proxies (R5, JS-SEC-066); the default correlation-id resolver then takes
+   * the proxy's {@code X-Request-ID}. A peer that is not an IP literal is
+   * never trusted.
+   *
+   * @param request the request view
+   * @return whether the peer is a trusted proxy
+   * @since 00.84.00
+   */
+  @Override
+  public boolean trustsPeer(ClientRequestView request) {
+    Objects.requireNonNull(request, "request");
+    Optional<InetAddress> peer = IpLiterals.parse(request.remoteAddress());
+    return peer.isPresent() && isTrusted(peer.get());
+  }
+
   private boolean isTrusted(InetAddress address) {
     for (AddressRange range : trustedPeers) {
       if (range.contains(address)) {

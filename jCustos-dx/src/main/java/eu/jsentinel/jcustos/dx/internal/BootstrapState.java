@@ -15,6 +15,7 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.logout.LogoutService;
@@ -47,6 +48,8 @@ public final class BootstrapState {
   private LoginAttemptPolicy loginAttemptPolicy;
   // V00.84 (JS-SEC-061): client-address resolution.
   private ClientAddressResolver clientAddressResolver;
+  // V00.84 (R5, JS-SEC-066): correlation-id resolution.
+  private CorrelationIdResolver correlationIdResolver;
   private RateLimitPolicy rateLimitPolicy;
   private ApiKeyAuthenticationService apiKeyAuthenticationService;
   private TokenService tokenService;
@@ -253,6 +256,14 @@ public final class BootstrapState {
 
   public void clientAddressResolver(ClientAddressResolver resolver) {
     this.clientAddressResolver = resolver;
+  }
+
+  public CorrelationIdResolver correlationIdResolver() {
+    return correlationIdResolver;
+  }
+
+  public void correlationIdResolver(CorrelationIdResolver resolver) {
+    this.correlationIdResolver = resolver;
   }
 
   public RateLimitPolicy rateLimitPolicy() {

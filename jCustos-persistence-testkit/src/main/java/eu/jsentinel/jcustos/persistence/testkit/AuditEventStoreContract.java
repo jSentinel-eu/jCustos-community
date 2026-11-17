@@ -30,6 +30,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -42,9 +43,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * does not assume anything about the storage technology — both the
  * in-memory default and a future Eclipse-Store-backed implementation
  * use exactly the same set of assertions.
+ * <p>
+ * Since 00.84.00 the contract includes the correlation id (R5, JS-SEC-066): a
+ * store must keep the id handed to
+ * {@link AuditEventStore#append(TenantId, AuditEvent, String)}. A store that
+ * inherits the default of that method drops it and fails
+ * {@link #appendKeepsTheCorrelationId()}.
  */
 @DisplayName("AuditEventStore — contract")
 public interface AuditEventStoreContract {
+
+  /** Correlation id the R5 tests append with; the form Caddy's {@code {http.request.uuid}} has. */
+  String CORRELATION_ID = "4f1c2b9e-77aa-4c3e-9d0b-6a1f0c2d3e4f";
+
+  /** Failure message when a store inherits the dropping default of the three-argument append. */
+  String DROPPED_CORRELATION_ID = "the store dropped the correlation id - override "
+      + "AuditEventStore.append(TenantId, AuditEvent, String) instead of inheriting the default "
+      + "(R5, JS-SEC-066)";
 
   /**
    * Builds a fresh, empty store instance. Implementations should
@@ -74,6 +89,45 @@ public interface AuditEventStoreContract {
     assertTrue(envelope.id() != null && !envelope.id().isBlank());
     assertEquals(TenantId.DEFAULT, envelope.tenant());
     assertEquals(event, envelope.event());
+  }
+
+  @Test
+  @DisplayName("R5: append with a correlation id keeps it in the envelope and in the query result")
+  default void appendKeepsTheCorrelationId() {
+    AuditEventStore store = newStore();
+    AuditEnvelope envelope = store.append(TenantId.DEFAULT,
+        sampleEvent(Instant.parse("2026-01-01T00:00:00Z"), "alice"), CORRELATION_ID);
+
+    assertEquals(CORRELATION_ID, envelope.correlationId(), DROPPED_CORRELATION_ID);
+    List<AuditEnvelope> stored = store.query(TenantId.DEFAULT, AuditQuery.all());
+    assertEquals(1, stored.size());
+    assertEquals(CORRELATION_ID, stored.getFirst().correlationId(), DROPPED_CORRELATION_ID);
+    assertEquals(envelope, stored.getFirst());
+  }
+
+  @Test
+  @DisplayName("R5: an event recorded outside a request has no correlation id")
+  default void appendWithoutCorrelationIdKeepsNone() {
+    AuditEventStore store = newStore();
+    AuditEnvelope twoArguments = store.append(TenantId.DEFAULT, sampleEvent(Instant.now(), "alice"));
+    AuditEnvelope explicitNull = store.append(TenantId.DEFAULT, sampleEvent(Instant.now(), "bob"),
+        null);
+
+    assertNull(twoArguments.correlationId());
+    assertNull(explicitNull.correlationId());
+    assertEquals(List.of(twoArguments, explicitNull),
+        store.query(TenantId.DEFAULT, AuditQuery.all()));
+  }
+
+  @Test
+  @DisplayName("R5: append refuses a malformed correlation id")
+  default void appendRejectsMalformedCorrelationId() {
+    AuditEventStore store = newStore();
+    assertThrows(IllegalArgumentException.class, () -> store.append(TenantId.DEFAULT,
+        sampleEvent(Instant.now(), "alice"), "id with\nline break"));
+    assertThrows(IllegalArgumentException.class, () -> store.append(TenantId.DEFAULT,
+        sampleEvent(Instant.now(), "alice"),
+        "x".repeat(AuditEnvelope.MAX_CORRELATION_ID_LENGTH + 1)));
   }
 
   @Test

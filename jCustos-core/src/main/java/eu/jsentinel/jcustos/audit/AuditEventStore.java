@@ -53,6 +53,38 @@ public interface AuditEventStore {
   AuditEnvelope append(TenantId tenant, AuditEvent event);
 
   /**
+   * Persists an audit event together with the correlation id of the request
+   * it was recorded in (R5, JS-SEC-066, CWE-778) and returns the resulting
+   * envelope, whose {@link AuditEnvelope#correlationId()} is that id.
+   * {@link StoreBackedJCustosAuditService} calls this method with
+   * {@link AuditCorrelation#current()}.
+   * <p>
+   * <strong>Implementations must override it.</strong> The default exists
+   * only so stores written before 00.84.00 keep compiling: it checks the id,
+   * then delegates to {@link #append(TenantId, AuditEvent)} and
+   * <em>drops</em> the id, so the envelope carries none.
+   * {@code AuditEventStoreContract} of {@code jCustos-persistence-testkit}
+   * fails for a store that inherits it.
+   *
+   * @param tenant        tenant scope; must not be {@code null}
+   * @param event         audit event; must not be {@code null}
+   * @param correlationId the request's correlation id, or {@code null} when
+   *                      the event was recorded outside a request
+   * @return the persisted envelope, never {@code null}
+   * @throws IllegalArgumentException when {@code correlationId} is not
+   *                                  {@code null} and fails
+   *                                  {@link AuditEnvelope#isValidCorrelationId(String)}
+   * @since 00.84.00
+   */
+  default AuditEnvelope append(TenantId tenant, AuditEvent event, String correlationId) {
+    if (correlationId != null && !AuditEnvelope.isValidCorrelationId(correlationId)) {
+      throw new IllegalArgumentException("correlationId must be 1 to "
+          + AuditEnvelope.MAX_CORRELATION_ID_LENGTH + " characters from [A-Za-z0-9._:-]");
+    }
+    return append(tenant, event);
+  }
+
+  /**
    * Returns every persisted envelope under {@code tenant} that
    * matches {@code query}, in insertion order (oldest first).
    *

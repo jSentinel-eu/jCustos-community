@@ -15,6 +15,7 @@ import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosRuntime;
@@ -148,6 +149,23 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
    * @since 00.84.00
    */
   B clientAddress(ClientAddressResolver resolver);
+
+  /**
+   * V00.84 (R5, JS-SEC-066, CWE-778): registers how the correlation id of a
+   * request is decided - the id that audit records and audit lines carry as
+   * {@code corr=}. Without this call the resolver default applies: a
+   * proxy-supplied {@code X-Request-ID} is taken only from a peer the
+   * {@link #clientAddress(ClientAddressResolver) client-address resolver}
+   * trusts, every other request gets a server-side UUID. Wired through
+   * {@code JCustosServiceResolver.setCorrelationIdResolver(...)} by
+   * {@code install()}.
+   *
+   * @param resolver non-null resolver, for example a
+   *                 {@code TrustedPeerCorrelationIdResolver} with another header name
+   * @return this builder
+   * @since 00.84.00
+   */
+  B correlationIds(CorrelationIdResolver resolver);
 
   /**
    * V00.74: registers a rate-limit policy. Stored in DX state /
