@@ -136,7 +136,7 @@ public class SecuredRouterLink extends RouterLink {
 
   /** Re-runs the visibility check against the current subject. */
   public final void refresh() {
-    SecuredVisibility.apply(new LinkTarget(this), requirement, mode, viewSupplier);
+    SecuredVisibility.apply(new ComponentTarget(this), requirement, mode, viewSupplier);
   }
 
   /** @return the requirement this link was constructed with */
@@ -147,20 +147,5 @@ public class SecuredRouterLink extends RouterLink {
   /** @return the visibility mode this link uses on denial */
   public final SecuredVisibilityMode mode() {
     return mode;
-  }
-
-  private record LinkTarget(RouterLink link) implements SecuredVisibility.Target {
-    @Override public void setVisible(boolean visible) {
-      link.setVisible(visible);
-    }
-    @Override public boolean isVisible() {
-      return link.isVisible();
-    }
-    @Override public void setEnabled(boolean enabled) {
-      link.setEnabled(enabled);
-    }
-    @Override public boolean isEnabled() {
-      return link.isEnabled();
-    }
   }
 }

@@ -16,18 +16,16 @@
  */
 package eu.jsentinel.jcustos.components;
 
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.PermissionGuard;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.permissions.HasPermissions;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.HasRoles;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
-import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 
 import java.util.HashSet;
-import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -44,8 +42,8 @@ import static java.util.Objects.requireNonNull;
  * {@link SecuredVisibilityMode}. On every {@link #apply apply(...)}
  * call this helper:
  * <ol>
- *   <li>Resolves the current typed subject via
- *       {@link SubjectStores#subjectStore()} and the registered
+ *   <li>Resolves the current typed subject through {@link CurrentSubject}
+ *       - the {@code SubjectStore} keyed on the registered
  *       {@code AuthenticationService.subjectType()}.</li>
  *   <li>Asks the registered {@code AuthorizationService} for the
  *       subject's roles + permissions (the AuthorizationService is
@@ -256,40 +254,22 @@ public final class SecuredVisibility {
   }
 
   /**
-   * SPI lookup: typed user via SubjectStore → roles + permissions
-   * via the registered {@code AuthorizationService}. Returns empty
-   * when any prerequisite is missing (no SPI wiring, no current
-   * subject, …) — the caller treats absence as denial.
+   * SPI lookup through {@link CurrentSubject#currentJCustosSubject()}: typed user via the
+   * {@code SubjectStore}, roles and permissions via the registered
+   * {@code AuthorizationService}. Returns empty when any prerequisite is missing (no SPI
+   * wiring, no current subject, ...) or a lookup fails - the caller treats absence as
+   * denial.
+   * <p>
+   * JS-SEC-097 (CWE-1041): the view carries the facade's {@link JCustosSubject} as its role
+   * and permission view, so the components decide on the same subject - with the same subject
+   * id - as the navigation listener and the policy-backed {@code SecuredUi} components. The
+   * roles and permissions are resolved before the view is returned; a failure there denies
+   * instead of escaping from {@link #apply apply(...)}.
    *
    * @return current security view, if resolvable
    */
-  @SuppressWarnings({"rawtypes", "unchecked"})
   public static Optional<JCustosView> currentJCustosView() {
-    try {
-      Class subjectType = JCustosServiceResolver
-          .<Object, Object>findAuthenticationService()
-          .map(s -> (Class) s.subjectType())
-          .orElse(null);
-      if (subjectType == null) {
-        return Optional.empty();
-      }
-      Optional<Object> subjectOpt = SubjectStores.findSubjectStore()
-          .flatMap(store -> store.currentSubject(subjectType));
-      if (subjectOpt.isEmpty()) {
-        return Optional.empty();
-      }
-      Object subject = subjectOpt.get();
-      Optional<AuthorizationService<Object>> authzOpt =
-          JCustosServiceResolver.findAuthorizationService();
-      if (authzOpt.isEmpty()) {
-        return Optional.empty();
-      }
-      AuthorizationService<Object> authz = authzOpt.get();
-      HasRoles roles = () -> List.copyOf(authz.rolesFor(subject).roleNames());
-      HasPermissions permissions = () -> List.copyOf(authz.permissionsFor(subject).permissionNames());
-      return Optional.of(new JCustosView(roles, permissions));
-    } catch (RuntimeException ignored) {
-      return Optional.empty();
-    }
+    return CurrentSubject.currentJCustosSubject()
+        .map(subject -> new JCustosView(subject, subject));
   }
 }

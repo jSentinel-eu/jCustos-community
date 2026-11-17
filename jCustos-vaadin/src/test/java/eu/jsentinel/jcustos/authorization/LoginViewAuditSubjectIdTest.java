@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.authorization;
 
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.logout.SubjectId;
@@ -37,6 +38,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * {@link SubjectIdResolver}, never from {@code subject.toString()} — an
  * application user object commonly serialises email / password-hash / internal
  * ids in its {@code toString()}, which would leak into the audit channel.
+ * <p>
+ * JS-SEC-097 (decision F06): without a resolver the id is the identity handle that
+ * navigation and session lifetime derive for the same subject - no longer an empty string.
  */
 @DisplayName("LoginView.subjectIdOf — R14 audit subject-id never leaks toString()")
 class LoginViewAuditSubjectIdTest {
@@ -77,18 +81,21 @@ class LoginViewAuditSubjectIdTest {
   }
 
   @Test
-  @DisplayName("without a SubjectIdResolver: returns empty, never the PII toString()")
-  void noResolverReturnsEmptyNotToString() {
+  @DisplayName("JS-SEC-097: without a SubjectIdResolver: the identity handle of CurrentSubject, never empty, never the PII toString()")
+  void noResolverReturnsIdentityHandleNotToString() {
     PiiUser user = new PiiUser("bob@corp.example", "argon2id$secret");
 
     String id = LoginView.subjectIdOf(contextWith(user));
 
-    assertEquals("", id,
-        "without a resolver the audit id must be empty, not subject.toString()");
+    assertEquals(CurrentSubject.subjectIdOf(user), id,
+        "the rotation audit derives the id by the rule every other Vaadin site uses");
+    assertEquals("PiiUser@" + Integer.toHexString(System.identityHashCode(user)), id);
+    assertFalse(id.contains("bob@corp.example"), "the email must never reach the audit subject id");
+    assertFalse(id.contains("argon2id"), "the password hash must never reach the audit subject id");
   }
 
   @Test
-  @DisplayName("null subject: empty id")
+  @DisplayName("null subject: empty id - no subject, nothing to identify")
   void nullSubjectEmpty() {
     assertEquals("", LoginView.subjectIdOf(contextWith(null)));
   }

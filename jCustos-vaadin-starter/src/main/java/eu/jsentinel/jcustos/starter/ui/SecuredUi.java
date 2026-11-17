@@ -12,6 +12,7 @@ package eu.jsentinel.jcustos.starter.ui;
 
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
+import eu.jsentinel.jcustos.components.ComponentTarget;
 import eu.jsentinel.jcustos.components.SecuredButton;
 import eu.jsentinel.jcustos.components.SecuredMenuItem;
 import eu.jsentinel.jcustos.components.SecuredRouterLink;
@@ -377,55 +378,6 @@ public final class SecuredUi {
       SecuredVisibility.apply(target, requirement(),
           modeOrDefault(SecuredVisibilityMode.HIDE));
       return component;
-    }
-  }
-
-  /**
-   * Adapts an arbitrary Vaadin {@link Component} to the
-   * {@link SecuredVisibility.Target} contract. Visibility goes
-   * through {@code Component.setVisible}; enabled-state goes through
-   * {@code HasEnabled.setEnabled} where the component supports it.
-   * A component without {@code HasEnabled} cannot be disabled, so
-   * disabling hides it - and enabling does nothing, because
-   * "enabled" must never make a hidden component visible again
-   * (JS-SEC-153).
-   */
-  private static final class ComponentTarget implements SecuredVisibility.Target {
-    private final Component component;
-
-    ComponentTarget(Component component) {
-      this.component = component;
-    }
-
-    @Override
-    public void setVisible(boolean visible) {
-      component.setVisible(visible);
-    }
-
-    @Override
-    public boolean isVisible() {
-      return component.isVisible();
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-      if (component instanceof com.vaadin.flow.component.HasEnabled he) {
-        he.setEnabled(enabled);
-      } else if (!enabled) {
-        // JS-SEC-153 (CWE-636, CWE-200): the only way to "disable" a component without
-        // HasEnabled is to hide it. setEnabled(true) is deliberately a no-op: it used to
-        // call setVisible(true) and thereby undid the setVisible(false) of the HIDE mode,
-        // so a denied Composite / @Tag component / Icon stayed visible to every visitor.
-        component.setVisible(false);
-      }
-    }
-
-    @Override
-    public boolean isEnabled() {
-      if (component instanceof com.vaadin.flow.component.HasEnabled he) {
-        return he.isEnabled();
-      }
-      return component.isVisible();
     }
   }
 }

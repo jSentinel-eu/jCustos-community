@@ -10,12 +10,9 @@
  */
 package eu.jsentinel.jcustos.starter.ui;
 
-import eu.jsentinel.jcustos.authentication.AuthenticationService;
-import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
-import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.components.SecuredVisibilityMode;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
@@ -121,41 +118,16 @@ final class PolicyVisibility {
     return Verdict.DeniedByPolicy;
   }
 
-  @SuppressWarnings({"rawtypes", "unchecked"})
+  /**
+   * JS-SEC-097 (CWE-1041, CWE-532): the subject the policy sees comes from
+   * {@link CurrentSubject#currentJCustosSubject()}. Its id is the registered
+   * {@code SubjectIdResolver}'s value, otherwise the identity handle. Until 00.84.00 this
+   * helper fell back to {@code String.valueOf(user)}, so without a resolver the subject's
+   * {@code toString()} - an e-mail address, a password hash - reached every policy as
+   * {@code subjectId} and {@code displayName}.
+   */
   private static Optional<JCustosSubject> resolveSubject() {
-    try {
-      Class subjectType = JCustosServiceResolver
-          .<Object, Object>findAuthenticationService()
-          .map(AuthenticationService::subjectType)
-          .orElse(null);
-      if (subjectType == null) {
-        return Optional.empty();
-      }
-      Optional<Object> rawSubject = SubjectStores.findSubjectStore()
-          .flatMap(store -> store.currentSubject(subjectType));
-      if (rawSubject.isEmpty()) {
-        return Optional.empty();
-      }
-      Optional<AuthorizationService<Object>> authzOpt =
-          JCustosServiceResolver.findAuthorizationService();
-      if (authzOpt.isEmpty()) {
-        return Optional.empty();
-      }
-      AuthorizationService<Object> authz = authzOpt.get();
-      Object u = rawSubject.get();
-      // R019: prefer the registered SubjectIdResolver; String.valueOf(user) can
-      // leak internal user fields into the subject id.
-      SubjectIdResolver idResolver =
-          JCustosServiceResolver.findSubjectIdResolver().orElse(null);
-      String id = idResolver != null ? idResolver.resolve(u).value() : String.valueOf(u);
-      return Optional.of(new JCustosSubject(
-          id,
-          id,
-          new java.util.LinkedHashSet<>(authz.rolesFor(u).roleNames()),
-          new java.util.LinkedHashSet<>(authz.permissionsFor(u).permissionNames())));
-    } catch (RuntimeException ignored) {
-      return Optional.empty();
-    }
+    return CurrentSubject.currentJCustosSubject();
   }
 
   private static void show(Component c) {

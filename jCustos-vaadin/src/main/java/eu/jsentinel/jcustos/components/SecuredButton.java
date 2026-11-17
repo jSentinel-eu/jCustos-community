@@ -112,7 +112,7 @@ public class SecuredButton extends Button {
    * state in sync.
    */
   public final void refresh() {
-    SecuredVisibility.apply(new ButtonTarget(this), requirement, mode, viewSupplier);
+    SecuredVisibility.apply(new ComponentTarget(this), requirement, mode, viewSupplier);
   }
 
   /** @return the requirement this button was constructed with */
@@ -123,21 +123,5 @@ public class SecuredButton extends Button {
   /** @return the visibility mode this button uses on denial */
   public final SecuredVisibilityMode mode() {
     return mode;
-  }
-
-  /** Adapter from {@link Button} to {@link SecuredVisibility.Target}. */
-  private record ButtonTarget(Button button) implements SecuredVisibility.Target {
-    @Override public void setVisible(boolean visible) {
-      button.setVisible(visible);
-    }
-    @Override public boolean isVisible() {
-      return button.isVisible();
-    }
-    @Override public void setEnabled(boolean enabled) {
-      button.setEnabled(enabled);
-    }
-    @Override public boolean isEnabled() {
-      return button.isEnabled();
-    }
   }
 }

@@ -22,6 +22,7 @@ import eu.jsentinel.jcustos.audit.SessionExpired;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 
 import java.time.Clock;
@@ -251,19 +252,14 @@ public final class TimeoutSessionPolicy<U> implements SessionPolicy<U> {
   }
 
   private String subjectIdOf(SessionContext<U> context) {
-    // JS-SEC-004 (CWE-532): derive the audit subjectId via the registered
-    // SubjectIdResolver — never subject.toString(), which commonly serialises
-    // PII (email / hash / internal id) into the audit channel. Empty fallback
-    // is safe here: these are audit-only emissions (SessionCreated /
-    // SessionExpired / SessionInvalidated) which accept an empty subjectId,
-    // mirroring LoginView.subjectIdOf.
+    // JS-SEC-004 / JS-SEC-097 (CWE-532, CWE-1041): the registered SubjectIdResolver,
+    // otherwise the identity handle - CurrentSubject's rule, the id the Vaadin navigation,
+    // lifetime listener and login rotation derive for the same subject. Never
+    // subject.toString(); empty only when the context carries no subject. Until 00.84.00
+    // SessionCreated / SessionExpired / SessionInvalidated carried an empty id without a
+    // resolver.
     U subject = context.subject();
-    if (subject == null) {
-      return "";
-    }
-    return JCustosServiceResolver.<U>findSubjectIdResolver()
-        .map(r -> r.resolve(subject).value())
-        .orElse("");
+    return subject == null ? "" : CurrentSubject.subjectIdOf(subject);
   }
 
   private void publish(AuditEvent event) {

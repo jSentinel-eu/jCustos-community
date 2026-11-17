@@ -22,8 +22,8 @@ import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.LoginListener;
 import eu.jsentinel.jcustos.authorization.LoginListeners;
 import eu.jsentinel.jcustos.authorization.LoginView;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.session.NoopSessionPolicy;
@@ -310,7 +310,7 @@ public class SessionLifetimeListener
    *
    * @param reason the {@link SessionExpired} reason, or {@code null} for a revoked session
    */
-  private record Ending(SubjectStore store, String subjectId, String sessionId, String reason) {
+  private record Ending(String subjectId, String sessionId, String reason) {
     boolean revoked() {
       return reason == null;
     }
@@ -325,13 +325,15 @@ public class SessionLifetimeListener
    * empty; returns the ending to enforce otherwise. The caller holds the session lock.
    */
   private Optional<Ending> check(VaadinSession session, VaadinRequest request, boolean activity) {
-    Optional<SubjectStore> store = SubjectStores.findSubjectStore();
-    if (store.isEmpty()) {
+    if (SubjectStores.findSubjectStore().isEmpty()) {
       return Optional.empty();
     }
     Instant now = Instant.now(clock);
 
-    Optional<?> currentSubject = currentSubject(store.get());
+    // JS-SEC-097 / XR05 (CWE-1041, CWE-636): the subject comes from the shared facade, but a
+    // store that cannot be read is thrown, not read as "no subject" - here that would mean
+    // "nothing to end" and let the request pass.
+    Optional<Object> currentSubject = CurrentSubject.currentPropagatingFailures();
     if (currentSubject.isEmpty()) {
       // Nothing to expire, but the round-trip is activity: a login later in this session
       // must not inherit a stamp from before the anonymous browsing.
@@ -340,12 +342,15 @@ public class SessionLifetimeListener
       }
       return Optional.empty();
     }
-    String subjectId = subjectIdOf(currentSubject.get());
+    // JS-SEC-004 / JS-SEC-097 (CWE-532): the registered SubjectIdResolver, otherwise the
+    // identity handle - never subject.toString(), and never blank (SessionMetadata rejects
+    // a blank id). The same id the navigation and the login rotation derive.
+    String subjectId = CurrentSubject.subjectIdOf(currentSubject.get());
     String sessionId = SessionTermination.sessionIdOf(session);
 
     // JS-SEC-131 (CWE-613): "Revoke" has to end the session, not only edit the store.
     if (VaadinSessionRevocation.isRevoked(session)) {
-      return Optional.of(new Ending(store.get(), subjectId, sessionId, null));
+      return Optional.of(new Ending(subjectId, sessionId, null));
     }
 
     Instant createdAt = sessionCreatedAt(session);
@@ -376,14 +381,14 @@ public class SessionLifetimeListener
         yield Optional.empty();
       }
       case SessionPolicyDecision.IdleTimeout ignored ->
-          Optional.of(new Ending(store.get(), subjectId, sessionId, SessionExpired.REASON_IDLE_TIMEOUT));
+          Optional.of(new Ending(subjectId, sessionId, SessionExpired.REASON_IDLE_TIMEOUT));
       case SessionPolicyDecision.AbsoluteLifetimeExceeded ignored ->
-          Optional.of(new Ending(store.get(), subjectId, sessionId, SessionExpired.REASON_ABSOLUTE_LIFETIME));
+          Optional.of(new Ending(subjectId, sessionId, SessionExpired.REASON_ABSOLUTE_LIFETIME));
     };
   }
 
   private static void enforce(VaadinSession session, Ending ending) {
-    SessionTermination.clearIdentity(session, ending.store());
+    SessionTermination.clearIdentity(session);
     if (ending.revoked()) {
       VaadinSessionRevocation.auditRevoked(ending.subjectId(), ending.sessionId());
     } else {
@@ -465,32 +470,6 @@ public class SessionLifetimeListener
           + "messages over XHR.");
     }
     return true;
-  }
-
-  private Optional<?> currentSubject(SubjectStore store) {
-    Class<?> subjectType = SessionTermination.resolveSubjectType();
-    if (subjectType == null) {
-      return Optional.empty();
-    }
-    return store.currentSubject(subjectType);
-  }
-
-  private static String subjectIdOf(Object subject) {
-    // JS-SEC-004 (CWE-532): derive the audit subjectId via the registered
-    // SubjectIdResolver — never subject.toString(), which commonly serialises
-    // PII (email / hash / internal id) into the audit channel. SessionMetadata
-    // rejects a blank subjectId, so when no resolver is registered (or it
-    // yields blank) fall back to a non-PII identity handle, never toString().
-    Optional<SubjectIdResolver<Object>> resolver =
-        JCustosServiceResolver.findSubjectIdResolver();
-    if (resolver.isPresent()) {
-      String resolved = resolver.get().resolve(subject).value();
-      if (resolved != null && !resolved.isBlank()) {
-        return resolved;
-      }
-    }
-    return subject.getClass().getSimpleName()
-        + "@" + Integer.toHexString(System.identityHashCode(subject));
   }
 
   private static Instant sessionCreatedAt(VaadinSession session) {

@@ -11,10 +11,13 @@
 package eu.jsentinel.jcustos.dx.vaadin.diagnostics;
 
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.autoservice.api.JCustosAutoService;
 import eu.jsentinel.jcustos.dx.diagnostics.DiagnosticContributor;
 import eu.jsentinel.jcustos.dx.diagnostics.DiagnosticReportBuilder;
 import eu.jsentinel.jcustos.dx.diagnostics.ServiceWarning;
+
+import java.util.Optional;
 
 /**
  * Vaadin-side {@link DiagnosticContributor}. Adds Vaadin-specific
@@ -28,6 +31,9 @@ import eu.jsentinel.jcustos.dx.diagnostics.ServiceWarning;
  *       {@code JCustosServiceResolver.loginRouteName()} (JS-SEC-152).</li>
  *   <li>{@code vaadin/step-up-route-unresolved} — no route is registered under
  *       {@code JCustosServiceResolver.stepUpRouteName()} (JS-SEC-152).</li>
+ *   <li>{@code audit/no-subject-id-resolver} — no {@link SubjectIdResolver} can be
+ *       resolved, so the Vaadin stack identifies subjects by their identity handle
+ *       (JS-SEC-097). The bootstrap reports it as a warning, and as an error in STRICT.</li>
  * </ul>
  * The two {@code -unresolved} rules need Vaadin's route registry. Where it cannot be
  * read - {@code inspect()} called without a current {@code VaadinService} - they stay
@@ -77,6 +83,25 @@ public final class VaadinDiagnosticContributor implements DiagnosticContributor 
       "Register a view under that route that renders the MFA / re-authentication challenge, or "
           + "publish its real route name via VaadinSecurity.bootstrap().stepUpRoute(...).";
 
+  /**
+   * Finding code: no {@link SubjectIdResolver} can be resolved; every subject id of the
+   * Vaadin stack is the identity handle (JS-SEC-097, CWE-778).
+   *
+   * @since 00.84.00
+   */
+  public static final String NO_SUBJECT_ID_RESOLVER = "audit/no-subject-id-resolver";
+
+  /**
+   * Suggested fix of {@link #NO_SUBJECT_ID_RESOLVER}.
+   *
+   * @since 00.84.00
+   */
+  public static final String NO_SUBJECT_ID_RESOLVER_FIX =
+      "Register exactly one SubjectIdResolver that maps the application's user to a stable id: "
+          + "VaadinSecurity.bootstrap().sessions(s -> s.subjectIdResolver(...)), "
+          + "@JCustosAutoService(SubjectIdResolver.class) or "
+          + "META-INF/services/eu.jsentinel.jcustos.authorization.api.SubjectIdResolver.";
+
   /** ServiceLoader requires a public no-arg constructor. */
   public VaadinDiagnosticContributor() {
   }
@@ -102,6 +127,10 @@ public final class VaadinDiagnosticContributor implements DiagnosticContributor 
           "step-up-route check failed: " + e.getClass().getSimpleName() + ": " + e.getMessage(),
           "Inspect JCustosServiceResolver state."));
     }
+    // JS-SEC-097 (CWE-778, CWE-1041): without a resolver every subject id is the identity
+    // handle, which no other event of the same user carries.
+    subjectIdResolverProblem().ifPresent(message -> builder.addWarning(new ServiceWarning(
+        NO_SUBJECT_ID_RESOLVER, message, NO_SUBJECT_ID_RESOLVER_FIX)));
     // JS-SEC-152 (CWE-636, CWE-285): the listener reroutes a denied visitor to these two
     // names. A name without a registered route cannot be rerouted to; the visitor then
     // lands in the error view instead of the login or step-up screen.
@@ -126,6 +155,31 @@ public final class VaadinDiagnosticContributor implements DiagnosticContributor 
           "vaadin/rule-failed",
           "route-name check failed: " + e.getClass().getSimpleName() + ": " + e.getMessage(),
           "Inspect JCustosServiceResolver state."));
+    }
+  }
+
+  /**
+   * Checks whether a {@link SubjectIdResolver} can be resolved the way
+   * {@code CurrentSubject.subjectIdOf(...)} resolves it at run time; shared with the
+   * bootstrap finding {@link #NO_SUBJECT_ID_RESOLVER}.
+   *
+   * @return the message of {@link #NO_SUBJECT_ID_RESOLVER} when none can be resolved -
+   *     none registered, or several - otherwise empty
+   * @since 00.84.00
+   */
+  public static Optional<String> subjectIdResolverProblem() {
+    String consequence = " Audit events and access contexts of the Vaadin stack identify a "
+        + "subject by its identity handle (SimpleClassName@hash): it changes with every subject "
+        + "object and cannot be correlated with the events of other sessions or adapters.";
+    try {
+      if (JCustosServiceResolver.findSubjectIdResolver().isPresent()) {
+        return Optional.empty();
+      }
+      return Optional.of("No SubjectIdResolver is registered." + consequence);
+    } catch (RuntimeException ambiguous) {
+      return Optional.of("No SubjectIdResolver can be resolved ("
+          + ambiguous.getClass().getSimpleName() + ", for instance several registered "
+          + "implementations)." + consequence);
     }
   }
 

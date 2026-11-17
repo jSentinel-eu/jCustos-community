@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.authorization.LoginListener;
 import eu.jsentinel.jcustos.authorization.LoginListeners;
 import eu.jsentinel.jcustos.authorization.LoginView;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.test.InMemorySubjectStore;
@@ -55,11 +56,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("SessionLifetimeListener")
@@ -216,6 +219,28 @@ class SessionLifetimeListenerTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-097 / XR05: a subject store that cannot be read stops the check - it is not 'no subject'")
+  void unreadableSubjectStore_stopsTheCheck() {
+    InMemoryVaadinSession session = bindSession(T0);
+    SubjectStores.setSubjectStore(new UnreadableSubjectStore());
+    JCustosServiceResolver.setSessionPolicy(
+        new AlwaysDecide<String>(SessionPolicyDecision.idleTimeout()));
+    SessionLifetimeListener listener = new SessionLifetimeListener(
+        Clock.fixed(T0.plusSeconds(60), ZoneOffset.UTC));
+    RecordingEvent event = new RecordingEvent();
+
+    // CurrentSubject.current() would read the failure as "no subject" - for this check
+    // "nothing to end" - and let the request through.
+    IllegalStateException failure = assertThrows(IllegalStateException.class,
+        () -> listener.beforeEnter(event));
+
+    assertEquals(UnreadableSubjectStore.MESSAGE, failure.getMessage());
+    assertNull(session.getAttribute(SessionLifetimeListener.LAST_ACTIVITY_ATTRIBUTE),
+        "an unreadable store is no anonymous activity");
+    assertNull(event.forwardTarget);
+  }
+
+  @Test
   @DisplayName("absolute-lifetime expiry uses the ABSOLUTE_LIFETIME audit label")
   void absoluteLifetime_label() {
     bindSession(T0);
@@ -352,6 +377,23 @@ class SessionLifetimeListenerTest {
     @Override public void removeAttribute(String name) { }
     @Override public void setAttribute(String name, Object value) { }
     @Override public void setMaxInactiveInterval(int interval) { }
+  }
+
+  /** A SubjectStore whose backend is down. */
+  static final class UnreadableSubjectStore implements SubjectStore {
+    static final String MESSAGE = "subject store unreachable";
+
+    @Override public <T> Optional<T> currentSubject(Class<T> subjectType) {
+      throw new IllegalStateException(MESSAGE);
+    }
+
+    @Override public <T> void setCurrentSubject(T subject, Class<T> subjectType) {
+      throw new IllegalStateException(MESSAGE);
+    }
+
+    @Override public <T> void deleteCurrentSubject(Class<T> subjectType) {
+      throw new IllegalStateException(MESSAGE);
+    }
   }
 
   /** A SessionPolicy that always returns Active. */

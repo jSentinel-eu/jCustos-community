@@ -118,7 +118,7 @@ public final class SecuredMenuItem {
 
   /** Re-runs the visibility check against the current subject. */
   public void refresh() {
-    SecuredVisibility.apply(new MenuItemTarget(menuItem), requirement, mode, viewSupplier);
+    SecuredVisibility.apply(new ComponentTarget(menuItem), requirement, mode, viewSupplier);
   }
 
   /** @return the bound MenuItem */
@@ -134,20 +134,5 @@ public final class SecuredMenuItem {
   /** @return the visibility mode */
   public SecuredVisibilityMode mode() {
     return mode;
-  }
-
-  private record MenuItemTarget(MenuItem menuItem) implements SecuredVisibility.Target {
-    @Override public void setVisible(boolean visible) {
-      menuItem.setVisible(visible);
-    }
-    @Override public boolean isVisible() {
-      return menuItem.isVisible();
-    }
-    @Override public void setEnabled(boolean enabled) {
-      menuItem.setEnabled(enabled);
-    }
-    @Override public boolean isEnabled() {
-      return menuItem.isEnabled();
-    }
   }
 }

@@ -19,9 +19,9 @@ package eu.jsentinel.jcustos.session.vaadin;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.dependencies.core.net.MediaType;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
 import com.vaadin.flow.internal.CurrentInstance;
 import com.vaadin.flow.server.HandlerHelper;
@@ -174,19 +174,12 @@ final class SessionTermination {
 
   /**
    * Best-effort removal of everything that authenticates the session bound to the current
-   * thread: the subject, the security-version snapshot and a bound token credential. Never
-   * throws.
+   * thread: the subject (through {@link CurrentSubject#clear()}, JS-SEC-097), the
+   * security-version snapshot and a bound token credential. Never throws.
    */
-  static void clearIdentity(VaadinSession session, SubjectStore store) {
-    try {
-      Class<?> subjectType = resolveSubjectType();
-      SubjectStore effective = store != null ? store : SubjectStores.findSubjectStore().orElse(null);
-      if (subjectType != null && effective != null) {
-        removeSubjectUnchecked(effective, subjectType);
-      }
-    } catch (RuntimeException ignored) {
-      // the session is closed regardless
-    }
+  static void clearIdentity(VaadinSession session) {
+    // never throws; a failure is logged there - the session is closed regardless
+    CurrentSubject.clear();
     try {
       VaadinJCustosVersionContext.clear(session);
     } catch (RuntimeException ignored) {
@@ -283,7 +276,7 @@ final class SessionTermination {
   static void endAfterFailedCheck(VaadinSession session) {
     try {
       underLock(session, Boolean.FALSE, locked -> {
-        clearIdentity(locked, null);
+        clearIdentity(locked);
         closeInvalidateAndDestroy(locked);
         return Boolean.TRUE;
       });
@@ -301,18 +294,23 @@ final class SessionTermination {
     }
   }
 
-  static Class<?> resolveSubjectType() {
-    try {
-      return JCustosServiceResolver.<Object, Object>authenticationService().subjectType();
-    } catch (RuntimeException ignored) {
-      return null;
-    }
+  /**
+   * As {@link #clearIdentity(VaadinSession)}. The store argument is not read: every caller
+   * passes the registered {@link SubjectStore}, the one {@link CurrentSubject#clear()}
+   * resolves itself. Kept for {@link VaadinSessionRevocation} until it moves to
+   * {@link CurrentSubject} (JS-SEC-097 follow-up).
+   */
+  static void clearIdentity(VaadinSession session, SubjectStore registeredStore) {
+    clearIdentity(session);
   }
 
-  @SuppressWarnings({"rawtypes", "unchecked"})
-  static void removeSubjectUnchecked(SubjectStore store, Class<?> subjectType) {
-    Class raw = subjectType;
-    store.deleteCurrentSubject(raw);
+  /**
+   * The subject type of the registered authentication service, or {@code null}. Delegates
+   * to {@link CurrentSubject#subjectType()}; kept for {@link VaadinSessionRevocation} until
+   * it moves to {@link CurrentSubject} (JS-SEC-097 follow-up).
+   */
+  static Class<?> resolveSubjectType() {
+    return CurrentSubject.subjectType().orElse(null);
   }
 
   /** @return the id of the HTTP session behind {@code session}, or {@code null} */

@@ -20,11 +20,11 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.audit.SessionRef;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStore;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.net.vaadin.VaadinClientAddress;
@@ -308,7 +308,7 @@ public final class LoginSessionRotation {
       // JS-SEC-117: the retired id is still a credential until the container forgets it.
       sink.publish(new SessionInvalidated(
           Instant.now(),
-          auditIdOf(currentSubject().orElse(null)),
+          auditIdOf(CurrentSubject.current().orElse(null)),
           SessionRef.ofNullable(oldSessionId),
           reason == null ? DEFAULT_REASON : reason));
     } catch (RuntimeException auditFailure) {
@@ -324,20 +324,16 @@ public final class LoginSessionRotation {
     return auditIdOf(context.subject());
   }
 
+  /**
+   * R14 / JS-SEC-097 (CWE-532, CWE-1041): never {@code subject.toString()} - an application
+   * user object commonly serialises an e-mail address, a hash or an internal id. The id is
+   * {@link CurrentSubject#subjectIdOf(Object)}: the registered {@link SubjectIdResolver},
+   * otherwise the identity handle, as navigation and session lifetime derive it. Until
+   * 00.84.00 the rotation audit carried an empty id without a resolver. Empty only when no
+   * subject is bound.
+   */
   private static String auditIdOf(Object subject) {
-    if (subject == null) {
-      return "";
-    }
-    // R14 (V00.76.10): never publish subject.toString() as the audit subject id.
-    // An application user object's toString() commonly serialises email / hash /
-    // internal ids into the audit channel — the leak class R019 / R020-R021
-    // closed on the REST / StepUp / policy paths. Derive a stable id via the
-    // registered SubjectIdResolver (the same resolver the JCustosVersion
-    // snapshot path uses), falling back to a non-PII empty id when none is
-    // registered (audit attribution requires a resolver by design).
-    Optional<SubjectIdResolver<Object>> resolver =
-        JCustosServiceResolver.findSubjectIdResolver();
-    return resolver.map(r -> r.resolve(subject).value()).orElse("");
+    return subject == null ? "" : CurrentSubject.subjectIdOf(subject);
   }
 
   /**
@@ -364,30 +360,9 @@ public final class LoginSessionRotation {
     // ClientAddressResolver, never from getRemoteAddr() directly, so a
     // reverse-proxy deployment cannot be keyed on a forgeable header.
     String clientAddress = VaadinClientAddress.current().orElse(null);
-    Object subject = currentSubject().orElse(null);
+    Object subject = CurrentSubject.current().orElse(null);
     return Optional.of(new SessionContext<>(
         subject, sessionId, createdAt, createdAt, clientAddress, Map.of()));
-  }
-
-  @SuppressWarnings("unchecked")
-  private static Optional<Object> currentSubject() {
-    try {
-      Class<?> subjectType = JCustosServiceResolver
-          .<Object, Object>authenticationService()
-          .subjectType();
-      if (subjectType == null) {
-        return Optional.empty();
-      }
-      SubjectStore store = SubjectStores.findSubjectStore().orElse(null);
-      if (store == null) {
-        return Optional.empty();
-      }
-      @SuppressWarnings({"rawtypes", "unchecked"})
-      Class raw = subjectType;
-      return store.currentSubject(raw).map(value -> (Object) value);
-    } catch (RuntimeException ignored) {
-      return Optional.empty();
-    }
   }
 
   /**
@@ -434,7 +409,7 @@ public final class LoginSessionRotation {
         }
         return;
       }
-      Object subject = currentSubject().orElse(null);
+      Object subject = CurrentSubject.current().orElse(null);
       if (subject == null) {
         return;
       }

@@ -200,6 +200,10 @@ final class VaadinJCustosBootstrapImpl
     // must resolve to registered routes.
     checkRerouteTargets(warnings);
 
+    // JS-SEC-097 (CWE-778, CWE-1041): after applyCommonConfiguration, so a resolver passed
+    // through .sessions(s -> s.subjectIdResolver(...)) is already registered.
+    checkSubjectIdResolver(warnings);
+
     // V00.73 (Prompt 009): auto-wire VaadinSessionSubjectStore as the
     // default SubjectStore when the consumer didn't register one.
     // Caller-provided SubjectStore (via SubjectStores.setSubjectStore
@@ -314,6 +318,27 @@ final class VaadinJCustosBootstrapImpl
   @SuppressWarnings("unused")
   private static void discard(Object ignored) {
     // intentional no-op
+  }
+
+  /**
+   * JS-SEC-097 (CWE-778, CWE-1041): without a {@code SubjectIdResolver} the Vaadin stack
+   * identifies a subject by its identity handle ({@code SimpleClassName@hash}) - in
+   * navigation and action audit events, session events, the login rotation and the
+   * contexts the policies see. The handle never leaks the subject's {@code toString()}, but
+   * it changes with every subject object and correlates with nothing outside the session
+   * (decision F06 of 2026-11-17).
+   * <ul>
+   *   <li>{@code audit/no-subject-id-resolver} - WARNING; ERROR in STRICT, so a STRICT
+   *       application without a resolver does not boot.</li>
+   * </ul>
+   */
+  private void checkSubjectIdResolver(List<JCustosBootstrapWarning> warnings) {
+    VaadinDiagnosticContributor.subjectIdResolverProblem().ifPresent(message ->
+        warnings.add(new JCustosBootstrapWarning(
+            state.mode() == JCustosBootstrapMode.STRICT ? Severity.ERROR : Severity.WARNING,
+            VaadinDiagnosticContributor.NO_SUBJECT_ID_RESOLVER,
+            message,
+            VaadinDiagnosticContributor.NO_SUBJECT_ID_RESOLVER_FIX)));
   }
 
   /**

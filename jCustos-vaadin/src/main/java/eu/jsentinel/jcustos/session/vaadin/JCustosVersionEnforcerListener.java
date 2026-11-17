@@ -18,9 +18,8 @@ package eu.jsentinel.jcustos.session.vaadin;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.SessionRef;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
-import eu.jsentinel.jcustos.authorization.api.SubjectStore;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer.EnforcementOutcome;
 import com.vaadin.flow.component.Component;
@@ -134,7 +133,8 @@ public final class JCustosVersionEnforcerListener
       // enforcer then no-op'd (snapshot gone) and the AuthorizationListener
       // granted against the stale subject, so revocation was never enforced
       // beyond the single reroute.
-      clearCurrentSubject();
+      // JS-SEC-097: best effort through the shared facade; a failure never blocks the reroute.
+      CurrentSubject.clear();
       // Clear the snapshot so subsequent requests aren't re-checked
       // against the stale value while the user is on the login page.
       VaadinJCustosVersionContext.clear(VaadinSession.getCurrent());
@@ -266,30 +266,7 @@ public final class JCustosVersionEnforcerListener
     if (!(outcome instanceof EnforcementOutcome.SessionStale)) {
       return false;
     }
-    SessionTermination.clearIdentity(session, null);
+    SessionTermination.clearIdentity(session);
     return true;
-  }
-
-  /**
-   * Best-effort drop of the cached subject on drift. A missing
-   * {@code SubjectStore}, an unresolvable subject type, or a removal failure
-   * must never break the reroute — but on the common path this forces the next
-   * navigation to be evaluated without a subject, so the revoked user is
-   * effectively logged out until re-authentication.
-   */
-  private static void clearCurrentSubject() {
-    try {
-      Optional<SubjectStore> store = SubjectStores.findSubjectStore();
-      if (store.isEmpty()) {
-        return;
-      }
-      Class<?> subjectType = SessionTermination.resolveSubjectType();
-      if (subjectType == null) {
-        return;
-      }
-      SessionTermination.removeSubjectUnchecked(store.get(), subjectType);
-    } catch (RuntimeException ignored) {
-      // never block the reroute because subject removal failed
-    }
   }
 }

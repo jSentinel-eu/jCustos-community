@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("TimeoutSessionPolicy")
 class TimeoutSessionPolicyTest {
@@ -224,8 +225,8 @@ class TimeoutSessionPolicyTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-004: audit subjectId is empty (never toString()) when no resolver is registered")
-  void auditSubjectIdEmptyWithoutResolver() {
+  @DisplayName("JS-SEC-004 / JS-SEC-097: without a resolver the audit subjectId is the identity handle, never toString()")
+  void auditSubjectIdIsIdentityHandleWithoutResolver() {
     Instant t0 = Instant.parse("2026-05-08T10:00:00Z");
     JCustosServiceResolver.resetAll(); // ensure no resolver is registered
     RecordingAudit audit = new RecordingAudit();
@@ -235,8 +236,10 @@ class TimeoutSessionPolicyTest {
     policy.onLogout(ctx(t0, t0));
 
     SessionInvalidated event = (SessionInvalidated) audit.events.get(0);
-    assertEquals("", event.subjectId(),
-        "no resolver → empty subjectId, never subject.toString() (JS-SEC-004)");
+    assertTrue(event.subjectId().startsWith("String@"),
+        "no resolver → the identity handle of CurrentSubject, got " + event.subjectId());
+    assertNotEquals("alice", event.subjectId(),
+        "never subject.toString() (JS-SEC-004)");
   }
 
   @Test
