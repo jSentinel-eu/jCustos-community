@@ -56,6 +56,14 @@
       <version>${project.version}</version>
     </dependency>
 
+    <!-- JS-SEC-067: JCustosErrorHandler sets the error handler of a VaadinSession, whose
+         type references jakarta.servlet types; provided by the servlet container. -->
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
     <dependency>
       <groupId>eu.jsentinel</groupId>
       <artifactId>jCustos-test</artifactId>
@@ -65,6 +73,14 @@
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- JS-SEC-067: JCustosErrorHandler is tested through real Vaadin sessions, the
+         router and the RPC handler (browserless). -->
+    <dependency>
+      <groupId>com.vaadin</groupId>
+      <artifactId>browserless-test-junit6</artifactId>
+      <version>1.0.0</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

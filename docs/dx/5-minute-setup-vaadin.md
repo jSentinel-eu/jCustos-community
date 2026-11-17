@@ -121,11 +121,52 @@ Fail-closed wiring, as the demos and skills ship it since 00.84.00:
 - **Session cookie.** Give the application its own cookie name in `web.xml`
   (`<cookie-config><name>MYAPP_SESSION</name><http-only>true</http-only><secure>true</secure>`),
   never the shared `JSESSIONID`.
+- **Unhandled errors.** Install the starter's `JCustosErrorHandler` (experimental, opt-in, see
+  below): an exception that escapes a listener shows the user a reference instead of its
+  message, and the log keeps the stack trace under that reference (JS-SEC-067).
 
 The full V00.73 sub-builder set is `.audit(...)`, `.sessions(...)`,
 `.policies(...)`, `.roles(...)`, `.credentials(...)`. Each method's
 JavaDoc lists the validation codes (e.g. `audit/missing-service`,
 `sessions/missing-store`, `credentials/modern-without-bc`).
+
+### Unhandled errors: a reference for the user, the stack trace for the log (00.84.00)
+
+An exception thrown in a click listener, a value-change listener or a `UI.access` command
+reaches the session's `ErrorHandler`. A home-grown handler that puts the exception message into
+a notification shows the browser SQL, file paths and account data (CWE-209). The starter ships
+one that does not; call it from the application's `VaadinServiceInitListener` (registered in
+`META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener`):
+
+```java
+import eu.jsentinel.jcustos.starter.errors.JCustosErrorHandler;
+
+public final class AppServiceInitListener implements VaadinServiceInitListener {
+  @Override
+  public void serviceInit(ServiceInitEvent event) {
+    JCustosErrorHandler.install(event);   // every new session gets the handler
+  }
+}
+```
+
+What it does with an error:
+
+1. A `HasErrorParameter` view registered for exactly the class of the exception is shown, as
+   Vaadin's default handler does - `HasErrorParameter<AccessDeniedException>` for the denial of a
+   secured service, for example. Nothing else happens.
+2. Otherwise the log receives `Unhandled error, reference K7Q2MZ4XB3TAW5CD` at ERROR with the
+   stack trace - 16 Base32 characters from `SecureRandom`, nothing from the request.
+3. The user sees a notification with that reference only: *An unexpected error occurred. Please
+   quote reference K7Q2MZ4XB3TAW5CD when you report it.* Translate it with the key
+   `jcustos.error.reference` in the application's `vaadin-i18n/translations_*.properties`; `{0}`
+   is the reference, and a translation without it is ignored.
+
+A client that went away (`SocketException`, Jetty's `EofException`, ...) is not reported, as with
+Vaadin's default. A failure inside the handler, and an error raised while it is running, is
+logged and never shown, so the handler cannot recurse. To show the reference differently - in a
+dialog, with a support address - subclass it, override `showReference(UI, String)` and set the
+subclass with `event.getSource().addSessionInitListener(e -> e.getSession().setErrorHandler(new
+MyErrorHandler()))`.
 
 ## 4. Guard a route
 
