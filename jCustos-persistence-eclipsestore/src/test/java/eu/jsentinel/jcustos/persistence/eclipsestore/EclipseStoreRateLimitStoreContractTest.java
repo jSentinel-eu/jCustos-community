@@ -18,14 +18,37 @@ package eu.jsentinel.jcustos.persistence.eclipsestore;
 
 import eu.jsentinel.jcustos.persistence.testkit.RateLimitStoreContract;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitStore;
+import org.junit.jupiter.api.AfterEach;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 
 class EclipseStoreRateLimitStoreContractTest
     extends EclipseStoreContractTestBase
     implements RateLimitStoreContract {
 
+  /** Storages opened with a small bound for the capacity test; closed after each test. */
+  private final List<EclipseStoreJCustosStorage> bounded = new ArrayList<>();
+
   @Override
   public RateLimitStore newStore() {
     return storage.rateLimitStore();
+  }
+
+  /** A storage of its own whose request-keyed stores hold at most {@code maxKeys} keys. */
+  @Override
+  public Optional<RateLimitStore> newBoundedStore(int maxKeys) {
+    EclipseStoreJCustosStorage small = EclipseStoreJCustosStorage.openAt(
+        tempDir.resolve("bounded-" + bounded.size()), maxKeys);
+    bounded.add(small);
+    return Optional.of(small.rateLimitStore());
+  }
+
+  @AfterEach
+  void closeBoundedStorages() {
+    bounded.forEach(EclipseStoreJCustosStorage::close);
+    bounded.clear();
   }
 
   /** JS-SEC-166: node B gets an adapter of its own over the same storage. */

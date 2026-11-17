@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -66,7 +67,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * {@code purgeOlderThan} drops once it has ended. A store that does not report
  * the oldest event overrides {@link #reportsOldestInWindow()}; a store that
  * keeps no blocks overrides {@link #keepsBlocks()}, and the contract then checks
- * that it refuses blocks instead of dropping them.</p>
+ * that it refuses blocks instead of dropping them. A store with a bound on its
+ * keys builds a small one through {@link #newBoundedStore(int)}: a key whose block
+ * lasts must survive a flood of new keys at the bound - unblocked keys make room.
+ * A store without such a bound keeps the default, which skips that test.</p>
  *
  * <p>Several nodes (JS-SEC-166, since 00.84.00): the tests whose name starts with
  * {@code JS-SEC-166} run two {@link InMemoryRateLimitPolicy} instances - two
@@ -119,6 +123,18 @@ public interface RateLimitStoreContract {
    */
   default boolean keepsBlocks() {
     return true;
+  }
+
+  /**
+   * A fresh, empty store of the kind under test that tracks at most {@code maxKeys} keys, for
+   * the capacity test. The default is empty: a store without a bound on its keys skips it.
+   *
+   * @param maxKeys the bound; the contract asks for a small one
+   * @return the store; empty for a store whose keys are not bounded
+   * @since 00.84.00
+   */
+  default Optional<RateLimitStore> newBoundedStore(int maxKeys) {
+    return Optional.empty();
   }
 
   Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
@@ -546,6 +562,36 @@ public interface RateLimitStoreContract {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  @Test
+  @DisplayName("a lasting block survives capacity pressure: a flood of new keys makes room with unblocked keys, the blocked key stays refused")
+  default void lastingBlockSurvivesCapacityPressure() {
+    assumeTrue(keepsBlocks(), "this store keeps no blocks");
+    int maxKeys = 4;
+    Optional<RateLimitStore> bounded = newBoundedStore(maxKeys);
+    assumeTrue(bounded.isPresent(), "the store under test has no bound on its keys");
+    RateLimitStore store = bounded.get();
+    Duration blockDuration = Duration.ofHours(1);
+    InMemoryRateLimitPolicy policy = node(store, Clock.fixed(T0, ZoneOffset.UTC), 1,
+        Duration.ofMinutes(1), new RateLimitEscalation(1, Duration.ofHours(1), blockDuration));
+    RateLimitKey victim = key("login:user:victim");
+    assertInstanceOf(RateLimitDecision.Allowed.class, policy.tryAcquire(victim));
+    assertInstanceOf(RateLimitDecision.Blocked.class, policy.tryAcquire(victim),
+        "the first throttle blocks");
+
+    // the blocked client stops asking for its key and mints fresh ones: four times the bound
+    for (int i = 0; i < 4 * maxKeys; i++) {
+      assertInstanceOf(RateLimitDecision.Allowed.class,
+          policy.tryAcquire(key("login:user:junk-" + i)), "fresh key " + i);
+    }
+
+    assertEquals(Optional.of(T0.plus(blockDuration)), store.blockedUntil(victim),
+        "the block survived the flood");
+    assertInstanceOf(RateLimitDecision.Blocked.class, policy.tryAcquire(victim),
+        "the key is still refused");
+    assertEquals(0, store.countSince(key("login:user:junk-0"), T0.minusSeconds(60)),
+        "an unblocked key made room");
   }
 
   @Test

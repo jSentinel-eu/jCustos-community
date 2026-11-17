@@ -29,10 +29,19 @@ import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordResult;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -40,7 +49,12 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * Opt-in online {@link CompromisedPasswordChecker} that talks to a
@@ -67,6 +81,10 @@ import java.util.function.Function;
  * lookup} so tests can run without network. The static factory
  * {@link #usingJdkHttpClient(URI, Duration)} wires a default
  * implementation built on {@link HttpClient}.</p>
+ *
+ * <p>The UTF-8 bytes of the candidate are encoded into one buffer that is
+ * zeroed once the digest is computed, and nowhere else (since 00.84.00;
+ * before, the encoder's own buffer kept them on the heap).</p>
  */
 public final class HaveIBeenPwnedCompromisedPasswordChecker
     implements CompromisedPasswordChecker {
@@ -78,11 +96,26 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
   public static final URI DEFAULT_ENDPOINT =
       URI.create("https://api.pwnedpasswords.com/range/");
 
+  /**
+   * Largest range response that is read: {@value} bytes. A padded HIBP range response is a
+   * few tens of KB; a larger body is a network failure, not a verdict (R12).
+   */
+  static final int MAX_RANGE_BYTES = 1024 * 1024;
+
   private final Function<String, RangeResponse> rangeLookup;
+  /** Hands out the buffer the candidate's UTF-8 bytes are encoded into; a test seam. */
+  private final IntFunction<byte[]> utf8Buffers;
 
   HaveIBeenPwnedCompromisedPasswordChecker(
       Function<String, RangeResponse> rangeLookup) {
+    this(rangeLookup, byte[]::new);
+  }
+
+  /** Test seam: {@code utf8Buffers} allocates the buffer the candidate is encoded into. */
+  HaveIBeenPwnedCompromisedPasswordChecker(
+      Function<String, RangeResponse> rangeLookup, IntFunction<byte[]> utf8Buffers) {
     this.rangeLookup = Objects.requireNonNull(rangeLookup, "rangeLookup");
+    this.utf8Buffers = Objects.requireNonNull(utf8Buffers, "utf8Buffers");
   }
 
   /**
@@ -93,7 +126,13 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
    *                 path segment. {@code https}; plain {@code http} only
    *                 to a loopback host with {@code -Djcustos.dev=true}
    *                 (since 00.84.00, see {@link EndpointSecurity})
-   * @param timeout  per-request timeout
+   * @param timeout  deadline of one range query - connection, response
+   *                 headers and the whole body. Since 00.84.00 it covers the
+   *                 body on every JDK, and a body that does not arrive in
+   *                 time is a {@code TIMEOUT} failure; before, the JDK's
+   *                 request timeout bounded the headers only on some JDKs,
+   *                 and where it did bound the body, its expiry was reported
+   *                 as {@code NETWORK}.
    */
   public static HaveIBeenPwnedCompromisedPasswordChecker usingJdkHttpClient(
       URI endpoint, Duration timeout) {
@@ -107,62 +146,105 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
     EndpointSecurity.requireHttps(endpoint, "hibp/endpoint-not-https");
     // R12 (V00.76.10): cap the response body so a hostile / compromised mirror
     // (operators may repoint the endpoint) cannot return a multi-GB body and OOM
-    // the verifying JVM. A padded HIBP range response is a few tens of KB; 1 MiB
-    // sits far above any legitimate response.
-    final int maxRangeBytes = 1024 * 1024;
+    // the verifying JVM - MAX_RANGE_BYTES sits far above any legitimate response.
     HttpClient http = HttpClient.newBuilder()
         .connectTimeout(timeout)
         // R12: never follow redirects — the HIBP range API does not redirect, and
         // a redirect from a hostile mirror is a request-forwarding / SSRF vector.
         .followRedirects(HttpClient.Redirect.NEVER)
         .build();
+    long deadlineNanos = saturatedNanos(timeout);
     Function<String, RangeResponse> lookup = prefix -> {
+      HttpRequest req = HttpRequest.newBuilder()
+          .uri(endpoint.resolve(prefix))
+          .header("Accept", MediaType.TEXT_PLAIN.mime())
+          // R022: request padded range responses so a network observer cannot
+          // infer the queried bucket size. Padding entries arrive with a count
+          // of 0 and are tolerated by scan().
+          .header("Add-Padding", "true")
+          .GET()
+          .build();
+      // One deadline for the whole exchange, body included. HttpRequest.timeout bounds the
+      // headers only on some JDKs; where it bounds the body, an expired body surfaces as a
+      // plain IOException. The request therefore carries none, and the deadline is the wait
+      // for the complete response; on expiry the exchange is cancelled.
+      CompletableFuture<HttpResponse<byte[]>> pending = http.sendAsync(req,
+          HttpResponse.BodyHandlers.limiting(
+              HaveIBeenPwnedCompromisedPasswordChecker::rangeBody, MAX_RANGE_BYTES));
+      HttpResponse<byte[]> res;
       try {
-        HttpRequest req = HttpRequest.newBuilder()
-            .uri(endpoint.resolve(prefix))
-            .timeout(timeout)
-            .header("Accept", MediaType.TEXT_PLAIN.mime())
-            // R022: request padded range responses so a network observer cannot
-            // infer the queried bucket size. Padding entries arrive with a count
-            // of 0 and are tolerated by scan().
-            .header("Add-Padding", "true")
-            .GET()
-            .build();
-        HttpResponse<java.io.InputStream> res = http.send(req,
-            HttpResponse.BodyHandlers.ofInputStream());
-        int status = res.statusCode();
-        if (status == HttpStatus.TOO_MANY_REQUESTS.code()) {
-          return new RangeResponse(null,
-              CompromisedPasswordResult.FailureReason.RATE_LIMITED);
-        }
-        if (status < HttpStatus.OK.code() || status >= HttpStatus.MULTIPLE_CHOICES.code()) {
-          return new RangeResponse(null,
-              CompromisedPasswordResult.FailureReason.NETWORK);
-        }
-        // R12: read at most maxRangeBytes + 1; a body over the cap is treated as
-        // a network failure rather than buffered into the heap.
-        byte[] body;
-        try (java.io.InputStream in = res.body()) {
-          body = in.readNBytes(maxRangeBytes + 1);
-        }
-        if (body.length > maxRangeBytes) {
-          return new RangeResponse(null,
-              CompromisedPasswordResult.FailureReason.NETWORK);
-        }
-        return new RangeResponse(new String(body, StandardCharsets.US_ASCII), null);
-      } catch (java.net.http.HttpTimeoutException timeoutEx) {
+        res = pending.get(deadlineNanos, TimeUnit.NANOSECONDS);
+      } catch (TimeoutException expired) {
+        pending.cancel(true);
         return new RangeResponse(null,
             CompromisedPasswordResult.FailureReason.TIMEOUT);
-      } catch (java.io.IOException io) {
-        return new RangeResponse(null,
-            CompromisedPasswordResult.FailureReason.NETWORK);
+      } catch (ExecutionException failed) {
+        Throwable cause = failed.getCause();
+        if (cause instanceof HttpTimeoutException) {
+          // the connect timeout
+          return new RangeResponse(null,
+              CompromisedPasswordResult.FailureReason.TIMEOUT);
+        }
+        // R12: a body over the cap is an IOException of the limiting handler - a network
+        // failure rather than a body buffered into the heap
+        return new RangeResponse(null, cause instanceof IOException
+            ? CompromisedPasswordResult.FailureReason.NETWORK
+            : CompromisedPasswordResult.FailureReason.UNKNOWN);
       } catch (InterruptedException ie) {
+        pending.cancel(true);
         Thread.currentThread().interrupt();
         return new RangeResponse(null,
             CompromisedPasswordResult.FailureReason.NETWORK);
       }
+      int status = res.statusCode();
+      if (status == HttpStatus.TOO_MANY_REQUESTS.code()) {
+        return new RangeResponse(null,
+            CompromisedPasswordResult.FailureReason.RATE_LIMITED);
+      }
+      if (!successful(status)) {
+        return new RangeResponse(null,
+            CompromisedPasswordResult.FailureReason.NETWORK);
+      }
+      return new RangeResponse(new String(res.body(), StandardCharsets.US_ASCII), null);
     };
     return new HaveIBeenPwnedCompromisedPasswordChecker(lookup);
+  }
+
+  /** @return {@code duration} in nanoseconds, {@link Long#MAX_VALUE} for a longer one */
+  private static long saturatedNanos(Duration duration) {
+    try {
+      return duration.toNanos();
+    } catch (ArithmeticException beyondLong) {
+      return Long.MAX_VALUE;
+    }
+  }
+
+  /** @return whether {@code status} is a 2xx */
+  private static boolean successful(int status) {
+    return status >= HttpStatus.OK.code() && status < HttpStatus.MULTIPLE_CHOICES.code();
+  }
+
+  /**
+   * The body of a range response: read in full for a 2xx, within the limit of the handler
+   * around it; not read at all otherwise - the status decides, and a hostile mirror cannot
+   * hold the thread with the body of an error.
+   */
+  private static HttpResponse.BodySubscriber<byte[]> rangeBody(HttpResponse.ResponseInfo info) {
+    if (successful(info.statusCode())) {
+      return HttpResponse.BodySubscribers.ofByteArray();
+    }
+    return HttpResponse.BodySubscribers.mapping(HttpResponse.BodySubscribers.ofInputStream(),
+        HaveIBeenPwnedCompromisedPasswordChecker::unread);
+  }
+
+  /** Closes a body that is not read; closing the stream cancels its subscription. */
+  private static byte[] unread(InputStream body) {
+    try {
+      body.close();
+    } catch (IOException ignored) {
+      // nothing of the body is used
+    }
+    return new byte[0];
   }
 
   @Override
@@ -171,8 +253,10 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
     char[] chars = password.asChars();
     byte[] utf8 = null;
     try {
-      utf8 = toUtf8(chars);
-      String hex = sha1Hex(utf8);
+      // UTF-8 needs at most three bytes per char: a surrogate pair takes four for two
+      utf8 = utf8Buffers.apply(Math.multiplyExact(chars.length, 3));
+      int length = encodeUtf8(chars, utf8);
+      String hex = sha1Hex(utf8, length);
       String prefix = hex.substring(0, 5);
       String suffix = hex.substring(5);
       RangeResponse response = rangeLookup.apply(prefix);
@@ -273,18 +357,39 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
     return any ? result : 1L;
   }
 
-  private static byte[] toUtf8(char[] chars) {
-    java.nio.CharBuffer cb = java.nio.CharBuffer.wrap(chars);
-    java.nio.ByteBuffer bb = StandardCharsets.UTF_8.encode(cb);
-    byte[] out = new byte[bb.remaining()];
-    bb.get(out);
-    return out;
+  /**
+   * Encodes {@code chars} as UTF-8 straight into {@code into}, which the caller zeroes - no
+   * other buffer ever holds the bytes. Malformed input (an unpaired surrogate) becomes
+   * {@code ?}, as {@code StandardCharsets.UTF_8.encode} does.
+   *
+   * @return the number of bytes written
+   */
+  static int encodeUtf8(char[] chars, byte[] into) {
+    CharsetEncoder encoder = StandardCharsets.UTF_8.newEncoder()
+        .onMalformedInput(CodingErrorAction.REPLACE)
+        .onUnmappableCharacter(CodingErrorAction.REPLACE);
+    ByteBuffer out = ByteBuffer.wrap(into);
+    try {
+      CoderResult encoded = encoder.encode(CharBuffer.wrap(chars), out, true);
+      if (!encoded.isUnderflow()) {
+        encoded.throwException();
+      }
+      CoderResult flushed = encoder.flush(out);
+      if (!flushed.isUnderflow()) {
+        flushed.throwException();
+      }
+    } catch (CharacterCodingException overflow) {
+      // cannot happen with three bytes per char; never a partial digest
+      throw new IllegalStateException("the UTF-8 buffer is too small", overflow);
+    }
+    return out.position();
   }
 
-  private static String sha1Hex(byte[] bytes) {
+  private static String sha1Hex(byte[] bytes, int length) {
     try {
       MessageDigest md = MessageDigest.getInstance("SHA-1");
-      byte[] digest = md.digest(bytes);
+      md.update(bytes, 0, length);
+      byte[] digest = md.digest();
       StringBuilder sb = new StringBuilder(digest.length * 2);
       for (byte b : digest) {
         sb.append(Character.forDigit((b >> 4) & 0xF, 16));

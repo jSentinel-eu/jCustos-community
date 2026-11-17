@@ -212,6 +212,68 @@ class EclipseStoreRateLimitEscalationTest {
   }
 
   @Test
+  @DisplayName("at the bound an idle key with a lasting block stays; the unblocked keys make room")
+  void idleLastingBlockSurvivesTheBound() {
+    try (EclipseStoreJCustosStorage storage =
+             EclipseStoreJCustosStorage.openAt(tempDir, 3, Clock.fixed(T0, ZoneOffset.UTC))) {
+      RateLimitStore store = storage.rateLimitStore();
+      store.block(KEY, T0.plusSeconds(600)); // the eldest entry, and nobody asks for it again
+      for (int i = 0; i < 12; i++) {
+        RateLimitKey fresh = new RateLimitKey(TenantId.DEFAULT, "ip:192.0.2." + i);
+        assertTrue(store.tryAdmit(fresh, T0, T0.minus(WINDOW), 5).admitted(), "fresh key " + i);
+      }
+      assertEquals(3, storage.tables().rateLimitBuckets.size(), "the bound holds");
+      assertEquals(Optional.of(T0.plusSeconds(600)), store.blockedUntil(KEY),
+          "the idle blocked key was passed over");
+    }
+  }
+
+  @Test
+  @DisplayName("at the bound a block that has ended by the storage clock is evicted like any key")
+  void endedBlockIsEvictedLikeAnyKey() {
+    MutableClock clock = new MutableClock(T0);
+    try (EclipseStoreJCustosStorage storage = EclipseStoreJCustosStorage.openAt(tempDir, 2, clock)) {
+      RateLimitStore store = storage.rateLimitStore();
+      RateLimitKey other = new RateLimitKey(TenantId.DEFAULT, "ip:192.0.2.1");
+      // an event under a one-hour window keeps the bucket alive after its block has ended
+      assertTrue(store.tryAdmit(KEY, T0, T0.minus(Duration.ofHours(1)), 5).admitted());
+      store.block(KEY, T0.plusSeconds(10));
+      store.recordEvent(other, T0.plusSeconds(1)); // used after KEY
+
+      clock.set(T0.plusSeconds(20));
+      store.block(new RateLimitKey(TenantId.DEFAULT, "ip:192.0.2.2"), T0.plusSeconds(600));
+
+      assertEquals(2, storage.tables().rateLimitBuckets.size());
+      assertEquals(0, store.countSince(KEY, T0), "the key used least recently went: its block"
+          + " had ended, so it protected nothing any more");
+      assertEquals(1, store.countSince(other, T0));
+    }
+  }
+
+  @Test
+  @DisplayName("when every key has a lasting block, the block that ends first makes room")
+  void onlyLastingBlocksLeftTheOneEndingFirstGoes() {
+    try (EclipseStoreJCustosStorage storage =
+             EclipseStoreJCustosStorage.openAt(tempDir, 3, Clock.fixed(T0, ZoneOffset.UTC))) {
+      RateLimitStore store = storage.rateLimitStore();
+      RateLimitKey early = new RateLimitKey(TenantId.DEFAULT, "ip:203.0.113.1");
+      RateLimitKey middle = new RateLimitKey(TenantId.DEFAULT, "ip:203.0.113.2");
+      RateLimitKey late = new RateLimitKey(TenantId.DEFAULT, "ip:203.0.113.3");
+      store.block(middle, T0.plusSeconds(600));
+      store.block(late, T0.plusSeconds(900));
+      store.block(early, T0.plusSeconds(300));
+
+      RateLimitKey fresh = new RateLimitKey(TenantId.DEFAULT, "ip:203.0.113.4");
+      assertTrue(store.tryAdmit(fresh, T0, T0.minus(WINDOW), 5).admitted(),
+          "a new key is never refused - the bound makes room");
+      assertEquals(3, storage.tables().rateLimitBuckets.size());
+      assertEquals(Optional.empty(), store.blockedUntil(early), "the block that ends first went");
+      assertEquals(Optional.of(T0.plusSeconds(600)), store.blockedUntil(middle));
+      assertEquals(Optional.of(T0.plusSeconds(900)), store.blockedUntil(late));
+    }
+  }
+
+  @Test
   @DisplayName("a storage written before blocks existed opens without any, and keeps a block written now")
   void storageWrittenBeforeBlocksOpensWithoutAny() throws Exception {
     LegacyStorageFixtures.copyTo(

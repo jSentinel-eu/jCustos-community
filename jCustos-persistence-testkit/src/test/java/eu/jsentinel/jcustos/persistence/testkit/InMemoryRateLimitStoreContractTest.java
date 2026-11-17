@@ -19,9 +19,16 @@ package eu.jsentinel.jcustos.persistence.testkit;
 import eu.jsentinel.jcustos.ratelimiting.InMemoryRateLimitStore;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitStore;
 
+import java.util.Optional;
+
 class InMemoryRateLimitStoreContractTest implements RateLimitStoreContract {
   @Override
   public RateLimitStore newStore() {
     return new InMemoryRateLimitStore();
+  }
+
+  @Override
+  public Optional<RateLimitStore> newBoundedStore(int maxKeys) {
+    return Optional.of(new InMemoryRateLimitStore(maxKeys));
   }
 }

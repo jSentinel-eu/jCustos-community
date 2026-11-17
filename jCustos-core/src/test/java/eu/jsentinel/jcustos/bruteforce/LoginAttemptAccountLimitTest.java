@@ -298,6 +298,26 @@ class LoginAttemptAccountLimitTest {
   }
 
   @Test
+  @DisplayName("accountUserId yields the user id of the tuple key; the account key is forAccount of the name itself")
+  void accountUserIdBuildsTheTupleKey() {
+    InMemoryLoginAttemptStore store = new InMemoryLoginAttemptStore();
+    StoreBackedLoginAttemptPolicy policy = new StoreBackedLoginAttemptPolicy(store, LIMITS,
+        TenantId.DEFAULT, Clock.fixed(T0, ZoneOffset.UTC), SubjectKeyCanonicalizer.exact(),
+        new RecordingAudit());
+    String name = "#odd";
+    assertTrue(failedLogin(policy, ctx(name, HOME, T0)));
+
+    assertEquals(1, store.failureCount(
+            new LoginAttemptKey(TenantId.DEFAULT, LoginAttemptKey.accountUserId(name), HOME)),
+        "the documented tuple key is the one the policy counts");
+    assertEquals(1, store.failureCount(LoginAttemptKey.forAccount(TenantId.DEFAULT, name)),
+        "the account key is built from the canonical name, not from accountUserId");
+    assertEquals(0, store.failureCount(
+            LoginAttemptKey.forAccount(TenantId.DEFAULT, LoginAttemptKey.accountUserId(name))),
+        "forAccount(accountUserId(name)) is a key the policy never asks for");
+  }
+
+  @Test
   @DisplayName("forAccount keys never equal a tuple key or the address key, and the mapping is injective")
   void accountKeysHaveTheirOwnNamespace() {
     List<String> names = List.of("alice", "#account:alice", "account:alice", "#address", "##x",

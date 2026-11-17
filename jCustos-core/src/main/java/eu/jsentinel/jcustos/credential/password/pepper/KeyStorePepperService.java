@@ -73,9 +73,14 @@ import java.util.Set;
  *
  * <p>A PKCS12 file is read under the rules jCustos applies to the bootstrap token file
  * (JS-SEC-130) and storage directories (JS-SEC-136): it must be a regular file, not a symbolic
- * link, at most {@value #MAX_KEYSTORE_FILE_BYTES} bytes, and on POSIX it must belong to the
+ * link, at most {@value #MAX_KEYSTORE_FILE_BYTES} bytes, with a single name where the
+ * filesystem reports the link count (since 00.84.00), and on POSIX it must belong to the
  * process user and grant nothing to group or others ({@code keytool} creates it with the
- * umask — restrict it to {@code 0600}).</p>
+ * umask — restrict it to {@code 0600}). Where the JDK offers a
+ * {@link java.nio.file.SecureDirectoryStream} the file is checked and read relative to its
+ * opened directory. The owner and mode of that directory are not checked here: the store is
+ * protected by its password and its integrity check, unlike the key files of
+ * {@link FilePepperService}.</p>
  *
  * <p>The key material is copied out of the store when it is loaded and held on the heap, as
  * copies that {@link #wipe()} zeroes; {@link #resolve(String)} hands out a fresh copy and
@@ -227,14 +232,21 @@ public final class KeyStorePepperService implements PepperService {
      *                               the file is refused or cannot be opened with the
      *                               password, or a named entry is missing, of another kind,
      *                               not extractable or too short; the message names the
-     *                               alias, never key material or the password
+     *                               alias, never key material or the password. The keys
+     *                               copied before the failure are zeroed.
      */
     public KeyStorePepperService load() {
+      return load(InMemoryPepperService.builder());
+    }
+
+    /** Test seam: loads into {@code keys}, which is wiped when the load fails. */
+    KeyStorePepperService load(InMemoryPepperService.Builder keys) {
       if (loaded) {
         throw new IllegalStateException(CODE + ": this builder has already loaded its keys");
       }
       loaded = true;
       KeyStore.PasswordProtection protection = null;
+      boolean built = false;
       try {
         if (activeAlias == null) {
           throw new IllegalStateException(CODE + ": no active alias was set");
@@ -251,7 +263,6 @@ public final class KeyStorePepperService implements PepperService {
         KeyStore store = file != null ? openPkcs12() : keyStore;
         protection = password == null ? null : new KeyStore.PasswordProtection(password);
         Set<String> listed = listedAliases(store, source);
-        InMemoryPepperService.Builder keys = InMemoryPepperService.builder();
         for (String alias : ids) {
           byte[] key = secretKey(store, protection, alias, listed, source);
           try {
@@ -264,8 +275,13 @@ public final class KeyStorePepperService implements PepperService {
             new KeyStorePepperService(source, ids, keys.activeKeyId(activeAlias).build());
         HasLogger.staticLogger().info("pepper/keys-loaded: {} key(s) from {}, active key id {}",
             ids.size(), source, activeAlias);
+        built = true;
         return service;
       } finally {
+        if (!built) {
+          // the keys copied in before the failure must not stay on the heap
+          keys.wipe();
+        }
         if (password != null) {
           Arrays.fill(password, '\0');
         }

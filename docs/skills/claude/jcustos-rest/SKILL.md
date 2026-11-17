@@ -118,7 +118,8 @@ Audit + sessions are in-memory (ring buffer + map). Layer 2
   limit, then `beforeAttempt` and exactly one of `confirmSuccess`,
   `recordFailure`, `abandonAttempt` on the registered
   `LoginAttemptPolicy`. An unknown name costs one KDF run; a
-  verification shed under load answers 503, not 401 (JS-SEC-126).
+  verification shed under load answers 503, not 401 (JS-SEC-126); a
+  check that throws counts as a failed attempt and answers 401.
   Every 401 goes through the published decision mapper and carries
   `WWW-Authenticate` (JS-SEC-086).
 - **Errors as plain text.** Production swaps the body strategy via

@@ -137,6 +137,11 @@ this release; their limits therefore add up across the nodes.
   replay store's `markSeen` lets exactly one consumer win. A store that inherits the SPI defaults
   of `LoginAttemptStore` keeps working, but without reservations: parallel guesses on several nodes
   can then all be evaluated.
+- **Instants may be coarse.** A store may keep lockout ends in milliseconds or whole seconds (a JDBC
+  `TIMESTAMP(3)` or `DATETIME` column). The store-backed login policy decides whether a failure
+  caused the lockout it reads back within `StoreBackedLoginAttemptPolicy.STORE_INSTANT_TOLERANCE`
+  (one second), so the lockout is still audited; `LoginAttemptStoreContract` checks this at
+  sub-millisecond instants.
 - **The time comes from the caller.** The policies pass their own clock's instant (`now`,
   `since`) to the store. The store evaluates with those instants and does not mix in a clock of its
   own; it accepts them out of order, because a node whose clock is behind reports an earlier

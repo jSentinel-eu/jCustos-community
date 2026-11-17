@@ -24,6 +24,7 @@ package eu.jsentinel.jcustos.credential.password.pepper;
 
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -137,6 +138,23 @@ public final class InMemoryPepperService implements PepperService {
     public Builder activeKeyId(String keyId) {
       this.activeKeyId = Objects.requireNonNull(keyId, "keyId");
       return this;
+    }
+
+    /**
+     * Zeroes every key copy this builder holds and forgets them - for a key source whose load
+     * failed after some keys were copied in (since 00.84.00). A service built from this builder
+     * shares the copies, so this is called instead of {@link #build()}, never after it.
+     */
+    void wipe() {
+      for (byte[] key : keys.values()) {
+        Arrays.fill(key, (byte) 0);
+      }
+      keys.clear();
+    }
+
+    /** Package-visible for tests: the key copies this builder holds, not copies of them. */
+    List<byte[]> heldCopies() {
+      return List.copyOf(keys.values());
     }
 
     public InMemoryPepperService build() {

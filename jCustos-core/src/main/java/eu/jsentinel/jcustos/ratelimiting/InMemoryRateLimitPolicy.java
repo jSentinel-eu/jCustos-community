@@ -246,7 +246,9 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
             Duration.between(now, blockedUntil.get()), escalation.throttleThreshold());
       }
     }
-    Instant cutoff = now.minus(window);
+    // saturating like every other operation of this class: a window beyond the timeline
+    // (about a billion years) counts every event instead of throwing on every request
+    Instant cutoff = minusSaturating(now, window);
     // JS-SEC-078 (CWE-367): check and record as one step — the store decides
     // atomically whether this event still fits the window, so N concurrent
     // callers at limit-1 cannot all pass. Throttled calls record nothing: only

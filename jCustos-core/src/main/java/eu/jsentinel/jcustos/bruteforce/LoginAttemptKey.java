@@ -144,7 +144,9 @@ public record LoginAttemptKey(TenantId tenant, String userId, String ip) {
   }
 
   /**
-   * Maps a canonical user name onto the {@code userId} of its account key.
+   * Maps a canonical user name onto the {@code userId} of its <em>tuple</em> key - the
+   * {@code (tenant, user, address)} key built with the constructor - not of its account key,
+   * which {@link #forAccount(TenantId, String)} builds from the canonical user name itself.
    * A name that starts with {@link #RESERVED_PREFIX} gets the prefix once
    * more; every other name stays as it is. The mapping is injective and
    * never yields a reserved user id - {@link #ADDRESS_USER_ID} or one that
@@ -152,8 +154,14 @@ public record LoginAttemptKey(TenantId tenant, String userId, String ip) {
    * the prefix twice - so no tuple key can share the counter of an address or
    * of an account key.
    *
+   * <p>A store or policy that builds the keys of {@link StoreBackedLoginAttemptPolicy} itself
+   * uses {@code new LoginAttemptKey(tenant, accountUserId(name), address)} for the tuple key
+   * and {@code forAccount(tenant, name)} for the account key. Passing the result of this
+   * method to {@code forAccount} builds, for a name that starts with {@link #RESERVED_PREFIX},
+   * a key the policy never asks for.
+   *
    * @param canonicalUserName the user name after canonicalisation; non-null
-   * @return the user id of the account key
+   * @return the {@code userId} of the tuple key
    * @since 00.84.00
    */
   public static String accountUserId(String canonicalUserName) {

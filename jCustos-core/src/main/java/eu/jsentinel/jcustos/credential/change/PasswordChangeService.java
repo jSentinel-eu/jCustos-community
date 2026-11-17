@@ -37,6 +37,7 @@ import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleDecision;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleService;
 import eu.jsentinel.jcustos.credential.lifecycle.InvalidStatusTransitionException;
 import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
+import eu.jsentinel.jcustos.credential.password.DefaultPasswordHashingService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.reset.ResetTokenStore;
@@ -75,7 +76,11 @@ import java.util.Optional;
  *       the KDF limiter - → {@code VerificationUnavailable}: "could not
  *       verify" is not "wrong" (JS-SEC-126, CWE-703). Anything else but
  *       {@code Verified} → {@code CurrentPasswordRejected}.</li>
- *   <li>Hash the new password through {@link PasswordHashingService}.</li>
+ *   <li>Hash the new password through {@link PasswordHashingService}. A hash the
+ *       KDF limiter sheds ({@link DefaultPasswordHashingService.KdfLimitExceededException})
+ *       → {@code VerificationUnavailable}, the answer of a shed verification,
+ *       so that it does not single out a right guess of the current password
+ *       (since 00.84.00).</li>
  *   <li>Compare-and-swap the encoded hash with the original envelope as
  *       witness, through {@link CredentialStore#replaceSecretIfCurrent}: the
  *       change time is recorded and a compromise marker cleared in the same
@@ -291,7 +296,17 @@ public final class PasswordChangeService implements HasLogger {
       return PasswordChangeResult.CurrentPasswordRejected.INSTANCE;
     }
 
-    PasswordHashResult newHash = hashingService.hash(command.newPassword());
+    PasswordHashResult newHash;
+    try {
+      newHash = hashingService.hash(command.newPassword());
+    } catch (DefaultPasswordHashingService.KdfLimitExceededException shed) {
+      // JS-SEC-126 (CWE-203, CWE-703): the limiter shed the hash of the new password after
+      // the current one verified. Escaping as an exception, it told a caller who guessed the
+      // current password that the guess was right - a wrong guess ends above as
+      // CurrentPasswordRejected - while nothing changed. "Try again later" is the answer a
+      // shed verification of any password gets; nothing is written, nobody is notified.
+      return PasswordChangeResult.VerificationUnavailable.INSTANCE;
+    }
 
     Instant now = Instant.now(clock);
     // JS-SEC-161 (CWE-620): a new secret, not a rehash - the store records the

@@ -111,7 +111,9 @@ import static java.util.Objects.requireNonNull;
  * shortens a lockout by up to that skew. The in-memory store and the Eclipse-Store
  * adapter live in one process and cannot be shared between nodes; the deployment
  * guide {@code docs/security/deployment/cluster.md} names what a shared store has
- * to provide.
+ * to provide. A shared store often keeps instants in milliseconds or whole seconds;
+ * the policy still recognises the lockout a failure caused and audits it, within
+ * {@link #STORE_INSTANT_TOLERANCE}.
  *
  * <p><strong>Concurrent credential checks (JS-SEC-063, CWE-770).</strong>
  * {@link #credentialCheckGate()} returns the gate of the policy's
@@ -126,6 +128,17 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
 
   /** Stands for a missing or blank user name or client address in a key. */
   private static final String NO_VALUE = "-";
+
+  /**
+   * How much earlier than {@code now + lockout} the lockout a store reports for a failure may
+   * end and still count as started by that failure: {@code 1 s}. It covers a store that keeps
+   * instants in milliseconds or whole seconds - a JDBC {@code TIMESTAMP(3)} or {@code DATETIME}
+   * column - instead of the nanoseconds of {@link Instant}; a coarser store does not get its
+   * lockouts audited as {@code BruteForceLimitReached}.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration STORE_INSTANT_TOLERANCE = Duration.ofSeconds(1);
 
   private final LoginAttemptStore store;
   private final LoginAttemptLimits loginLimits;
@@ -427,12 +440,29 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
    * that reaches the threshold, and every further failure - the single attempt admitted after a
    * lockout ran out - locks it again from that failure on. Either way the lockout starts with
    * the failure just recorded.
+   *
+   * <p>The store may keep instants coarser than the clock - a JDBC {@code TIMESTAMP(3)} keeps
+   * milliseconds, a {@code DATETIME} whole seconds -, so the lockout it reports can start up to
+   * {@link #STORE_INSTANT_TOLERANCE} before {@code now}, or a little after it when the store
+   * rounds. Until 00.84.00 the test was exact equality, and a store with millisecond instants
+   * never published {@code BruteForceLimitReached} (CWE-778). A lockout that an earlier failure
+   * started and this one did not move ends at least that tolerance earlier; a store that moves the
+   * lockout with every failure, as the SPI derivation does, reports it with every failure anyway.
    */
   private static boolean lockedByThisFailure(AttemptStatus status, Instant now,
                                              AttemptLimits keyLimits) {
     return status.blocked()
         && status.failures() >= keyLimits.failureThreshold()
-        && status.blockedUntil().get().equals(plusLockout(now, keyLimits));
+        && !status.blockedUntil().get().isBefore(
+            minusTolerance(plusLockout(now, keyLimits)));
+  }
+
+  private static Instant minusTolerance(Instant lockoutEnd) {
+    try {
+      return lockoutEnd.minus(STORE_INSTANT_TOLERANCE);
+    } catch (java.time.DateTimeException | ArithmeticException overflow) {
+      return Instant.MIN;
+    }
   }
 
   private static Instant plusLockout(Instant from, AttemptLimits keyLimits) {

@@ -46,9 +46,10 @@ import static java.util.Objects.requireNonNull;
  * <ul>
  *   <li>At most {@link EclipseStoreJCustosStorage#maxEntries()} keys. At the
  *       bound, buckets that can no longer influence an admission go first;
- *       then the key that was used least recently since the storage was
- *       opened is evicted. A key under attack is in use and is the last
- *       candidate.</li>
+ *       then the key without a lasting block that was used least recently
+ *       since the storage was opened is evicted. A key under attack is in use
+ *       and is the last candidate; a key whose block lasts is no candidate
+ *       while any other key is (see Blocks).</li>
  *   <li>At most {@link InMemoryRateLimitStore#DEFAULT_MAX_EVENTS_PER_KEY}
  *       events per key: {@link #recordEvent} drops the key's oldest event,
  *       {@link #tryAdmit} refuses.</li>
@@ -69,11 +70,20 @@ import static java.util.Objects.requireNonNull;
  * with the key's events. {@link #block} extends it under the write lock and
  * writes the bucket; {@link #blockedUntil} reads under the read lock and marks a
  * blocked key as used. A bucket is dead only once its block has ended as well, so
- * neither the sweep nor the bound's first pass drops a key whose block lasts; at
- * the bound a blocked key that nobody asks for can still be evicted as the one
- * used least recently.
+ * neither the sweep nor the bound's first pass drops a key whose block lasts.
  * {@link #purgeOlderThan} drops blocks that ended before the cutoff. A bucket
  * stored before blocks existed loads without one.</p>
+ *
+ * <p><strong>A lasting block survives the bound</strong> (since 00.84.00). At the
+ * bound the store evicts the key used least recently among those whose block, if
+ * any, has ended by the storage clock's instant; only when every key has a block
+ * that still lasts, the key whose block ends first. Before 00.84.00 was released a
+ * client that could mint keys stopped asking for its blocked key, created
+ * {@code maxEntries} fresh ones and found the block gone. The bound stays hard.
+ * Making room walks the order of use from the key used least recently and passes
+ * over the keys with a lasting block, so it takes longer the more of them stand
+ * before the first candidate; when only such keys are left, finding the block that
+ * ends first reads every key.</p>
  */
 final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
 
@@ -275,13 +285,51 @@ final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
    */
   private void addBucket(RateLimitKey key, Instant now, RateLimitBucket bucket) {
     StoredTable<RateLimitKey, RateLimitBucket> buckets = storage.tables().rateLimitBuckets;
-    int evicted = buckets.makeRoomFor(key, storage.maxEntries(), now);
-    if (evicted > 0 && buckets.evictionLogDue()) {
-      logger().warn("persistence/rate-limit-store-capacity: the rate-limit store is at its bound"
-          + " of {} keys; the key used least recently is dropped for every new key - its events"
-          + " no longer count", storage.maxEntries());
+    int maxEntries = storage.maxEntries();
+    if (!buckets.hasRoomFor(key, maxEntries)) {
+      buckets.dropDead(now);
+      // a lasting block goes last: the client it refuses must not lift it with fresh keys
+      int evicted = buckets.evictEldest(key, maxEntries, candidate -> !blocksAt(candidate, now));
+      while (!buckets.hasRoomFor(key, maxEntries) && evictBlockEndingFirst(buckets)) {
+        evicted++;
+      }
+      buckets.recordEvictions(evicted);
+      if (evicted > 0 && buckets.evictionLogDue()) {
+        logger().warn("persistence/rate-limit-store-capacity: the rate-limit store is at its"
+            + " bound of {} keys; for every new key the key used least recently is dropped -"
+            + " a key with a lasting block only when no other is left - and its events no longer"
+            + " count", maxEntries);
+      }
     }
     buckets.put(key, bucket);
+  }
+
+  /** @return {@code true} when {@code bucket} has a block that lasts beyond {@code now} */
+  private static boolean blocksAt(RateLimitBucket bucket, Instant now) {
+    return bucket.blockedUntil != null && bucket.blockedUntil.isAfter(now);
+  }
+
+  /**
+   * Evicts the key whose block ends first - the last resort when every key has a lasting block.
+   *
+   * @return {@code false} when the table is empty
+   */
+  private static boolean evictBlockEndingFirst(StoredTable<RateLimitKey, RateLimitBucket> buckets) {
+    RateLimitKey first = null;
+    Instant firstEnd = null;
+    for (RateLimitKey candidate : buckets.keys()) {
+      Instant end = buckets.get(candidate).blockedUntil;
+      Instant effectiveEnd = end == null ? Instant.MIN : end;
+      if (firstEnd == null || effectiveEnd.isBefore(firstEnd)) {
+        first = candidate;
+        firstEnd = effectiveEnd;
+      }
+    }
+    if (first == null) {
+      return false;
+    }
+    buckets.remove(first);
+    return true;
   }
 
   /** @return a new bucket holding {@code firstEvent} */

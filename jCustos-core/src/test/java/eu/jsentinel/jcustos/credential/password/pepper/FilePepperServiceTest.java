@@ -176,6 +176,88 @@ class FilePepperServiceTest {
   }
 
   @Test
+  @DisplayName("a refused retired key file zeroes the keys the load had already copied")
+  void failedLoadWipesTheCopiedKeys() throws IOException {
+    keyFile("pepper-2026", key(32), "rw-------");
+    keyFile("pepper-2025", key(32), "rw-rw-rw-");
+    InMemoryPepperService.Builder keys = InMemoryPepperService.builder();
+    // a key already in the builder stands for every copy the load makes before it fails
+    byte[] earlier = key(32);
+    keys.addKey("earlier", earlier);
+    List<byte[]> copies = keys.heldCopies();
+
+    assertThrows(IllegalStateException.class, () -> FilePepperService.fromDirectory(dir)
+        .activeKeyId("pepper-2026").retiredKeyId("pepper-2025").load(keys));
+
+    assertEquals(List.of(), keys.heldCopies(), "the builder forgot its copies");
+    for (byte[] copy : copies) {
+      assertArrayEquals(new byte[copy.length], copy, "every copy is zeroed");
+    }
+    assertNotZero(earlier, "the caller's own array is not the builder's copy");
+  }
+
+  @Test
+  @DisplayName("a successful load leaves the keys intact - the builder is wiped on failure only")
+  void successfulLoadKeepsTheKeys() throws IOException {
+    byte[] active = key(32);
+    keyFile("pepper-2026", active, "rw-------");
+    InMemoryPepperService.Builder keys = InMemoryPepperService.builder();
+
+    FilePepperService service =
+        FilePepperService.fromDirectory(dir).activeKeyId("pepper-2026").load(keys);
+
+    assertArrayEquals(active, service.resolve("pepper-2026").orElseThrow());
+  }
+
+  @Test
+  @DisplayName("a key directory that group or others can write is refused; with the sticky bit it is accepted")
+  void writableKeyDirectoryIsRefused() throws IOException {
+    keyFile("pepper-2026", key(32), "rw-------");
+    Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxrwx---"));
+
+    IllegalStateException refused = assertThrows(IllegalStateException.class,
+        () -> FilePepperService.fromDirectory(dir).activeKeyId("pepper-2026").load());
+    assertTrue(refused.getMessage().startsWith("pepper/key-file-rejected: "), refused.getMessage());
+    assertTrue(refused.getMessage().contains("can be written by group or others (mode 770)"),
+        refused.getMessage());
+
+    Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx---rwx"));
+    assertThrows(IllegalStateException.class,
+        () -> FilePepperService.fromDirectory(dir).activeKeyId("pepper-2026").load(),
+        "write access for others is refused as well");
+
+    assumeTrue(dir.getFileSystem().supportedFileAttributeViews().contains("unix"),
+        "the sticky bit needs the unix attribute view");
+    Files.setAttribute(dir, "unix:mode", 01777);
+    assertEquals(Optional.of("pepper-2026"), FilePepperService.fromDirectory(dir)
+            .activeKeyId("pepper-2026").load().activeKeyId(),
+        "with the sticky bit nobody else can rename or delete the key files");
+    Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
+  }
+
+  @Test
+  @DisplayName("a key file with a second name (hard link) is refused")
+  void hardLinkedKeyFileIsRefused() throws IOException {
+    assumeTrue(dir.getFileSystem().supportedFileAttributeViews().contains("unix"),
+        "the link count needs the unix attribute view");
+    Path file = keyFile("pepper-2026", key(32), "rw-------");
+    Path elsewhere = Files.createDirectory(dir.resolve("elsewhere"));
+    Path secondName = Files.createLink(elsewhere.resolve("copy"), file);
+
+    IllegalStateException refused = assertThrows(IllegalStateException.class,
+        () -> FilePepperService.fromDirectory(dir).activeKeyId("pepper-2026").load());
+    assertTrue(refused.getMessage().contains("has 2 names (hard links)"), refused.getMessage());
+
+    Files.delete(secondName);
+    assertEquals(Optional.of("pepper-2026"), FilePepperService.fromDirectory(dir)
+        .activeKeyId("pepper-2026").load().activeKeyId(), "a single name is read again");
+  }
+
+  private static void assertNotZero(byte[] array, String message) {
+    assertFalse(java.util.Arrays.equals(new byte[array.length], array), message);
+  }
+
+  @Test
   @DisplayName("a key file that is a symbolic link is refused, even to an owner-only file")
   void symbolicLinkIsRefused() throws IOException {
     Path target = keyFile("real-key", key(32), "rw-------");

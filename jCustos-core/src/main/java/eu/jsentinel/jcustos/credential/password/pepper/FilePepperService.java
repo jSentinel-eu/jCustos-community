@@ -53,10 +53,15 @@ import java.util.Set;
  * part of its keys. A file is refused when it is a symbolic link, is not a regular file, is
  * larger than {@value #MAX_KEY_FILE_BYTES} bytes, or — on POSIX — belongs to another user than
  * the one the process runs as or grants any access to group or others (provision it with
- * {@code 0400} or {@code 0600}). The directory must not be a symbolic link either. These are
- * the rules jCustos applies to the bootstrap token file (JS-SEC-130) and to storage
- * directories (JS-SEC-136). On a filesystem without POSIX attributes owner and permissions
- * cannot be checked (JS-SEC-016); that is logged as a warning.</p>
+ * {@code 0400} or {@code 0600}), or - where the filesystem reports it - has a second name
+ * (a hard link). The directory must not be a symbolic link either, must not be writable by
+ * group or others unless its sticky bit is set, and must belong to the process user or the
+ * superuser ({@code /run/secrets} with {@code 0755}, owned by root, passes). Where the JDK
+ * offers a {@link java.nio.file.SecureDirectoryStream} the directory is opened once and the
+ * key files are checked and read relative to it. These are the rules jCustos applies to the
+ * bootstrap token file (JS-SEC-130) and to storage directories (JS-SEC-136). On a filesystem
+ * without POSIX attributes owner and permissions cannot be checked (JS-SEC-016); that is
+ * logged as a warning.</p>
  *
  * <p>The content is standard Base64 ({@code A-Z a-z 0-9 + /}, padded); white space and line
  * breaks anywhere in the file are ignored, so {@code openssl rand -base64 32 > pepper-2026}
@@ -208,11 +213,32 @@ public final class FilePepperService implements PepperService {
      *
      * @return the loaded service
      * @throws IllegalStateException when no active key id is set, a key id is named twice,
-     *                               or a key file is missing, refused, not Base64 or shorter
-     *                               than {@link PepperReference#MIN_KEY_BYTES} bytes once
-     *                               decoded; the message names the file, never its content
+     *                               the directory is refused, or a key file is missing,
+     *                               refused, not Base64 or shorter than
+     *                               {@link PepperReference#MIN_KEY_BYTES} bytes once decoded;
+     *                               the message names the file, never its content. The keys
+     *                               read before the failure are zeroed.
      */
     public FilePepperService load() {
+      return load(InMemoryPepperService.builder());
+    }
+
+    /** Test seam: loads into {@code keys}, which is wiped when the load fails. */
+    FilePepperService load(InMemoryPepperService.Builder keys) {
+      boolean built = false;
+      try {
+        FilePepperService service = loadInto(keys);
+        built = true;
+        return service;
+      } finally {
+        if (!built) {
+          // the keys copied in before the failure must not stay on the heap
+          keys.wipe();
+        }
+      }
+    }
+
+    private FilePepperService loadInto(InMemoryPepperService.Builder keys) {
       if (activeKeyId == null) {
         throw new IllegalStateException(CODE + ": no active key id was set");
       }
@@ -224,24 +250,25 @@ public final class FilePepperService implements PepperService {
         }
         ids.add(retired);
       }
-      PepperSourceFiles.requireDirectory(directory, CODE);
-      InMemoryPepperService.Builder keys = InMemoryPepperService.builder();
-      for (String keyId : ids) {
-        Path file = directory.resolve(keyId);
-        byte[] content = PepperSourceFiles.readTrusted(file, MAX_KEY_FILE_BYTES, CODE);
-        byte[] key = null;
-        try {
-          key = decode(content, file);
-          if (key.length < PepperReference.MIN_KEY_BYTES) {
-            throw new IllegalStateException(CODE + ": " + file + " holds a key of "
-                + key.length + " bytes; a pepper key needs at least "
-                + PepperReference.MIN_KEY_BYTES);
-          }
-          keys.addKey(keyId, key);
-        } finally {
-          Arrays.fill(content, (byte) 0);
-          if (key != null) {
-            Arrays.fill(key, (byte) 0);
+      try (PepperSourceFiles.KeyDirectory keyDirectory =
+               PepperSourceFiles.openDirectory(directory, CODE)) {
+        for (String keyId : ids) {
+          Path file = directory.resolve(keyId);
+          byte[] content = keyDirectory.read(keyId, MAX_KEY_FILE_BYTES);
+          byte[] key = null;
+          try {
+            key = decode(content, file);
+            if (key.length < PepperReference.MIN_KEY_BYTES) {
+              throw new IllegalStateException(CODE + ": " + file + " holds a key of "
+                  + key.length + " bytes; a pepper key needs at least "
+                  + PepperReference.MIN_KEY_BYTES);
+            }
+            keys.addKey(keyId, key);
+          } finally {
+            Arrays.fill(content, (byte) 0);
+            if (key != null) {
+              Arrays.fill(key, (byte) 0);
+            }
           }
         }
       }

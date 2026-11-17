@@ -120,6 +120,23 @@ class InMemoryRateLimitPolicyRetryAfterTest {
   }
 
   @Test
+  @DisplayName("a window beyond the timeline saturates: every event counts, and no request throws")
+  void windowBeyondTheTimelineSaturates() {
+    // about 292 billion years: now - window lies before Instant.MIN
+    Duration endless = Duration.ofSeconds(Long.MAX_VALUE);
+    MutableClock clock = new MutableClock(T0);
+    InMemoryRateLimitPolicy policy = new InMemoryRateLimitPolicy(
+        new InMemoryRateLimitStore(), new NoAudit(), 2, endless, clock);
+    admitAt(policy, clock, T0, T0.plusSeconds(1));
+
+    clock.set(T0.plus(Duration.ofDays(365L * 1000)));
+    RateLimitDecision.Throttled throttled = throttled(policy.tryAcquire(KEY));
+    assertEquals(2, throttled.eventsInWindow(), "a thousand years later both events still count");
+    assertEquals(Duration.between(clock.instant(), Instant.MAX).plus(ONE_NANO),
+        throttled.retryAfter(), "the oldest event never leaves the window");
+  }
+
+  @Test
   @DisplayName("Admission: the two-argument constructor reports no oldest event; null is refused")
   void admissionShapes() {
     RateLimitStore.Admission legacy = new RateLimitStore.Admission(false, 3);

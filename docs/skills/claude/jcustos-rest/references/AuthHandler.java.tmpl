@@ -1,5 +1,6 @@
 package {{BASE_PACKAGE}}.handlers;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.AuditEvent;
@@ -69,7 +70,8 @@ import java.util.Optional;
  * caps password spraying across many names; a failed login is audited
  * as {@code LoginFailed} (by the policy's {@code recordFailure}, and here
  * for a login refused after the check); a verification shed under load is
- * "try again later" (503), not a wrong password (JS-SEC-126). The password
+ * "try again later" (503), not a wrong password (JS-SEC-126), while a check
+ * that fails in any other way is a failed attempt (401). The password
  * check runs inside the policy's credential-check gate (JS-SEC-063); an
  * attempt the gate defers is given back and answered like a lockout, with
  * 429 and the {@code Retry-After} of {@link RestThrottleResponses}.
@@ -84,6 +86,9 @@ public final class AuthHandler {
 
   /** Retry-After of a shed verification. */
   public static final Duration VERIFICATION_RETRY_AFTER = Duration.ofSeconds(1);
+
+  /** The {@code LoginFailed} reason of a credential check that threw: {@value}. */
+  public static final String CHECK_FAILED_REASON = "Credential check failed";
 
   private static final BearerTokenExtractor BEARER = new BearerTokenExtractor();
 
@@ -150,9 +155,16 @@ public final class AuthHandler {
       Router.respondJson(exchange, HttpStatus.SERVICE_UNAVAILABLE.code(),
           Json.encode(Map.of("error", "temporarily unavailable, try again later")));
       return;
-    } catch (RuntimeException failure) {
-      policy.abandonAttempt(attempt);
-      throw failure;
+    } catch (RuntimeException checkFailed) {
+      // XR09-6 (CWE-755): only the exception above means "no verdict". Any other failure of
+      // the check counts as a failed attempt and is answered like wrong credentials - given
+      // back instead, input that makes the lookup throw would buy unlimited guesses. The
+      // class only: the message may carry what was entered.
+      HasLogger.staticLogger().warn("Login check failed with {}; counted as a failed attempt",
+          checkFailed.getClass().getName());
+      policy.recordFailure(attempt, CHECK_FAILED_REASON);
+      Router.refuse(exchange, AuthorizationDecision.unauthenticated("invalid-credentials"));
+      return;
     } finally {
       permit.close();
     }

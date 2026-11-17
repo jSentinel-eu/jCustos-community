@@ -16,6 +16,10 @@
  */
 package eu.jsentinel.jcustos.persistence.testkit;
 
+import eu.jsentinel.jcustos.audit.AuditEvent;
+import eu.jsentinel.jcustos.audit.AuditQuery;
+import eu.jsentinel.jcustos.audit.BruteForceLimitReached;
+import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
@@ -39,6 +43,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,6 +73,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * keeps such a key like any other; the tests below check the round trip,
  * the independence from account keys and - for an atomic store - the
  * reservation.
+ *
+ * <p>Precision (since 00.84.00): the tests whose name starts with {@code CWE-778}
+ * run at sub-millisecond instants - every other test uses whole seconds. A store
+ * may keep instants in milliseconds or whole seconds, as a database column does;
+ * the lockout it reports must then start and end within
+ * {@link StoreBackedLoginAttemptPolicy#STORE_INSTANT_TOLERANCE} of the failure
+ * that caused it, and a {@link StoreBackedLoginAttemptPolicy} over it must
+ * publish exactly one {@code BruteForceLimitReached} for that failure.
  *
  * <p>Several nodes (JS-SEC-166, since 00.84.00): the tests whose name starts with
  * {@code JS-SEC-166} run two {@link StoreBackedLoginAttemptPolicy} instances - two
@@ -291,6 +304,102 @@ public interface LoginAttemptStoreContract {
     assertThrows(NullPointerException.class, () -> store.completeSuccess(k, t, null));
     assertThrows(NullPointerException.class, () -> store.abandonAttempt(null, t));
     assertThrows(NullPointerException.class, () -> store.abandonAttempt(k, null));
+  }
+
+  // ── precision of instants (CWE-778, since 00.84.00) ────────────────
+
+  /**
+   * An instant no store that keeps milliseconds or whole seconds can hold exactly.
+   */
+  private static Instant subMillisecond() {
+    return Instant.parse("2026-01-01T00:00:00Z").plusNanos(123_456_789L);
+  }
+
+  @Test
+  @DisplayName("CWE-778: failures at sub-millisecond instants lock the key; the lockout starts and ends with the locking failure, within the tolerance")
+  default void lockoutAtSubMillisecondInstants() {
+    LoginAttemptStore store = newStore();
+    LoginAttemptKey k = key("alice", "1.1.1.1");
+    AttemptLimits limits = limits();
+    Duration tolerance = StoreBackedLoginAttemptPolicy.STORE_INSTANT_TOLERANCE;
+    Instant at = subMillisecond();
+
+    AttemptStatus last = null;
+    for (int i = 0; i < limits.failureThreshold(); i++) {
+      at = at.plusNanos(1_000_001L); // a little over a millisecond per failure
+      assertFalse(store.tryBeginAttempt(k, at, limits).blocked(), "attempt " + (i + 1));
+      last = store.completeFailure(k, at, limits);
+    }
+    assertTrue(last.blocked(), "the threshold-th failure locks");
+    assertEquals(limits.failureThreshold(), last.failures());
+    Instant expectedEnd = at.plus(limits.lockout());
+    Instant reportedEnd = last.blockedUntil().orElseThrow();
+    assertFalse(reportedEnd.isBefore(expectedEnd.minus(tolerance)),
+        "the lockout starts with the locking failure: " + reportedEnd + " vs " + expectedEnd);
+    assertFalse(reportedEnd.isAfter(expectedEnd.plus(tolerance)),
+        "the lockout is no longer than lockout + tolerance: " + reportedEnd);
+
+    assertTrue(store.tryBeginAttempt(k, expectedEnd.minus(tolerance).minusNanos(1), limits)
+        .blocked(), "the lockout holds until shortly before its end");
+    assertFalse(store.tryBeginAttempt(k, expectedEnd.plus(tolerance), limits).blocked(),
+        "the lockout has ended once the tolerance has passed");
+  }
+
+  @Test
+  @DisplayName("CWE-778: over this store the store-backed policy publishes exactly one BruteForceLimitReached for the failure that locks - at sub-millisecond instants")
+  default void lockoutIsAuditedOnceAtSubMillisecondInstants() {
+    LoginAttemptStore store = newStore();
+    SharedTime time = new SharedTime(subMillisecond());
+    List<AuditEvent> events = new CopyOnWriteArrayList<>();
+    JCustosAuditService audit = new JCustosAuditService() {
+      @Override
+      public void publish(AuditEvent event) {
+        events.add(event);
+      }
+
+      @Override
+      public List<AuditEvent> query(AuditQuery query) {
+        return List.copyOf(events);
+      }
+    };
+    LoginAttemptLimits limits = nodeLimits().withAddressLimit(new LoginAttemptLimits.AddressLimit(
+        5, Duration.ofHours(1), Duration.ofMinutes(30), Duration.ofHours(4)));
+    LoginAttemptPolicy policy = new StoreBackedLoginAttemptPolicy(store, limits,
+        TenantId.DEFAULT, time.node(Duration.ZERO), SubjectKeyCanonicalizer.defaults(), audit);
+    int threshold = limits.perAccount().failureThreshold();
+
+    // one account, one address: the tuple and the account key lock with the same failure
+    for (int i = 0; i < threshold; i++) {
+      time.set(time.now().plusNanos(1_234_567L));
+      LoginAttemptContext guess = attempt("alice", "10.0.0.1", time);
+      assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(guess), "guess " + (i + 1));
+      policy.recordFailure(guess);
+    }
+    assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+        policy.beforeAttempt(attempt("alice", "10.0.0.1", time)));
+    List<BruteForceLimitReached> account = limitReached(events);
+    assertEquals(1, account.size(), "one event for the account lockout: " + account);
+    assertEquals("alice", account.get(0).username());
+
+    // a spray from another address: one failure per account until the address locks
+    int addressThreshold = limits.perAddress().orElseThrow().failureThreshold();
+    for (int i = 0; i < addressThreshold; i++) {
+      time.set(time.now().plusNanos(1_234_567L));
+      LoginAttemptContext guess = attempt("user-" + i, "10.0.0.2", time);
+      assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(guess), "spray " + (i + 1));
+      policy.recordFailure(guess);
+    }
+    List<BruteForceLimitReached> all = limitReached(events);
+    assertEquals(2, all.size(), "one more event, for the address lockout: " + all);
+    assertEquals("10.0.0.2", all.get(1).clientAddress());
+  }
+
+  /** The {@code BruteForceLimitReached} events among {@code events}, in order. */
+  private static List<BruteForceLimitReached> limitReached(List<AuditEvent> events) {
+    return events.stream()
+        .filter(BruteForceLimitReached.class::isInstance)
+        .map(BruteForceLimitReached.class::cast)
+        .toList();
   }
 
   // ── address keys (JS-SEC-062, since 00.84.00) ──────────────────────

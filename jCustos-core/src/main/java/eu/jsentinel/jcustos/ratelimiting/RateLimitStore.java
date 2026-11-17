@@ -223,7 +223,10 @@ public interface RateLimitStore {
    * adapter do; the contract in {@code jCustos-persistence-testkit} checks it
    * with real threads. A store that persists its data persists the block with
    * it, so a restart does not lift it. A key that has no events yet is tracked
-   * like any other key, inside the store's bound. The default throws
+   * like any other key, inside the store's bound. A store with a bound on its keys
+   * evicts a key whose block lasts only when no other key is left to evict - a
+   * client that mints fresh keys must not lift its own block (since 00.84.00; the
+   * contract checks it through {@code newBoundedStore}). The default throws
    * {@link UnsupportedOperationException}.</p>
    *
    * @param key   key to block; must not be {@code null}

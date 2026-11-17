@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -132,6 +133,63 @@ class PasswordChangeVerificationUnavailableTest {
 
     assertSame(PasswordResetConsumeResult.Succeeded.INSTANCE,
         reset.consume(link, SecretValue.ofString("password from the link")));
+  }
+
+  @Test
+  @DisplayName("the right current password, but the hash of the new one is shed: VerificationUnavailable, nothing written, nobody notified")
+  void shedHashAfterTheVerificationIsNoOracle() {
+    String storedHash = kit.register("alice", "correct horse battery", CredentialStatus.ACTIVE);
+    // a real limiter, not a mock: the verification gets its permit, the hash that follows does not
+    PermitsThenSheds limiter = new PermitsThenSheds(1);
+    PasswordChangeService change = new PasswordChangeService(kit.credentials,
+        PasswordHashingServices.defaults(fastPolicy(), limiter), kit.validator, kit.inputPolicy,
+        kit.lifecycle(), kit.clock)
+        .withCredentialChangeListener((username, cause, at) -> notified.add(username));
+    List<AuditEvent> auditedBefore = List.copyOf(kit.audit.events);
+
+    PasswordChangeResult right = change.change(command("correct horse battery",
+        "alices second password"));
+
+    assertSame(PasswordChangeResult.VerificationUnavailable.INSTANCE, right,
+        "a shed hash after a verified current password must not escape as an exception");
+    assertEquals(2, limiter.asked(), "the verification and the hash asked for a permit");
+    assertEquals(storedHash, kit.credentials.findByUsername("alice").orElseThrow().encodedHash());
+    assertTrue(notified.isEmpty(), "nothing changed, so nothing may be revoked");
+    assertEquals(auditedBefore, kit.audit.events);
+
+    limiter.grant(1);
+    assertSame(PasswordChangeResult.CurrentPasswordRejected.INSTANCE,
+        change.change(command("a wrong guess", "alices second password")),
+        "a wrong guess under the same limiter is rejected after its one verification");
+    assertTrue(kit.passwordIs("alice", "correct horse battery"));
+  }
+
+  /** Grants a number of permits, then refuses every further one - a saturated KDF limiter. */
+  private static final class PermitsThenSheds implements KdfExecutionLimiter {
+    private int remaining;
+    private int asked;
+
+    PermitsThenSheds(int permits) {
+      this.remaining = permits;
+    }
+
+    synchronized void grant(int permits) {
+      remaining += permits;
+    }
+
+    synchronized int asked() {
+      return asked;
+    }
+
+    @Override
+    public synchronized Optional<Lease> acquire() {
+      asked++;
+      if (remaining == 0) {
+        return Optional.empty();
+      }
+      remaining--;
+      return Optional.of(() -> { });
+    }
   }
 
   @Test

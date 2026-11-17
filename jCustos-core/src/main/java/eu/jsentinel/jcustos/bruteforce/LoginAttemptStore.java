@@ -91,6 +91,18 @@ import java.util.Optional;
  * that several nodes share has to perform each attempt operation atomically in
  * its backend, not behind a lock inside one JVM; see
  * {@code docs/security/deployment/cluster.md}.
+ *
+ * <h2>Precision of instants (since 00.84.00)</h2>
+ *
+ * <p>A store may keep instants coarser than {@link Instant} does - milliseconds
+ * or whole seconds, as a JDBC {@code TIMESTAMP(3)} or {@code DATETIME} column
+ * keeps them - and derive {@link AttemptStatus#blockedUntil()} from the stored
+ * value. {@link StoreBackedLoginAttemptPolicy} still recognises the lockout a
+ * failure caused, within
+ * {@link StoreBackedLoginAttemptPolicy#STORE_INSTANT_TOLERANCE}, and publishes
+ * {@code BruteForceLimitReached} for it; a coarser store does not get its
+ * lockouts audited. The contract in {@code jCustos-persistence-testkit} runs
+ * with sub-millisecond instants.
  */
 @ExperimentalJCustosApi
 public interface LoginAttemptStore {

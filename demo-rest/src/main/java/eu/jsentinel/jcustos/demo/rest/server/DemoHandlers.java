@@ -81,6 +81,7 @@ import eu.jsentinel.jcustos.credential.token.TokenHasher;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitKey;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
+import com.svenruppert.dependencies.core.logger.HasLogger;
 import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import eu.jsentinel.jcustos.session.JCustosVersion;
@@ -111,7 +112,8 @@ import java.util.Set;
  * or {@code abandonAttempt}. A rejected password is audited as {@link LoginFailed} by the
  * policy's {@code recordFailure}, a login the policy refuses after the check by the handler
  * itself, and a verification the KDF limiter shed is answered with {@code 503}, without
- * counting a failure. The password check runs inside the policy's credential-check gate
+ * counting a failure; a check that fails in any other way is a failed attempt and answered
+ * with {@code 401}. The password check runs inside the policy's credential-check gate
  * (JS-SEC-063); an attempt the gate defers is given back and answered like every other
  * refusal of the login: {@code 429} with a {@code Retry-After} header, written by
  * {@link RestThrottleResponses}. Every {@code 401} written here goes through the published decision mapper
@@ -129,6 +131,9 @@ public final class DemoHandlers {
 
   /** {@code Retry-After} answer, in seconds, when a verification was shed (JS-SEC-126). */
   static final long VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS = 1L;
+
+  /** The {@code LoginFailed} reason of a credential check that threw: {@value}. */
+  static final String CHECK_FAILED_REASON = "Credential check failed";
 
   private final DemoUserStore userStore;
   private final DemoTokenStore tokenStore;
@@ -557,9 +562,17 @@ public final class DemoHandlers {
           Long.toString(VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS));
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;
-    } catch (RuntimeException failure) {
-      loginAttemptPolicy.abandonAttempt(attempt);
-      throw failure;
+    } catch (RuntimeException checkFailed) {
+      // XR09-6 (CWE-755): only the exception above means "no verdict". Any other failure of the
+      // check counts as a failed attempt and is answered like wrong credentials - given back
+      // instead, input that makes the lookup throw would buy unlimited guesses. The class only:
+      // the message may carry what was entered.
+      HasLogger.staticLogger().warn("Login check failed with {}; counted as a failed attempt",
+          checkFailed.getClass().getName());
+      loginAttemptPolicy.recordFailure(attempt, CHECK_FAILED_REASON);
+      abuseDetection.recordOutcome(abuseContext, AttemptOutcome.FAILURE);
+      unauthenticated(response, "invalid-credentials");
+      return;
     } finally {
       permit.close();
     }

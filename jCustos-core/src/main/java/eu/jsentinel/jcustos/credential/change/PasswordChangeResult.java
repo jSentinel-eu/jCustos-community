@@ -83,6 +83,11 @@ public sealed interface PasswordChangeResult
    * ({@link PasswordChangeService#withCompromisedPasswordCheck}): the change
    * is refused, but the password is not reported as listed.</p>
    *
+   * <p>It also stands for a new password whose hash the KDF limiter shed after
+   * the current password had verified: the store is untouched as well, and the
+   * answer is the one a shed verification of any current password gets, so it
+   * does not single out a right guess.</p>
+   *
    * @since 00.84.00
    */
   @ExperimentalJCustosApi

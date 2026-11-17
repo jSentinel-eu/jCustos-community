@@ -33,17 +33,41 @@ import java.util.Objects;
  * the retry-after is never rounded down to a moment at which the client is refused again:
  *
  * <pre>{@code
+ * CredentialCheckGate gate = policy.credentialCheckGate();
  * if (policy.beforeAttempt(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
  *   RestThrottleResponses.tooManyRequests(response, lockout.remaining());
  *   return;
  * }
- * if (policy.credentialCheckGate().enter()
- *     instanceof CredentialCheckGate.Admission.Deferred deferred) {
- *   policy.abandonAttempt(attempt);
- *   RestThrottleResponses.tooManyRequests(response, deferred.retryAfter());
- *   return;
+ * CredentialCheckGate.Admission.Entered permit;
+ * switch (gate.enter()) {
+ *   case CredentialCheckGate.Admission.Deferred deferred -> {
+ *     policy.abandonAttempt(attempt);              // no verdict, nothing counted
+ *     RestThrottleResponses.tooManyRequests(response, deferred.retryAfter());
+ *     return;
+ *   }
+ *   case CredentialCheckGate.Admission.Entered entered -> permit = entered;
  * }
+ * boolean valid;
+ * try {
+ *   valid = checkCredentials(credentials);         // the password check runs inside the gate
+ * } catch (CredentialVerificationUnavailableException shed) {
+ *   policy.abandonAttempt(attempt);                // no verdict: answer "try again later"
+ *   ...
+ *   return;
+ * } catch (RuntimeException checkFailed) {
+ *   policy.recordFailure(attempt, "Credential check failed");  // counted like a wrong password
+ *   ...
+ *   return;
+ * } finally {
+ *   permit.close();                                // every admitted check gives its permit back
+ * }
+ * // valid: confirmSuccess(attempt) - a LockedOut answer is a 429 as well; otherwise recordFailure
  * }</pre>
+ *
+ * <p>The permit of an {@code Entered} admission must be closed whatever the check does: a login
+ * handler that only tests {@code gate.enter() instanceof Deferred} keeps every permit it is
+ * granted, and after {@code maxConcurrentCredentialChecks} logins every further one is deferred
+ * until the process restarts.
  *
  * <p>The body is the generic {@link #DEFAULT_BODY}; it says nothing about which limit was hit or
  * whether the account exists.

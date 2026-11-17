@@ -22,6 +22,7 @@ import eu.jsentinel.jcustos.demo.skill.rest.security.SessionStoreProvider;
 import eu.jsentinel.jcustos.demo.skill.rest.security.TokenStore;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.InMemoryUserDirectory;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.User;
+import eu.jsentinel.jcustos.demo.skill.rest.security.model.UserDirectory;
 import eu.jsentinel.jcustos.demo.skill.rest.security.model.UserDirectoryProvider;
 import eu.jsentinel.jcustos.demo.skill.rest.security.roles.AuthorizationRole;
 import eu.jsentinel.jcustos.session.SessionId;
@@ -267,6 +268,28 @@ class RestSkillDemoSecurityTest {
           "{\"username\":\"nobody-lockout\",\"password\":\"guess-" + i + "\"}", null).status();
     }
     assertEquals(429, last);
+  }
+
+  @Test
+  @DisplayName("XR09-6: a credential check that throws is a failed attempt - 401 until the threshold, then 429")
+  void throwingCheckIsAFailedAttempt() throws Exception {
+    UserDirectory previous = UserDirectoryProvider.directory();
+    UserDirectoryProvider.setDirectory(new BreakingUserDirectory("kim-breaks", previous));
+    try {
+      String body = "{\"username\":\"kim-breaks\",\"password\":\"any-guess\"}";
+      for (int i = 0; i < 5; i++) {
+        DemoHttp.Response failed = http.post("/api/auth/login", body, null);
+        assertEquals(401, failed.status(), "attempt " + (i + 1) + ": " + failed.body());
+        assertEquals("Bearer", failed.header("WWW-Authenticate"));
+      }
+      assertEquals(429, http.post("/api/auth/login", body, null).status(),
+          "the throwing checks were counted: the key is locked");
+      assertTrue(auditEvents().stream().anyMatch(e -> e instanceof LoginFailed f
+          && "kim-breaks".equals(f.username())
+          && AuthHandler.CHECK_FAILED_REASON.equals(f.reason())));
+    } finally {
+      UserDirectoryProvider.setDirectory(previous);
+    }
   }
 
   @Test

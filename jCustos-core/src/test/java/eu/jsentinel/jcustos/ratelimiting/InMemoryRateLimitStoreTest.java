@@ -113,6 +113,97 @@ class InMemoryRateLimitStoreTest {
   }
 
   @Test
+  @DisplayName("a lasting block survives a flood of new keys; unblocked keys make room, the bound holds")
+  void lastingBlockSurvivesAKeyFlood() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(4);
+    RateLimitKey victim = key("login:user:victim");
+    Instant until = T0.plusSeconds(3_600);
+    assertTrue(bounded.tryAdmit(victim, T0, T0.minusSeconds(60), 1).admitted());
+    assertEquals(until, bounded.block(victim, until));
+
+    // the blocked client stops asking and mints keys: four times the bound, all newer
+    for (int i = 0; i < 16; i++) {
+      Instant at = T0.plusSeconds(1 + i);
+      assertTrue(bounded.tryAdmit(key("login:user:junk-" + i), at, at.minusSeconds(60), 5)
+          .admitted());
+      bounded.recordEvent(key("client:" + i), at);
+    }
+
+    assertEquals(4, bounded.trackedKeyCount(), "the bound holds");
+    assertEquals(Optional.of(until), bounded.blockedUntil(victim), "the block is still there");
+    assertEquals(1, bounded.countSince(victim, T0), "and the key's events with it");
+    assertEquals(1, bounded.countSince(key("client:15"), T0), "the newest key is tracked");
+    assertEquals(0, bounded.countSince(key("login:user:junk-0"), T0), "an unblocked key went");
+  }
+
+  @Test
+  @DisplayName("a block that has ended protects its key no longer: at the bound it goes like any key")
+  void endedBlockNoLongerProtects() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(2);
+    RateLimitKey once = key("ip:198.51.100.1");
+    bounded.block(once, T0.plusSeconds(10));
+    bounded.recordEvent(key("ip:198.51.100.2"), T0.plusSeconds(20));
+
+    bounded.recordEvent(key("ip:198.51.100.3"), T0.plusSeconds(30)); // the block ended at +10 s
+    bounded.recordEvent(key("ip:198.51.100.4"), T0.plusSeconds(40));
+
+    assertEquals(2, bounded.trackedKeyCount());
+    assertEquals(Optional.empty(), bounded.blockedUntil(once),
+        "the ended block rejoined the order of use and was evicted in its turn");
+  }
+
+  @Test
+  @DisplayName("when every tracked key has a lasting block, the block that ends first makes room")
+  void onlyBlocksLeftTheOneEndingFirstGoes() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(3);
+    RateLimitKey early = key("ip:203.0.113.1");
+    RateLimitKey middle = key("ip:203.0.113.2");
+    RateLimitKey late = key("ip:203.0.113.3");
+    bounded.block(middle, T0.plusSeconds(600));
+    bounded.block(late, T0.plusSeconds(900));
+    bounded.block(early, T0.plusSeconds(300));
+
+    RateLimitKey fresh = key("ip:203.0.113.4");
+    assertTrue(bounded.tryAdmit(fresh, T0, T0.minusSeconds(60), 5).admitted(),
+        "a new key is never refused - the bound makes room");
+    assertEquals(3, bounded.trackedKeyCount());
+    assertEquals(Optional.empty(), bounded.blockedUntil(early), "the block that ends first went");
+    assertEquals(Optional.of(T0.plusSeconds(600)), bounded.blockedUntil(middle));
+    assertEquals(Optional.of(T0.plusSeconds(900)), bounded.blockedUntil(late));
+    assertEquals(1, bounded.countSince(fresh, T0));
+  }
+
+  @Test
+  @DisplayName("reset, purge and an extended block keep the shield consistent")
+  void shieldFollowsResetPurgeAndExtension() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(2);
+    RateLimitKey blocked = key("ip:192.0.2.1");
+    bounded.block(blocked, T0.plusSeconds(60));
+    assertEquals(T0.plusSeconds(120), bounded.block(blocked, T0.plusSeconds(120)));
+    assertEquals(T0.plusSeconds(120), bounded.block(blocked, T0.plusSeconds(90)),
+        "a block only grows");
+
+    assertEquals(1, bounded.shieldedKeyCount());
+
+    // the purge drops the ended block; the key then holds nothing and is forgotten
+    assertEquals(0, bounded.purgeOlderThan(T0.plusSeconds(121)));
+    assertEquals(0, bounded.trackedKeyCount());
+    assertEquals(0, bounded.shieldedKeyCount());
+
+    bounded.block(blocked, T0.plusSeconds(300));
+    bounded.recordEvent(blocked, T0);
+    assertEquals(0, bounded.purgeOlderThan(T0), "the event at the cutoff stays");
+    assertEquals(1, bounded.shieldedKeyCount(), "a lasting block stays shielded through a purge");
+    bounded.reset(blocked);
+    assertEquals(0, bounded.trackedKeyCount());
+    assertEquals(0, bounded.shieldedKeyCount());
+    for (int i = 0; i < 5; i++) {
+      bounded.recordEvent(key("client:" + i), T0.plusSeconds(i));
+    }
+    assertEquals(2, bounded.trackedKeyCount(), "a reset key leaves nothing in the shield");
+  }
+
+  @Test
   @DisplayName("JS-SEC-118: purge and reset in a loop leave nothing behind; the bound holds under parallel inserts")
   void boundIsHardUnderConcurrencyAndChurn() throws Exception {
     int cap = 100;

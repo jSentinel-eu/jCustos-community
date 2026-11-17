@@ -209,6 +209,25 @@ class KeyStorePepperServiceTest {
   }
 
   @Test
+  @DisplayName("a missing retired alias zeroes the active key the load had already copied")
+  void failedLoadWipesTheCopiedKeys() throws Exception {
+    KeyStore store = pkcs12(keys("pepper-2026", key(32)));
+    InMemoryPepperService.Builder keys = InMemoryPepperService.builder();
+    // a key already in the builder stands for every copy the load makes before it fails
+    keys.addKey("earlier", key(32));
+    List<byte[]> copies = keys.heldCopies();
+
+    assertThrows(IllegalStateException.class,
+        () -> KeyStorePepperService.fromKeyStore(store, STORE_PASSWORD.toCharArray())
+            .activeAlias("pepper-2026").retiredAlias("pepper-2025").load(keys));
+
+    assertEquals(List.of(), keys.heldCopies(), "the builder forgot its copies");
+    for (byte[] copy : copies) {
+      assertArrayEquals(new byte[copy.length], copy, "every copy is zeroed");
+    }
+  }
+
+  @Test
   @DisplayName("a PKCS12 file readable by group or others, or a symbolic link to one, is refused")
   void pkcs12FileChecks() throws Exception {
     assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
