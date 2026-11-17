@@ -11,13 +11,16 @@ import eu.jsentinel.jcustos.logout.vaadin.VaadinLogoutService;
 import eu.jsentinel.jcustos.starter.profile.VaadinJCustosStarter;
 import com.vaadin.flow.server.ServiceInitEvent;
 import com.vaadin.flow.server.VaadinServiceInitListener;
+import {{BASE_PACKAGE}}.views.{{SUBJECT_PREFIX}}LoginView;
 
 import java.util.ServiceLoader;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Runs the V00.73 fluent {@link VaadinSecurity#bootstrap()} chain
- * once per JVM at Vaadin service init.
+ * once per JVM at Vaadin service init, and then - for every service -
+ * the starter's one-call service initialisation
+ * {@link VaadinJCustosStarter#serviceInit(ServiceInitEvent, Class)}.
  *
  * <p>This listener is layer-1 — it stays untouched when persistence,
  * hardening or any other layer is applied later. Sub-aspect
@@ -47,6 +50,18 @@ public class JCustosBootstrapInitListener implements VaadinServiceInitListener, 
 
   @Override
   public void serviceInit(ServiceInitEvent event) {
+    bootstrapOnce();
+    // JS-SEC-168: one call instead of hand-written init listeners. It registers the
+    // security-version check when a JCustosVersionStore is registered (the hardening layer
+    // adds one), its proactive reaction when that store is observable (R8), and the
+    // reference error handler (JS-SEC-067). Per service, after the bootstrap.
+    VaadinJCustosStarter.serviceInit(event, {{SUBJECT_PREFIX}}LoginView.class);
+  }
+
+  /**
+   * Runs the bootstrap chain once per JVM; a second service reuses the configuration.
+   */
+  public static void bootstrapOnce() {
     if (!DONE.compareAndSet(false, true)) {
       return;
     }
@@ -66,7 +81,7 @@ public class JCustosBootstrapInitListener implements VaadinServiceInitListener, 
             .denyByDefault(true)
             .logout(logoutService(authn))
     ).install();
-    logger().info("{}", runtime.log());
+    HasLogger.staticLogger().info("{}", runtime.log());
   }
 
   /**

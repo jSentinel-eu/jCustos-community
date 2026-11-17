@@ -115,15 +115,93 @@ Fail-closed wiring, as the demos and skills ship it since 00.84.00:
   visitor may see, never the denied view and never a view in the same restricted layout:
   Vaadin skips a reroute or forward to the navigation in progress, and since 00.84.00 such a
   denial ends in the error view (JS-SEC-158).
-- **Version drift.** Register `JCustosVersionEnforcerListener` with
-  `listener.register(serviceInitEvent)` — it also covers WebSocket-only push messages
-  (JS-SEC-155).
+- **Version drift.** `VaadinJCustosStarter.serviceInit(event, MyLoginView.class)` registers
+  `JCustosVersionEnforcerListener` on every request path - navigation, UIDL, WebSocket-only
+  push messages, downloads (JS-SEC-155) - as soon as a `JCustosVersionStore` is registered.
+  Register the store as an `ObservableJCustosVersionStore` and the open session of a user whose
+  roles change ends at once instead of on the next click (R8, see below).
 - **Session cookie.** Give the application its own cookie name in `web.xml`
   (`<cookie-config><name>MYAPP_SESSION</name><http-only>true</http-only><secure>true</secure>`),
   never the shared `JSESSIONID`.
-- **Unhandled errors.** Install the starter's `JCustosErrorHandler` (experimental, opt-in, see
-  below): an exception that escapes a listener shows the user a reference instead of its
-  message, and the log keeps the stack trace under that reference (JS-SEC-067).
+- **Unhandled errors.** The starter's `JCustosErrorHandler` (experimental, see below; installed
+  by `VaadinJCustosStarter.serviceInit(...)`): an exception that escapes a listener shows the
+  user a reference instead of its message, and the log keeps the stack trace under that
+  reference (JS-SEC-067).
+
+### One call at service init (00.84.00)
+
+What needs the Vaadin service - the security-version check, its proactive reaction, the error
+handler - is wired by one call from the application's `VaadinServiceInitListener` (registered in
+`META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener`), after the bootstrap:
+
+```java
+import eu.jsentinel.jcustos.starter.profile.VaadinJCustosStarter;
+
+public final class AppServiceInitListener implements VaadinServiceInitListener {
+  @Override
+  public void serviceInit(ServiceInitEvent event) {
+    JCustosInit.install();                                       // the bootstrap above, once per JVM
+    VaadinJCustosStarter.serviceInit(event, MyLoginView.class);  // per service
+  }
+}
+```
+
+| Part | Installed when |
+|---|---|
+| `JCustosVersionEnforcerListener` - drift refused on navigation, UIDL, push and download | a `JCustosVersionStore` is registered (`.sessions(s -> s.securityVersion(...))`, `META-INF/services`) |
+| `VaadinJCustosVersionChangeBridge` - drift acted on at once (R8) | that store is an `ObservableJCustosVersionStore` |
+| `JCustosErrorHandler` on every new session | always, unless `Options.defaults().withoutErrorHandler()` |
+| `VaadinSessionRegistryCleanup` of the OIDC module | `Options.defaults().withOidcSessionRegistry(registry)` and `jCustos-identity-oidc-vaadin` on the class path |
+
+`serviceInit(...)` returns the installed parts and logs them (`starter/service-init: installed
+[...]`); a part whose prerequisite is missing is skipped with an INFO line. Hand-written init
+listeners for these parts are no longer needed - remove them, or the parts are registered twice.
+
+### Open sessions after a role change (R8, 00.84.00)
+
+The security-version check refuses a session whose subject's version moved on - but only with
+the session's next request. To act at once, register the version store wrapped in the observable
+decorator and change versions through the registered instance:
+
+```java
+var versions = new ObservableJCustosVersionStore(new InMemoryJCustosVersionStore());
+VaadinSecurity.bootstrap()
+    // ...
+    .sessions(s -> s.securityVersion(versions).subjectIdResolver(new MySubjectIdResolver()))
+    .install();
+// later, after a role change of a user:
+versions.increment(new JCustosVersionKey(TenantId.DEFAULT, SubjectId.of(userId)));
+```
+
+`VaadinJCustosStarter.serviceInit(...)` then installs `VaadinJCustosVersionChangeBridge`: every
+open UI of that user is ended as the per-request check ends it - subject dropped, `SessionStale`
+audited, the browser sent to the login view, the session closed. With `@Push` that happens without
+a click; without push the session is ended on the server at once and the browser learns of it with
+its next request. The decorator is node-local: other nodes that share the backing store react on
+their next request.
+
+For a role change that does not bump the version - a role granted, an impersonation started -
+re-evaluate the secured components of a UI yourself:
+
+```java
+ui.access(() -> SecuredVisibility.refreshAll(ui));
+```
+
+`refreshAll(UI)` covers `SecuredButton`, `SecuredRouterLink`, `SecuredMenuItem` and every
+`SecuredUi` binding of that UI; the bindings are held weakly, so a removed component is dropped.
+
+### Guard the click, not only the button (00.84.00)
+
+`SecuredUi.button(...)` decides what the user sees. `SecuredUi.action(...)` also decides what a
+click does: it evaluates the requirement again when the click arrives and refuses it - the
+listener does not run, the button is disabled (or hidden), `ActionDenied` is audited - when the
+permission was withdrawn after the page was rendered:
+
+```java
+Button delete = SecuredUi.action(new Button("Delete"), click -> documents.delete(id))
+    .requiresPermission("doc:delete")
+    .bind();
+```
 
 The full V00.73 sub-builder set is `.audit(...)`, `.sessions(...)`,
 `.policies(...)`, `.roles(...)`, `.credentials(...)`. Each method's
@@ -135,7 +213,8 @@ JavaDoc lists the validation codes (e.g. `audit/missing-service`,
 An exception thrown in a click listener, a value-change listener or a `UI.access` command
 reaches the session's `ErrorHandler`. A home-grown handler that puts the exception message into
 a notification shows the browser SQL, file paths and account data (CWE-209). The starter ships
-one that does not; call it from the application's `VaadinServiceInitListener` (registered in
+one that does not. `VaadinJCustosStarter.serviceInit(...)` installs it; to install it on its own,
+call it from the application's `VaadinServiceInitListener` (registered in
 `META-INF/services/com.vaadin.flow.server.VaadinServiceInitListener`):
 
 ```java
@@ -189,7 +268,12 @@ failure (`secure-route/unknown-policy`).
 
 `runtime.log()` prints every registered service and any diagnostic
 warning. Switch to `VaadinJCustosStarter.productionDefaults()` (or
-`.strictDefaults()`) when going to production. STRICT now breaks on the
+`.strictDefaults()`) when going to production. Since 00.84.00 both
+profiles also set `.denyByDefault(true)` and, when exactly one
+`LoginView` route is registered (or the registered `LoginListener` names
+one), `.loginRoute(...)` - an unannotated route is then denied, so mark
+the public ones `@PublicRoute`. Apply the profile first; later builder
+calls override it. `developmentDefaults()` sets the mode only. STRICT now breaks on the
 three V00.72-to-V00.73 promoted codes
 (`secure-route/unknown-policy`,
 `session-management-view-without-session-store`,

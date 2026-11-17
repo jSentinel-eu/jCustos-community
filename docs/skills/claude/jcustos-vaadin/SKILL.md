@@ -104,7 +104,7 @@ src/main/java/<base>/
 │   │   ├── My<...>AuthorizationService.java  ← @JCustosAutoService
 │   │   └── SessionStoreProvider.java
 │   └── bootstrap/
-│       └── JCustosBootstrapInitListener.java ← VaadinServiceInitListener
+│       └── JCustosBootstrapInitListener.java ← VaadinServiceInitListener: bootstrap once, then VaadinJCustosStarter.serviceInit(event, MyLoginView.class)
 └── views/
     ├── MainLayout.java                   ← AppLayout shell — no @Route. Drawer + dynamic Sign in/out
     ├── PublicHomeView.java               ← @Route("",            layout=MainLayout.class) + @PublicRoute — no auth, public landing
@@ -370,22 +370,37 @@ entries (don't replace existing ones):
 
 ## Bootstrap profile choice
 
-`developmentDefaults` (the skill default) logs a verbose
-startup banner via `JCustosRuntime.log()`, wires an
-in-memory audit ring buffer (256 events), and tolerates missing
-critical SPIs with WARNing-level diagnostics. The right default while
-the integration is being verified.
+`developmentDefaults` (the skill default) sets the bootstrap mode
+`DEVELOPMENT` and nothing else: missing critical SPIs and an incomplete
+configuration are reported as WARNings. The right default while the
+integration is being verified. The startup banner comes from
+`JCustosRuntime.log()`, the audit ring buffer from
+`DefaultBootstrapExtension` (`.audit(a -> a.ringBuffer(256).logging())`) -
+not from the profile.
 
-`productionDefaults` is the same surface minus the in-memory defaults
-— missing SPIs surface as WARNings but the app continues. Use for
-deployed builds.
+`productionDefaults` sets mode `PRODUCTION`, `denyByDefault(true)` and,
+when it is unambiguous, the route of the one registered `LoginView` as
+login route (JS-SEC-168). Configuration errors are reported on the
+runtime; the app continues. Use for deployed builds.
 
-`strictDefaults` raises `JCustosBootstrapException` if any critical
-SPI is missing. Right for compliance-gated deployments where a
-silently-misconfigured security stack is unacceptable.
+`strictDefaults` is the same in mode `STRICT`: a configuration error
+raises `JCustosBootstrapException` at `install()`. Right for
+compliance-gated deployments where a silently-misconfigured security
+stack is unacceptable.
 
-The three profiles are interchangeable — swap the one-liner in
-`JCustosBootstrapInitListener` and recompile.
+Since 00.84.00 the production and strict profiles deny every route
+without a security annotation - the templates mark the public views
+`@PublicRoute` and keep `.denyByDefault(true)` and `.loginRoute(...)`
+explicit, so all three profiles behave alike there. Swap the one-liner
+in `JCustosBootstrapInitListener` and recompile.
+
+The listener also calls `VaadinJCustosStarter.serviceInit(event,
+{{SUBJECT_PREFIX}}LoginView.class)` for every Vaadin service: one call
+that installs the reference error handler (JS-SEC-067) and - once a
+`JCustosVersionStore` is registered, as the hardening layer does - the
+security-version check on every request path and, for an
+`ObservableJCustosVersionStore`, its proactive reaction (R8). Do not add
+init listeners of your own for these parts.
 
 ---
 

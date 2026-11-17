@@ -33,8 +33,12 @@ import static java.util.Objects.requireNonNull;
  * {@code MenuBar.addItem(...)} call and cannot be instantiated
  * directly. The helper instead takes a freshly-added {@code MenuItem}
  * and a {@link SecuredVisibility.Requirement}, performs the check
- * once, and exposes a {@link #refresh()} method for re-checks after
- * a permission change.
+ * when it binds and on every attach of the item, and exposes a
+ * {@link #refresh()} method for re-checks after a permission change.
+ * Since 00.84.00 the item is also re-checked, with every other secured
+ * binding of its UI, by
+ * {@link SecuredVisibility#refreshAll(com.vaadin.flow.component.UI)}
+ * (R8, JS-SEC-167).
  *
  * <p>Defaults to {@link SecuredVisibilityMode#HIDE} — menu entries
  * the user can't trigger should not appear in the menu.
@@ -68,6 +72,11 @@ public final class SecuredMenuItem {
     this.mode = requireNonNull(mode, "mode must not be null");
     this.viewSupplier = requireNonNull(viewSupplier, "viewSupplier must not be null");
     refresh();
+    // R8 (JS-SEC-167): the item is checked again on every attach, as the secured button and
+    // link are, and from refreshAll(UI) when the subject's roles change. The binding lives on
+    // the item, so the caller need not keep this instance.
+    menuItem.addAttachListener(attach -> refresh());
+    SecuredBindingRegistry.register(menuItem, this::refresh);
   }
 
   /**

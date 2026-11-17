@@ -57,7 +57,8 @@ public final class SkillDemoTestSupport {
       throw new AssertionError("cannot reset the bootstrap guard: " + e);
     }
     JCustosServiceResolver.resetAll();
-    new JCustosBootstrapInitListener().serviceInit(null);
+    // the bootstrap only; the per-service part ran when the browserless service started
+    JCustosBootstrapInitListener.bootstrapOnce();
   }
 
   /**

@@ -38,7 +38,11 @@ import static java.util.Objects.requireNonNull;
  *   <li>on first attach (so freshly-constructed buttons land in
  *       the correct state before the user sees them), and</li>
  *   <li>whenever the app calls {@link #refresh() refresh()} — the
- *       canonical hook after a permission change.</li>
+ *       canonical hook after a permission change — and</li>
+ *   <li>for every button of a UI at once, from
+ *       {@link SecuredVisibility#refreshAll(com.vaadin.flow.component.UI)}: the button
+ *       registers itself with the {@link SecuredBindingRegistry} of its UI (R8,
+ *       JS-SEC-167).</li>
  * </ul>
  *
  * <p>This is a UI affordance only — the server-side handler
@@ -98,6 +102,8 @@ public class SecuredButton extends Button {
     this.mode = requireNonNull(mode, "mode must not be null");
     this.viewSupplier = requireNonNull(viewSupplier, "viewSupplier must not be null");
     refresh();
+    // R8 (JS-SEC-167): refreshAll(UI) re-evaluates the button when the subject's roles change
+    SecuredBindingRegistry.register(this, this::refresh);
   }
 
   @Override

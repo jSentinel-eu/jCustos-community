@@ -24,6 +24,7 @@ import eu.jsentinel.jcustos.authorization.api.permissions.HasPermissions;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.HasRoles;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
+import com.vaadin.flow.component.UI;
 
 import java.util.HashSet;
 import java.util.Optional;
@@ -237,6 +238,29 @@ public final class SecuredVisibility {
       }
       default -> throw new IllegalStateException("unreachable: " + mode);
     }
+  }
+
+  /**
+   * Evaluates every secured binding of {@code ui} again against the current subject (R8,
+   * JS-SEC-167, CWE-613): the {@link SecuredButton}s, {@link SecuredRouterLink}s and
+   * {@link SecuredMenuItem}s of the UI and the components the starter's {@code SecuredUi}
+   * builders bound. Until 00.84.00 an open view kept the controls of the subject's old roles
+   * until the next navigation, unless the application called {@code refresh()} on each of them.
+   * <p>
+   * Call it after a change of the subject's roles or permissions that does not end the session
+   * - a role granted, an impersonation started - with the session lock of {@code ui} held, for
+   * example inside {@code ui.access(...)} from the code that made the change. A change of the
+   * security version ends the session instead, through the per-request check and, with an
+   * {@code ObservableJCustosVersionStore}, through {@code VaadinJCustosVersionChangeBridge} at
+   * once. Components that were garbage-collected are dropped; see
+   * {@link SecuredBindingRegistry}.
+   *
+   * @param ui the UI whose bindings are refreshed; non-null
+   * @return the number of components that were refreshed
+   * @since 00.84.00
+   */
+  public static int refreshAll(UI ui) {
+    return SecuredBindingRegistry.refreshAll(ui);
   }
 
   /**

@@ -12,9 +12,16 @@ import java.util.Optional;
 
 /**
  * Increments the per-subject {@code JCustosVersion} so any session
- * captured before the bump drifts on the next request and the
- * affected user is rerouted to {@code {{SUBJECT_PREFIX}}LoginView} by
- * {@code JCustosVersionEnforcerListener}.
+ * captured before the bump drifts and the affected user is sent to
+ * {@code {{SUBJECT_PREFIX}}LoginView}.
+ *
+ * <p>The store it bumps is the registered one - an
+ * {@code ObservableJCustosVersionStore} since 00.84.00, wrapped by
+ * {@code HardeningBootstrapExtension} (R8, JS-SEC-167). The bump therefore
+ * reaches {@code VaadinJCustosVersionChangeBridge} at once: an open session
+ * of the user ends without a click and, over {@code @Push}, the browser is
+ * sent to the login view. Without the decorator the session ends on its next
+ * request, through {@code JCustosVersionEnforcerListener}.
  *
  * <p>Call sites: every role-mutating operation in
  * {@code AdminRolesView} — {@code assignRole}, {@code revokeRole},

@@ -14,6 +14,7 @@ import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.components.SecuredBindingRegistry;
 import eu.jsentinel.jcustos.components.SecuredVisibilityMode;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.policy.api.Policy;
@@ -32,7 +33,9 @@ import java.util.Optional;
  * the configured {@link PolicyRegistry} how to render the component.
  * The same instance is re-evaluated on every attach so navigation
  * between routes refreshes the decision (mirrors V00.71
- * {@code SecuredVisibility.apply(...)} semantics).
+ * {@code SecuredVisibility.apply(...)} semantics), and - since 00.84.00 -
+ * whenever {@code SecuredVisibility.refreshAll(UI)} runs for its UI (R8,
+ * JS-SEC-167).
  *
  * <p>Diagnostic logging differentiates the two denial paths
  * (Konzept §8.4):
@@ -59,9 +62,23 @@ final class PolicyVisibility {
     // Also evaluate immediately so tests that don't go through Vaadin's
     // attach lifecycle still see the initial verdict.
     applyOnce(component, policyName, mode);
+    // R8 (JS-SEC-167): SecuredVisibility.refreshAll(UI) evaluates the policy again when the
+    // subject's roles change while the view stays open.
+    SecuredBindingRegistry.register(component, () -> applyOnce(component, policyName, mode));
   }
 
-  private static void applyOnce(Component component, String policyName, SecuredVisibilityMode mode) {
+  /**
+   * Evaluates {@code policyName} for the current subject, as {@link #install} does for the
+   * visibility; used where an event has to be refused, not only a control hidden.
+   *
+   * @return {@code true} only when the policy allows the current subject
+   */
+  static boolean isAllowed(String policyName) {
+    return evaluate(policyName) == Verdict.Allowed;
+  }
+
+  /** Evaluates {@code policyName} and applies the verdict to {@code component} according to {@code mode}. */
+  static void applyOnce(Component component, String policyName, SecuredVisibilityMode mode) {
     Verdict v = evaluate(policyName);
     switch (v) {
       case Allowed -> show(component);

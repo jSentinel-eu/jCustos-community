@@ -34,6 +34,10 @@ import static java.util.Objects.requireNonNull;
  * {@link SecuredVisibilityMode#HIDE} — navigation affordances that
  * the user can't follow should disappear, not linger as dead links.
  *
+ * <p>The check runs on construction, on every attach, on {@link #refresh()} and, for every
+ * link of a UI at once, from
+ * {@link SecuredVisibility#refreshAll(com.vaadin.flow.component.UI)} (R8, JS-SEC-167).
+ *
  * <p>Authoritative protection of the target route stays with the
  * {@code AuthorizationListener} pipeline. This component is a UI
  * affordance — a hidden link is not a security boundary.
@@ -98,6 +102,8 @@ public class SecuredRouterLink extends RouterLink {
     this.mode = requireNonNull(mode, "mode must not be null");
     this.viewSupplier = requireNonNull(viewSupplier, "viewSupplier must not be null");
     refresh();
+    // R8 (JS-SEC-167): refreshAll(UI) re-evaluates the link when the subject's roles change
+    SecuredBindingRegistry.register(this, this::refresh);
   }
 
   /**
@@ -126,6 +132,8 @@ public class SecuredRouterLink extends RouterLink {
     this.mode = requireNonNull(mode, "mode must not be null");
     this.viewSupplier = requireNonNull(viewSupplier, "viewSupplier must not be null");
     refresh();
+    // R8 (JS-SEC-167): refreshAll(UI) re-evaluates the link when the subject's roles change
+    SecuredBindingRegistry.register(this, this::refresh);
   }
 
   @Override

@@ -70,6 +70,15 @@
       <version>${project.version}</version>
       <scope>test</scope>
     </dependency>
+    <!-- JS-SEC-168: VaadinJCustosStarter.serviceInit loads the OIDC session-registry cleanup
+         by name; the test shows that it is registered when the module is on the class path.
+         The starter itself does not depend on the OIDC modules. -->
+    <dependency>
+      <groupId>eu.jsentinel</groupId>
+      <artifactId>jCustos-identity-oidc-vaadin</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>

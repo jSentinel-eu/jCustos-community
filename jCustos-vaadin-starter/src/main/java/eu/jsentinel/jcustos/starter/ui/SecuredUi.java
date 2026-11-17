@@ -10,14 +10,21 @@
  */
 package eu.jsentinel.jcustos.starter.ui;
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.ActionDenied;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
 import eu.jsentinel.jcustos.components.ComponentTarget;
+import eu.jsentinel.jcustos.components.SecuredBindingRegistry;
 import eu.jsentinel.jcustos.components.SecuredButton;
 import eu.jsentinel.jcustos.components.SecuredMenuItem;
 import eu.jsentinel.jcustos.components.SecuredRouterLink;
 import eu.jsentinel.jcustos.components.SecuredVisibility;
 import eu.jsentinel.jcustos.components.SecuredVisibilityMode;
+import com.vaadin.flow.component.ClickNotifier;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.ComponentEventListener;
 import com.vaadin.flow.component.ClickEvent;
@@ -26,9 +33,12 @@ import com.vaadin.flow.component.contextmenu.MenuItem;
 import com.vaadin.flow.component.menubar.MenuBar;
 import com.vaadin.flow.router.RouterLink;
 
+import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
 
 /**
  * Declarative fluent builders over the V00.71 {@link SecuredButton},
@@ -55,6 +65,16 @@ import java.util.Set;
  *       {@code secured-ui/unknown-policy},
  *       {@code secured-ui/step-up-required}).</li>
  * </ul>
+ *
+ * <p>The builders decide what a control <em>shows</em>. A click listener passed to
+ * {@code button(...).onClick(...)} runs whenever Vaadin delivers the click.
+ * {@link #action(Component, ComponentEventListener) action(...)} also decides what a click
+ * <em>does</em>: it evaluates the requirement again when the click arrives and refuses it when
+ * the subject no longer satisfies it (since 00.84.00).
+ *
+ * <p>Every binding registers with the {@code SecuredBindingRegistry} of its UI, so
+ * {@code SecuredVisibility.refreshAll(UI)} evaluates all of them again after a change of the
+ * subject's roles (R8, JS-SEC-167).
  *
  * @since 00.72.00
  */
@@ -96,6 +116,41 @@ public final class SecuredUi {
    */
   public static <C extends Component> SecuredComponentBuilder<C> component(C component) {
     return new SecuredComponentBuilder<>(component);
+  }
+
+  /**
+   * Secures what a click <em>does</em>, not only what the control shows (JS-SEC-168,
+   * CWE-1188). The requirement is evaluated when the control is bound, on every attach, from
+   * {@code SecuredVisibility.refreshAll(UI)} - and once more when a click arrives. Only a click
+   * of a subject that satisfies the requirement at that moment reaches {@code onClick}.
+   * <p>
+   * A control rendered while the subject held a permission stays clickable in the browser
+   * until the page is refreshed, also after the permission was withdrawn. Vaadin refuses
+   * events of a disabled or hidden component, but it does not know that this one should have
+   * been disabled by now. A refused click does not run {@code onClick}; the control is
+   * re-evaluated at once (disabled or hidden, as configured), the refusal is logged as
+   * {@code secured-ui/action-refused} and audited as {@link ActionDenied}, whose action names
+   * the requirement - {@code requiresPermission(doc:delete)}, for example.
+   * <pre>
+   *   Button delete = SecuredUi.action(new Button("Delete"), click -> documents.delete(id))
+   *       .requiresPermission("doc:delete")
+   *       .bind();
+   * </pre>
+   * The default on denial is {@code disableWhenDenied()}, as for {@link #button(String)}. The
+   * service behind {@code onClick} still enforces its own rules; this is the guard of the UI
+   * event, not of the operation.
+   *
+   * @param component the clickable control - a {@link Button}, or any component with
+   *                  {@link ClickNotifier}; non-null
+   * @param onClick   what a permitted click does; non-null
+   * @param <C>       the component type, preserved through {@code bind()}
+   * @return the action builder
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public static <C extends Component & ClickNotifier<C>> SecuredActionBuilder<C> action(
+      C component, ComponentEventListener<ClickEvent<C>> onClick) {
+    return new SecuredActionBuilder<>(component, onClick);
   }
 
 
@@ -374,10 +429,117 @@ public final class SecuredUi {
             modeOrDefault(SecuredVisibilityMode.HIDE));
         return component;
       }
-      SecuredVisibility.Target target = new ComponentTarget(component);
-      SecuredVisibility.apply(target, requirement(),
-          modeOrDefault(SecuredVisibilityMode.HIDE));
+      Runnable apply = visibilityOf(component, requirement(), modeOrDefault(SecuredVisibilityMode.HIDE));
+      apply.run();
+      // R8 (JS-SEC-167): evaluated again on every attach, as the secured components are, and
+      // from SecuredVisibility.refreshAll(UI). Until 00.84.00 it was applied once at bind().
+      component.addAttachListener(attach -> apply.run());
+      SecuredBindingRegistry.register(component, apply);
       return component;
     }
+  }
+
+  // ---- Action (00.84.00) ---------------------------------------------------
+
+  /**
+   * Builder of {@link #action(Component, ComponentEventListener) SecuredUi.action(...)}: the
+   * requirement decides the control's state and, at the click, whether {@code onClick} runs.
+   *
+   * @param <C> the component type, preserved through {@link #bind()}
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public static final class SecuredActionBuilder<C extends Component & ClickNotifier<C>>
+      extends AbstractSecuredUiBuilder<SecuredActionBuilder<C>> {
+
+    private final C component;
+    private final ComponentEventListener<ClickEvent<C>> onClick;
+
+    SecuredActionBuilder(C component, ComponentEventListener<ClickEvent<C>> onClick) {
+      this.component = Objects.requireNonNull(component, "component");
+      this.onClick = Objects.requireNonNull(onClick, "onClick");
+    }
+
+    /**
+     * Applies the requirement to the control, registers it for refreshes and adds the guarded
+     * click listener.
+     *
+     * @return the control, for layout chains
+     */
+    public C bind() {
+      markUsed();
+      SecuredVisibilityMode mode = modeOrDefault(SecuredVisibilityMode.DISABLE);
+      Runnable reapply;
+      BooleanSupplier permitted;
+      String action;
+      if (isPolicyMode()) {
+        String policy = policyName();
+        PolicyVisibility.install(component, policy, mode);
+        reapply = () -> PolicyVisibility.applyOnce(component, policy, mode);
+        permitted = () -> PolicyVisibility.isAllowed(policy);
+        action = "requiresPolicy(" + policy + ")";
+      } else {
+        SecuredVisibility.Requirement requirement = requirement();
+        reapply = visibilityOf(component, requirement, mode);
+        reapply.run();
+        component.addAttachListener(attach -> reapply.run());
+        SecuredBindingRegistry.register(component, reapply);
+        permitted = () -> SecuredVisibility.currentJCustosView()
+            .map(view -> SecuredVisibility.isAllowed(requirement, view.roles(), view.permissions()))
+            .orElse(false);
+        action = describe(requirement);
+      }
+      component.addClickListener(click -> {
+        if (isPermitted(permitted, action)) {
+          onClick.onComponentEvent(click);
+          return;
+        }
+        refuse(action);
+        reapply.run();
+      });
+      return component;
+    }
+  }
+
+  /** The visibility binding of a role or permission requirement. */
+  private static Runnable visibilityOf(Component component,
+                                       SecuredVisibility.Requirement requirement,
+                                       SecuredVisibilityMode mode) {
+    return () -> SecuredVisibility.apply(new ComponentTarget(component), requirement, mode);
+  }
+
+  /** A check that cannot be evaluated refuses the click (fail closed). */
+  private static boolean isPermitted(BooleanSupplier permitted, String action) {
+    try {
+      return permitted.getAsBoolean();
+    } catch (RuntimeException checkFailure) {
+      HasLogger.staticLogger().warn("secured-ui/action-refused: {} could not be evaluated ({})",
+          action, checkFailure.getClass().getName());
+      return false;
+    }
+  }
+
+  /** JS-SEC-168 (CWE-1188): a click the current subject may no longer make is refused. */
+  private static void refuse(String action) {
+    String subjectId = CurrentSubject.current().map(CurrentSubject::subjectIdOf).orElse(null);
+    HasLogger.staticLogger().info("secured-ui/action-refused: {} is not satisfied at the click", action);
+    try {
+      JCustosServiceResolver.securityAuditService()
+          .publish(new ActionDenied(Instant.now(), subjectId, action));
+    } catch (RuntimeException auditFailure) {
+      // the click is refused regardless
+      HasLogger.staticLogger().warn("secured-ui/action-refused could not be audited ({})",
+          auditFailure.getClass().getName());
+    }
+  }
+
+  /** @return the requirement as the action name of the audit event, e.g. {@code requiresRole(ADMIN)} */
+  private static String describe(SecuredVisibility.Requirement requirement) {
+    if (!requirement.requiredRoles().isEmpty()) {
+      return "requiresRole(" + requirement.requiredRoles().stream().map(RoleName::roleName)
+          .sorted().collect(Collectors.joining(",")) + ")";
+    }
+    return "requiresPermission(" + requirement.requiredPermissions().stream()
+        .map(PermissionName::permissionName).sorted().collect(Collectors.joining(",")) + ")";
   }
 }

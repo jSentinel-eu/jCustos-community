@@ -12,7 +12,12 @@ package eu.jsentinel.jcustos.starter.profile;
 
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 
-/** Development profile — verbose diagnostics, DEVELOPMENT mode default. */
+/**
+ * Development profile: mode {@code DEVELOPMENT} and nothing else. Missing services and an
+ * incomplete security configuration are reported as warnings; deny-by-default and the login
+ * route are left to the application. Switch to {@link ProductionDefaults} or
+ * {@link StrictDefaults} before going to production.
+ */
 public final class DevelopmentDefaults implements VaadinJCustosStarter {
 
   static final DevelopmentDefaults INSTANCE = new DevelopmentDefaults();
