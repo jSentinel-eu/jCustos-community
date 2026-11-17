@@ -86,7 +86,8 @@ public final class PepperApplicator {
   /**
    * Generates a fresh 32-byte pepper key from {@link SecureRandom}.
    * Helper for tests and bootstrap tools — never auto-rotate keys at
-   * runtime through this method (rotation arrives in Prompt 018).
+   * runtime through this method: a key that exists only in the process is
+   * lost at the next restart, and every hash it peppered with it.
    */
   public static byte[] generateKey() {
     byte[] key = new byte[PepperReference.MIN_KEY_BYTES];

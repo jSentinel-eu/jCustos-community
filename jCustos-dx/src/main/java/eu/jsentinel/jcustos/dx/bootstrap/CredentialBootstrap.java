@@ -60,7 +60,9 @@ public interface CredentialBootstrap {
    * AND the V00.71 {@code PasswordHashingServices.defaults()}.
    * {@code JCustosRuntime} reports them as two separate entries —
    * legacy under {@link PasswordHasher}, pipeline under
-   * {@link PasswordHashingService}.
+   * {@link PasswordHashingService}. Since 00.84.00 the pipeline is peppered
+   * by {@link #pepper(PepperService)} when one is recorded; the legacy hasher
+   * is not.
    */
   CredentialBootstrap pbkdf2Defaults();
 
@@ -71,17 +73,31 @@ public interface CredentialBootstrap {
    * when the module is missing (a {@code JCustosBootstrapException} in
    * STRICT). Never silently falls back to PBKDF2. Since 00.84.00
    * (JS-SEC-073) the loaded Argon2id pipeline is wired like
-   * {@link #hashing(PasswordHashingService)}.
+   * {@link #hashing(PasswordHashingService)}, peppered by
+   * {@link #pepper(PepperService)} when one is recorded.
    */
   CredentialBootstrap modern();
 
   /**
-   * Records a pepper service. The bootstrap has no consumer for it: compose
-   * it into the pipeline instead
-   * ({@code .hashing(PasswordHashingServices.defaults(policy, limiter, pepper))}).
-   * A recorded pepper is reported as
-   * {@code dx/credential-pepper-recorded-not-wired} (WARNING; STRICT → ERROR)
-   * since 00.84.00 (JS-SEC-073) and never as an active service.
+   * Peppers the pipeline that {@link #modern()} or {@link #pbkdf2Defaults()}
+   * builds. Since 00.84.00 {@code install()} composes the service into that
+   * pipeline — {@code BouncyCastleHashingServices.modern(pepper)} or
+   * {@code PasswordHashingServices.defaults(policy, limiter, pepper)} with the
+   * defaults of the call without a pepper — and lists it in
+   * {@code JCustosRuntime.services()}. An active key id that does not resolve
+   * to a usable key is reported as {@code credentials/pepper-active-key-unresolvable}
+   * (ERROR), because every new hash would fail.
+   *
+   * <p>A finished pipeline passed to {@link #hashing(PasswordHashingService)}
+   * cannot be peppered afterwards: next to {@code .hashing(...)}, and without
+   * any pipeline, the pepper stays inert and is reported as
+   * {@code dx/credential-pepper-recorded-not-wired} (WARNING; STRICT → ERROR,
+   * JS-SEC-073) — build that pipeline with the pepper instead. The legacy
+   * {@code PasswordHasher} that {@code .pbkdf2Defaults()} also sets is never
+   * peppered.
+   *
+   * @param service the pepper keys, for example a
+   *                {@code KeyStorePepperService} or a {@code FilePepperService}
    */
   CredentialBootstrap pepper(PepperService service);
 

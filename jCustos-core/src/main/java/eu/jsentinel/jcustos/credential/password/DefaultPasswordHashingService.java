@@ -63,10 +63,10 @@ import java.util.Optional;
  *   <li><strong>resolveProvider</strong> &mdash; look up the provider
  *       that produced the envelope (CWE-693);</li>
  *   <li><strong>resolvePepper</strong> &mdash; ask the
- *       {@link PepperService} for the stored pepper key; Phase 1a's
- *       {@code NoOpPepperService} never resolves a key, so any
- *       peppered envelope correctly fails verification rather than
- *       getting silently downgraded;</li>
+ *       {@link PepperService} for the stored pepper key; a key id the
+ *       service cannot resolve (with {@code NoOpPepperService}: every
+ *       key id) fails verification through the dummy path rather than
+ *       being silently downgraded;</li>
  *   <li><strong>verify</strong> &mdash; delegate the constant-time
  *       comparison to the provider;</li>
  *   <li><strong>rehashDecision</strong> &mdash; on success, compute

@@ -55,9 +55,10 @@ import java.util.Optional;
  * {@link SecureRandom} for every {@code hash(...)} call; the constant-
  * time compare uses {@link MessageDigest#isEqual(byte[], byte[])}.</p>
  *
- * <p>Phase 1a's {@code NoOpPepperService} always supplies
- * {@link Optional#empty()} as pepper material; real pepper integration
- * arrives with Prompt 017.</p>
+ * <p>When the pipeline resolves a pepper, the derived key is passed
+ * through {@link PepperApplicator} (HMAC-SHA-256) and the key id is
+ * recorded in the envelope; with {@code NoOpPepperService} the provider
+ * receives {@link Optional#empty()} and stores the derived key as it is.</p>
  */
 public final class Argon2idPasswordHashProvider implements PasswordHashProvider {
 

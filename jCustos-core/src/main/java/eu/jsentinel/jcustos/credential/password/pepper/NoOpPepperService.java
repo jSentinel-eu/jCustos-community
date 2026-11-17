@@ -25,7 +25,7 @@ package eu.jsentinel.jcustos.credential.password.pepper;
 import java.util.Optional;
 
 /**
- * Phase-1a placeholder for {@link PepperService}.
+ * The {@link PepperService} that peppers nothing.
  *
  * <p>This implementation deliberately performs no pepper protection. It
  * publishes no active key id, and a lookup of any non-empty
@@ -34,9 +34,9 @@ import java.util.Optional;
  * {@code VERIFICATION_FAILED_UNKNOWN_PEPPER_KEY} so an envelope that
  * was peppered cannot be silently downgraded.</p>
  *
- * <p>The class name is the explicit warning: production deployments
- * must replace this implementation when Phase 2 ships a real pepper
- * service.</p>
+ * <p>It is what every factory uses unless a pepper is passed. To pepper,
+ * hand a {@link KeyStorePepperService} or {@link FilePepperService} to the
+ * factory instead (see {@link PepperService}).</p>
  */
 public final class NoOpPepperService implements PepperService {
 

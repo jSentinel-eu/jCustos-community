@@ -82,16 +82,16 @@ import java.util.Optional;
  * truncated by this provider; they are rejected with
  * {@link BcryptInputTooLongException} on {@code hash} and with a
  * {@link ProviderVerificationResult.ProviderError} on {@code verify}. The
- * Konzept §2.2 also forbids silent pre-hashing without a real pepper
- * service, so callers must enforce a policy-level length cap or wait for
- * the Phase-2 pepper-HMAC integration (Prompt 017).</p>
+ * Konzept §2.2 also forbids silent pre-hashing, so callers must enforce a
+ * policy-level length cap. A configured pepper does not lift the limit: it
+ * is applied to the bcrypt output, not to the password.</p>
  *
  * <h2>Password shucking</h2>
  * <p>Pre-hashing a password before handing it to bcrypt without a
  * site-wide secret (pepper) lets attackers shuck the outer hash. This
- * provider therefore stays a plain bcrypt implementation in Phase 1b;
- * pre-hashing arrives bundled with the real pepper service in Phase 2.
- * (See §11 of the V9 Konzept.)</p>
+ * provider therefore stays a plain bcrypt implementation and never
+ * pre-hashes; a pepper, when configured, is applied to the bcrypt output
+ * through {@link PepperApplicator}. (See §11 of the V9 Konzept.)</p>
  */
 public final class BcryptPasswordHashProvider implements PasswordHashProvider {
 

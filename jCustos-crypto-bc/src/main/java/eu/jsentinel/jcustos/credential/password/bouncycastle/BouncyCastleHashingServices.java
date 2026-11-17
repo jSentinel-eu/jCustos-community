@@ -46,6 +46,7 @@ import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2ParameterNames;
 import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2ParameterValidator;
 import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2PasswordHashProvider;
 import eu.jsentinel.jcustos.credential.password.pepper.NoOpPepperService;
+import eu.jsentinel.jcustos.credential.password.pepper.PepperService;
 import eu.jsentinel.jcustos.credential.password.policy.DefaultPasswordHashPolicy;
 import eu.jsentinel.jcustos.credential.password.policy.DefaultPasswordHashValidator;
 import eu.jsentinel.jcustos.credential.password.policy.PasswordHashParameterValidatorRegistry;
@@ -54,6 +55,7 @@ import eu.jsentinel.jcustos.credential.password.provider.PasswordHashProviderReg
 import eu.jsentinel.jcustos.credential.password.rehash.RehashDecisionEngine;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Wiring helpers for the Phase-1b <em>modern</em> profile.
@@ -69,6 +71,17 @@ import java.util.List;
  * core
  * {@link eu.jsentinel.jcustos.credential.password.PasswordHashingServices}
  * helper keeps emitting plain PBKDF2 envelopes.</p>
+ *
+ * <p><strong>Pepper.</strong> {@link #modern(PepperService)} and
+ * {@link #modern(PasswordHashPolicy, KdfExecutionLimiter, PepperService)}
+ * build the same profile with a {@link PepperService}: new hashes are
+ * peppered with its active key ({@code HMAC-SHA-256} after Argon2id), stored
+ * hashes verify with the key their envelope names, and {@code needsRehash}
+ * reports {@code PEPPER_KEY_ROTATED} for a hash under another key. Until
+ * 00.84.00 every factory of this class set {@link NoOpPepperService}, so
+ * peppered Argon2id required the raw
+ * {@link DefaultPasswordHashingService} constructor. The overloads without
+ * a pepper service still use {@link NoOpPepperService}.</p>
  */
 public final class BouncyCastleHashingServices {
 
@@ -96,7 +109,34 @@ public final class BouncyCastleHashingServices {
   }
 
   /**
-   * Returns a fully wired modern profile with a caller-supplied limiter.
+   * Returns the modern profile of {@link #modern()} — reference policy,
+   * default KDF budget — peppered by {@code pepperService}.
+   *
+   * @param pepperService the pepper keys, for example a
+   *                      {@link eu.jsentinel.jcustos.credential.password.pepper.KeyStorePepperService}
+   *                      or a
+   *                      {@link eu.jsentinel.jcustos.credential.password.pepper.FilePepperService}
+   * @since 00.84.00
+   */
+  public static PasswordHashingService modern(PepperService pepperService) {
+    return modern(modernPolicy(),
+        new SemaphoreKdfExecutionLimiter(KdfResourceBudget.defaults()), pepperService);
+  }
+
+  /**
+   * Returns a fully wired modern profile with a caller-supplied limiter and
+   * no pepper ({@link NoOpPepperService}).
+   *
+   * @see #modern(PasswordHashPolicy, KdfExecutionLimiter, PepperService)
+   */
+  public static PasswordHashingService modern(
+      PasswordHashPolicy policy, KdfExecutionLimiter limiter) {
+    return modern(policy, limiter, NoOpPepperService.INSTANCE);
+  }
+
+  /**
+   * Returns a fully wired modern profile with a caller-supplied limiter and
+   * pepper service.
    *
    * <p>All four Phase-1a/1b providers (Argon2id, bcrypt, scrypt,
    * PBKDF2-HMAC-SHA-256) are registered so that stored hashes from
@@ -104,9 +144,20 @@ public final class BouncyCastleHashingServices {
    * produced through the preferred provider declared by {@code policy}.
    * Construction fails fast through {@link DefaultPasswordHashingService}
    * if the preferred provider does not match a registered one.</p>
+   *
+   * <p>{@code pepperService} peppers every new hash with its active key and
+   * verifies stored hashes with the key their envelope names; a key id it
+   * does not know fails the verification through the dummy path, like a
+   * wrong password. {@link NoOpPepperService#INSTANCE} switches peppering
+   * off.</p>
+   *
+   * @since 00.84.00
    */
   public static PasswordHashingService modern(
-      PasswordHashPolicy policy, KdfExecutionLimiter limiter) {
+      PasswordHashPolicy policy, KdfExecutionLimiter limiter, PepperService pepperService) {
+    Objects.requireNonNull(policy, "policy");
+    Objects.requireNonNull(limiter, "limiter");
+    Objects.requireNonNull(pepperService, "pepperService");
     PasswordHashProviderRegistry providerRegistry =
         new PasswordHashProviderRegistry(List.of(
             new Argon2idPasswordHashProvider(),
@@ -123,7 +174,7 @@ public final class BouncyCastleHashingServices {
         PasswordHashCodec.DEFAULT,
         new DefaultPasswordHashValidator(validatorRegistry),
         providerRegistry,
-        NoOpPepperService.INSTANCE,
+        pepperService,
         policy,
         new RehashDecisionEngine(),
         limiter,

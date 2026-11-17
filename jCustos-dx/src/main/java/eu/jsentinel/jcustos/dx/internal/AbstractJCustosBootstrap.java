@@ -33,6 +33,11 @@ import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.credential.password.limiter.KdfResourceBudget;
+import eu.jsentinel.jcustos.credential.password.limiter.SemaphoreKdfExecutionLimiter;
+import eu.jsentinel.jcustos.credential.password.pbkdf2.Pbkdf2Defaults;
+import eu.jsentinel.jcustos.credential.password.pepper.PepperReference;
+import eu.jsentinel.jcustos.credential.password.pepper.PepperService;
 import eu.jsentinel.jcustos.policy.api.Policy;
 import eu.jsentinel.jcustos.policy.spi.PolicyRegistry;
 import eu.jsentinel.jcustos.policy.spi.ResourceResolver;
@@ -56,6 +61,7 @@ import eu.jsentinel.jcustos.dx.runtime.Severity;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -1129,13 +1135,21 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
    * {@code .modern()} or {@code .pbkdf2Defaults()} — is wired through
    * {@link JCustosServiceResolver#setCredentialHashingService(PasswordHashingService)}
    * since 00.84.00 (JS-SEC-073, CWE-684) and is never stuffed into the
-   * legacy setter. {@code .pepper(...)}, {@code .credentialStore(...)},
-   * {@code .passwordChange(...)} and {@code .passwordReset(...)} have no
-   * resolver and no consumer inside the bootstrap: they are recorded for the
-   * application's own wiring and reported as
-   * {@code dx/credential-<entry>-recorded-not-wired} (WARNING; STRICT → ERROR),
+   * legacy setter.
+   *
+   * <p>{@code .pepper(...)} is composed into the pipeline that {@code .modern()}
+   * or {@code .pbkdf2Defaults()} builds (since 00.84.00), listed as a service and
+   * checked: an active key id that does not resolve to a usable key is
+   * {@code credentials/pepper-active-key-unresolvable} (ERROR), because every
+   * hash would fail. A finished pipeline from {@code .hashing(...)} cannot be
+   * peppered afterwards; there, and without any pipeline, the pepper stays
+   * inert and is reported as {@code dx/credential-pepper-recorded-not-wired}.
+   * {@code .credentialStore(...)}, {@code .passwordChange(...)} and
+   * {@code .passwordReset(...)} have no resolver and no consumer inside the
+   * bootstrap: they are recorded for the application's own wiring and reported
+   * as {@code dx/credential-<entry>-recorded-not-wired} (WARNING; STRICT → ERROR),
    * exactly like {@code .rateLimit(...)} since JS-SEC-055 — never as an
-   * active service.
+   * active service.</p>
    */
   protected final void applyCredentialConfiguration(List<RegisteredJCustosService> services,
                                                     List<JCustosBootstrapWarning> warnings) {
@@ -1143,15 +1157,23 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       return;
     }
     CredentialState cred = state.credentialState();
+    // A pipeline handed over ready-made through .hashing(...) cannot take the pepper; the
+    // pipelines .modern() and .pbkdf2Defaults() build here can.
+    PasswordHashingService handedOver = cred.hashingService();
+    PepperService pepper = cred.pepperService();
+    boolean pepperComposed = false;
 
-    // .modern() probe: load BouncyCastleHashingServices.modern() reflectively
+    // .modern() probe: load BouncyCastleHashingServices.modern(...) reflectively
     if (cred.modernRequested()) {
-      Object loaded = loadModernHashingService();
+      Object loaded = loadModernHashingService(handedOver == null ? pepper : null);
       if (loaded == null) {
         warnings.add(new JCustosBootstrapWarning(
             Severity.ERROR,
             "credentials/modern-without-bc",
-            ".modern() requires the jCustos-crypto-bc module on the classpath.",
+            pepper == null
+                ? ".modern() requires the jCustos-crypto-bc module on the classpath."
+                : ".modern() with .pepper(...) requires the jCustos-crypto-bc module, version"
+                    + " 00.84.00 or later, on the classpath.",
             "Add the dependency:\n"
                 + "  <dependency>\n"
                 + "    <groupId>eu.jsentinel.jcustos</groupId>\n"
@@ -1164,6 +1186,7 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       }
       if (cred.hashingService() == null) {
         cred.hashingService((PasswordHashingService) loaded);
+        pepperComposed = pepper != null;
       }
     }
 
@@ -1173,7 +1196,12 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
         cred.passwordHasher(new Pbkdf2PasswordHasher());
       }
       if (cred.hashingService() == null) {
-        cred.hashingService(PasswordHashingServices.defaults());
+        // the same pipeline as PasswordHashingServices.defaults(), with the pepper
+        cred.hashingService(pepper == null
+            ? PasswordHashingServices.defaults()
+            : PasswordHashingServices.defaults(Pbkdf2Defaults.referencePolicy(),
+                new SemaphoreKdfExecutionLimiter(KdfResourceBudget.defaults()), pepper));
+        pepperComposed = pepper != null;
       }
     }
 
@@ -1195,9 +1223,10 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
           PasswordHashingService.class, cred.hashingService().getClass(),
           "bootstrap-explicit", false));
     }
-    // The remaining pipeline entries have no resolver and no consumer inside
-    // the bootstrap. Before 00.84.00 they appeared in services() as
-    // "bootstrap-explicit", indistinguishable from the wired entries above and
+    // A pepper composed into that pipeline is active and listed as a service.
+    // An uncomposed pepper and the remaining pipeline entries have no resolver and
+    // no consumer inside the bootstrap. Before 00.84.00 they appeared in services()
+    // as "bootstrap-explicit", indistinguishable from the wired entries above and
     // falsely reading as "configured and active" — the JS-SEC-055 pattern.
     // Report them as recorded-not-wired instead: WARNING, and in STRICT a hard
     // boot failure, so nobody ships an inert pepper or credential store.
@@ -1205,10 +1234,16 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       case STRICT -> Severity.ERROR;
       default -> Severity.WARNING;
     };
-    if (cred.pepperService() != null) {
-      warnings.add(recordedNotWired(credentialRecordedNotWired, "pepper", ".pepper(...)",
-          cred.pepperService().getClass(),
-          "Compose it into the pipeline instead: .hashing(PasswordHashingServices.defaults(policy, limiter, pepper))."));
+    if (pepper != null) {
+      if (pepperComposed) {
+        // the pepper is part of the wired pipeline: an active service, no finding
+        services.add(new RegisteredJCustosService(
+            PepperService.class, pepper.getClass(), "bootstrap-explicit", false));
+        pepperActiveKeyProblem(pepper).ifPresent(warnings::add);
+      } else {
+        warnings.add(pepperNotWired(credentialRecordedNotWired, pepper.getClass(),
+            handedOver != null));
+      }
     }
     if (cred.credentialStore() != null) {
       warnings.add(recordedNotWired(credentialRecordedNotWired, "store", ".credentialStore(...)",
@@ -1238,11 +1273,10 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
     }
   }
 
-  /**
-   * Reflective probe for {@code BouncyCastleHashingServices.modern()}.
-   * Returns the loaded {@link PasswordHashingService} or {@code null}
-   * when {@code security-crypto-bc} is not on the classpath.
-   */
+  /** Code of the finding for a pepper the bootstrap could not compose into a pipeline. */
+  private static final String PEPPER_RECORDED_NOT_WIRED =
+      "dx/credential-pepper-recorded-not-wired";
+
   private static JCustosBootstrapWarning recordedNotWired(Severity severity, String entry,
                                                         String call, Class<?> impl, String remedy) {
     return new JCustosBootstrapWarning(
@@ -1253,11 +1287,87 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
         remedy);
   }
 
-  private static Object loadModernHashingService() {
+  /**
+   * The pepper could not be composed: the pipeline came finished from {@code .hashing(...)},
+   * or there is no pipeline at all and {@code credentialHashingService()} falls back to the
+   * unpeppered PBKDF2 defaults.
+   */
+  private static JCustosBootstrapWarning pepperNotWired(Severity severity, Class<?> impl,
+                                                       boolean handedOver) {
+    return handedOver
+        ? new JCustosBootstrapWarning(
+            severity,
+            PEPPER_RECORDED_NOT_WIRED,
+            ".pepper(...) recorded " + impl.getName() + ", but .hashing(...) handed over a"
+                + " finished PasswordHashingService, which cannot be peppered afterwards; that"
+                + " pipeline hashes and verifies with the pepper it was built with, not with this"
+                + " one (JS-SEC-073).",
+            "Build the pipeline with the pepper and drop .pepper(...):"
+                + " .hashing(BouncyCastleHashingServices.modern(policy, limiter, pepper)) or"
+                + " .hashing(PasswordHashingServices.defaults(policy, limiter, pepper)); or replace"
+                + " .hashing(...) with .modern() or .pbkdf2Defaults() next to .pepper(...).")
+        : new JCustosBootstrapWarning(
+            severity,
+            PEPPER_RECORDED_NOT_WIRED,
+            ".pepper(...) recorded " + impl.getName() + ", but neither .modern() nor"
+                + " .pbkdf2Defaults() builds a pipeline it could be composed into;"
+                + " credentialHashingService() falls back to the unpeppered PBKDF2 defaults"
+                + " (JS-SEC-073).",
+            "Add .modern() (Argon2id, jCustos-crypto-bc) or .pbkdf2Defaults() next to"
+                + " .pepper(...).");
+  }
+
+  /**
+   * A composed pepper whose active key id does not resolve to a key of at least
+   * {@link PepperReference#MIN_KEY_BYTES} bytes makes every {@code hash(...)} throw; report it
+   * at boot instead of at the first registration. A service without an active key id is not
+   * reported: it verifies peppered hashes and writes unpeppered ones, the way out of a pepper.
+   * The resolved copy is zeroed at once and never leaves this method.
+   */
+  private static Optional<JCustosBootstrapWarning> pepperActiveKeyProblem(PepperService pepper) {
+    String problem;
+    try {
+      Optional<String> active = pepper.activeKeyId();
+      if (active == null || active.isEmpty()) {
+        return Optional.empty();
+      }
+      Optional<byte[]> key = pepper.resolve(active.get());
+      if (key == null || key.isEmpty()) {
+        problem = "the active key id '" + active.get() + "' does not resolve";
+      } else {
+        int length = key.get().length;
+        Arrays.fill(key.get(), (byte) 0);
+        if (length >= PepperReference.MIN_KEY_BYTES) {
+          return Optional.empty();
+        }
+        problem = "the active key '" + active.get() + "' has " + length + " bytes, fewer than "
+            + PepperReference.MIN_KEY_BYTES;
+      }
+    } catch (RuntimeException lookupFailed) {
+      problem = "looking up the active key failed (" + lookupFailed.getClass().getName() + ")";
+    }
+    return Optional.of(new JCustosBootstrapWarning(
+        Severity.ERROR,
+        "credentials/pepper-active-key-unresolvable",
+        ".pepper(...) recorded " + pepper.getClass().getName() + ": " + problem
+            + "; every new password hash would fail.",
+        "Provision the active key in the pepper source, or make a key the source holds active."));
+  }
+
+  /**
+   * Reflective probe for {@code BouncyCastleHashingServices.modern()}, or
+   * {@code modern(PepperService)} when a pepper is to be composed. Returns the
+   * loaded {@link PasswordHashingService} or {@code null} when
+   * {@code jCustos-crypto-bc} (in a version with the pepper overload, where
+   * one is needed) is not on the classpath.
+   */
+  private static Object loadModernHashingService(PepperService pepper) {
     try {
       Class<?> bc = Class.forName(
           "eu.jsentinel.jcustos.credential.password.bouncycastle.BouncyCastleHashingServices");
-      return bc.getMethod("modern").invoke(null);
+      return pepper == null
+          ? bc.getMethod("modern").invoke(null)
+          : bc.getMethod("modern", PepperService.class).invoke(null, pepper);
     } catch (ClassNotFoundException | NoSuchMethodException
              | IllegalAccessException | java.lang.reflect.InvocationTargetException e) {
       return null;

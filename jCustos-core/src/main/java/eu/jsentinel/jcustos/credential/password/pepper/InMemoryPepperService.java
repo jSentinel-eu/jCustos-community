@@ -38,9 +38,10 @@ import java.util.Optional;
  * pepper material out of source control, off the password database and
  * out of audit logs.</p>
  *
- * <p>For a production deployment, plug in a {@link PepperService}
- * implementation backed by a secret manager (HSM, AWS KMS, HashiCorp
- * Vault, Kubernetes Secrets) instead.</p>
+ * <p>For a production deployment, load the keys from where they are kept
+ * instead: {@link KeyStorePepperService} (PKCS12 file, PKCS#11 token) or
+ * {@link FilePepperService} (container secrets), or plug in a
+ * {@link PepperService} backed by a secret manager.</p>
  */
 public final class InMemoryPepperService implements PepperService {
 

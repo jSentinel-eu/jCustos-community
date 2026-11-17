@@ -14,7 +14,16 @@ import eu.jsentinel.jcustos.authentication.PasswordHasher;
 import eu.jsentinel.jcustos.authentication.Pbkdf2PasswordHasher;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.InternalAuditEventType;
+import eu.jsentinel.jcustos.credential.password.CredentialVerificationResult;
+import eu.jsentinel.jcustos.credential.password.PasswordHashResult;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.credential.password.bouncycastle.BouncyCastleHashingServices;
+import eu.jsentinel.jcustos.credential.password.envelope.PasswordHashCodec;
+import eu.jsentinel.jcustos.credential.password.pepper.InMemoryPepperService;
+import eu.jsentinel.jcustos.credential.password.pepper.NoOpPepperService;
+import eu.jsentinel.jcustos.credential.password.pepper.PepperReference;
+import eu.jsentinel.jcustos.credential.password.pepper.PepperService;
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
 import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
@@ -28,6 +37,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -160,6 +170,152 @@ class CredentialBootstrapTest {
             && w.severity() == Severity.WARNING));
     assertFalse(lenient.services().stream()
         .anyMatch(s -> eu.jsentinel.jcustos.credential.password.pepper.PepperService.class.equals(s.spi())));
+  }
+
+  // ── pepper composition (00.84.00) ────────────────────────────────
+
+  private static byte[] pepperKey(byte fill) {
+    byte[] key = new byte[PepperReference.MIN_KEY_BYTES];
+    java.util.Arrays.fill(key, fill);
+    return key;
+  }
+
+  private static String pepperKeyIdOf(String encodedHash) {
+    return PasswordHashCodec.DEFAULT.decode(encodedHash).envelope().pepperKeyId()
+        .orElseThrow(() -> new AssertionError("the hash is not peppered: " + encodedHash));
+  }
+
+  @Test
+  @DisplayName("STRICT .modern().pepper(p) boots, lists the pepper and hashes peppered Argon2id")
+  void modernWithPepperInStrictBootsAndPeppers() {
+    PepperService pepper = InMemoryPepperService.withActiveKey("pepper-2026", pepperKey((byte) 0x5a));
+    JCustosRuntime runtime = new TestBootstrap()
+        .credentials(c -> c.modern().pepper(pepper))
+        .audit(a -> a.logging()) // JS-SEC-080: STRICT refuses to boot without an audit trail
+        .mode(JCustosBootstrapMode.STRICT)
+        .install();
+
+    assertFalse(runtime.warnings().stream()
+        .anyMatch(w -> "dx/credential-pepper-recorded-not-wired".equals(w.code())),
+        "a composed pepper is no finding: " + runtime.warnings());
+    assertTrue(runtime.services().stream()
+        .anyMatch(s -> PepperService.class.equals(s.spi())
+            && InMemoryPepperService.class.equals(s.impl())),
+        "a composed pepper is an active service");
+    PasswordHashingService wired = JCustosServiceResolver.credentialHashingService();
+    PasswordHashResult hashed = wired.hash("correct horse battery staple".toCharArray());
+    assertEquals("Argon2id", hashed.algorithm());
+    assertEquals("pepper-2026", pepperKeyIdOf(hashed.encodedHash()));
+    assertTrue(wired.verify("correct horse battery staple".toCharArray(), hashed.encodedHash())
+        instanceof CredentialVerificationResult.Verified);
+    // the stored hash is useless without the pepper
+    CredentialVerificationResult unpeppered = BouncyCastleHashingServices.modern()
+        .verify("correct horse battery staple".toCharArray(), hashed.encodedHash());
+    assertEquals(InternalAuditEventType.VERIFICATION_FAILED_UNKNOWN_PEPPER_KEY,
+        ((CredentialVerificationResult.Failed) unpeppered).internalAuditEventType());
+  }
+
+  @Test
+  @DisplayName(".pbkdf2Defaults().pepper(p) peppers the PBKDF2 pipeline; the legacy hasher stays as it is")
+  void pbkdf2DefaultsWithPepper() {
+    PepperService pepper = InMemoryPepperService.withActiveKey("pepper-2026", pepperKey((byte) 0x33));
+    JCustosRuntime runtime = new TestBootstrap()
+        .credentials(c -> c.pepper(pepper).pbkdf2Defaults())
+        .install();
+
+    assertTrue(runtime.services().stream().anyMatch(s -> PepperService.class.equals(s.spi())));
+    assertTrue(runtime.services().stream()
+        .anyMatch(s -> PasswordHasher.class.equals(s.spi())
+            && Pbkdf2PasswordHasher.class.equals(s.impl())));
+    PasswordHashResult hashed = JCustosServiceResolver.credentialHashingService()
+        .hash("correct horse battery staple".toCharArray());
+    assertEquals("PBKDF2WithHmacSHA256", hashed.algorithm());
+    assertEquals("pepper-2026", pepperKeyIdOf(hashed.encodedHash()));
+    assertEquals(InternalAuditEventType.VERIFICATION_FAILED_UNKNOWN_PEPPER_KEY,
+        ((CredentialVerificationResult.Failed) PasswordHashingServices.defaults()
+            .verify("correct horse battery staple".toCharArray(), hashed.encodedHash()))
+            .internalAuditEventType());
+  }
+
+  @Test
+  @DisplayName(".hashing(own).pepper(p) keeps the finding and says why: a finished pipeline cannot be peppered")
+  void handedOverPipelineKeepsThePepperFinding() {
+    PasswordHashingService own = PasswordHashingServices.defaults();
+    PepperService pepper = InMemoryPepperService.withActiveKey("pepper-2026", pepperKey((byte) 0x11));
+    JCustosRuntime runtime = new TestBootstrap()
+        .credentials(c -> c.hashing(own).modern().pepper(pepper))
+        .install();
+
+    JCustosBootstrapWarning finding = runtime.warnings().stream()
+        .filter(w -> "dx/credential-pepper-recorded-not-wired".equals(w.code()))
+        .findFirst().orElseThrow();
+    assertEquals(Severity.WARNING, finding.severity());
+    assertTrue(finding.message().contains(".hashing(...) handed over a finished"
+        + " PasswordHashingService, which cannot be peppered afterwards"), finding.message());
+    assertTrue(finding.suggestedFix().contains(
+        "BouncyCastleHashingServices.modern(policy, limiter, pepper)"), finding.suggestedFix());
+    assertSame(own, JCustosServiceResolver.credentialHashingService(),
+        "the handed-over pipeline wins over .modern(), as before");
+    assertFalse(runtime.services().stream().anyMatch(s -> PepperService.class.equals(s.spi())));
+    assertTrue(PasswordHashCodec.DEFAULT.decode(own.hash("x".toCharArray()).encodedHash())
+        .envelope().pepperKeyId().isEmpty(),
+        "the handed-over pipeline is not peppered behind the caller's back");
+  }
+
+  @Test
+  @DisplayName(".pepper(p) without a pipeline is reported with its own text; STRICT fails")
+  void pepperWithoutPipeline() {
+    PepperService pepper = InMemoryPepperService.withActiveKey("pepper-2026", pepperKey((byte) 0x22));
+    JCustosRuntime runtime = new TestBootstrap()
+        .credentials(c -> c.pepper(pepper))
+        .install();
+    JCustosBootstrapWarning finding = runtime.warnings().stream()
+        .filter(w -> "dx/credential-pepper-recorded-not-wired".equals(w.code()))
+        .findFirst().orElseThrow();
+    assertTrue(finding.message().contains("neither .modern() nor .pbkdf2Defaults()"),
+        finding.message());
+    JCustosServiceResolver.resetAll();
+    assertThrows(JCustosBootstrapException.class, () -> new TestBootstrap()
+        .credentials(c -> c.pepper(pepper))
+        .audit(a -> a.logging())
+        .mode(JCustosBootstrapMode.STRICT)
+        .install());
+  }
+
+  @Test
+  @DisplayName("a composed pepper whose active key does not resolve fails the boot instead of the first hash")
+  void unresolvableActiveKeyIsAnError() {
+    PepperService broken = new PepperService() {
+      @Override public Optional<String> activeKeyId() {
+        return Optional.of("pepper-gone");
+      }
+
+      @Override public Optional<byte[]> resolve(String keyId) {
+        return Optional.empty();
+      }
+    };
+    JCustosRuntime lenient = new TestBootstrap()
+        .credentials(c -> c.modern().pepper(broken))
+        .install();
+    JCustosBootstrapWarning error = lenient.warnings().stream()
+        .filter(w -> "credentials/pepper-active-key-unresolvable".equals(w.code()))
+        .findFirst().orElseThrow();
+    assertEquals(Severity.ERROR, error.severity());
+    assertTrue(error.message().contains("pepper-gone"), error.message());
+    JCustosServiceResolver.resetAll();
+    assertThrows(JCustosBootstrapException.class, () -> new TestBootstrap()
+        .credentials(c -> c.modern().pepper(broken))
+        .audit(a -> a.logging())
+        .mode(JCustosBootstrapMode.STRICT)
+        .install());
+
+    // a service without an active key (verify-only, the way out of a pepper) is no finding
+    JCustosServiceResolver.resetAll();
+    JCustosRuntime verifyOnly = new TestBootstrap()
+        .credentials(c -> c.modern().pepper(NoOpPepperService.INSTANCE))
+        .install();
+    assertFalse(verifyOnly.warnings().stream()
+        .anyMatch(w -> w.code().startsWith("credentials/pepper")), verifyOnly.warnings().toString());
   }
 
   @Test
