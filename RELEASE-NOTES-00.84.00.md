@@ -1549,13 +1549,19 @@ scan with dated exceptions that reports "not run" instead of passing when OSV is
 optionally a byte-for-byte reproducibility check. A Forgejo workflow that runs the same gate is
 prepared but not yet a required check and has not run on a runner. **Consumers:** no change.
 
-## `.gitignore` keeps key material and local settings out of the repository (SA45, JS-SEC-145, CWE-538)
+## A security policy, and `.gitignore` keeps key material and local settings out of the repository (SA45, JS-SEC-145, CWE-538, CWE-1059)
 
-Key stores, keys, signatures, environment files, local Maven settings, local tool state and release
-output are now ignored; the two synthetic test key stores of `jCustos-events` stay tracked as
-explicit exceptions. A security policy (`SECURITY.md`) is prepared, but its reporting channel,
-response times, disclosure deadline and supported versions are still to be decided, and it is not
-part of this build yet; the release-key fingerprint is entered. **Consumers:** no change.
+There was no `SECURITY.md`; the only hint was a private mail address in `CONTRIBUTING.md`. The new
+policy names the private reporting channels (`sven@jsentinel.eu`, encrypted with the release key,
+or private vulnerability reporting on the GitHub mirror), what a report should contain, response
+times (acknowledgement within three working days, first assessment within ten, a fix within 30 days
+for critical and 60 days for high severity), a disclosure deadline of 90 days, the scope and the
+supported versions: 00.84.x, and 00.83.x with critical fixes for three months after this release.
+The nine modules that were published under the community coordinates in 00.81.10 before they moved
+to the enterprise edition are end of life. Key stores, keys, signatures, environment files, local
+Maven settings, local tool state and release output are now ignored; the two synthetic test key
+stores of `jCustos-events` stay tracked as explicit exceptions. **Consumers:** report
+vulnerabilities as `SECURITY.md` describes; plan the move from 00.83.x within three months.
 
 ## A REST skill token names a user, not a frozen copy of it, and every route has its own key (SA32, JS-SEC-132, CWE-613, CWE-672, CWE-436, CWE-284)
 

@@ -61,5 +61,5 @@ strings follow the project's i18n resources.
 
 ## Reporting security issues
 
-Please do not open a public issue for a vulnerability. Mail
-sven.ruppert@gmail.com directly.
+Please do not open a public issue for a vulnerability. [SECURITY.md](SECURITY.md)
+describes how to report one in private, what to include and what happens next.
