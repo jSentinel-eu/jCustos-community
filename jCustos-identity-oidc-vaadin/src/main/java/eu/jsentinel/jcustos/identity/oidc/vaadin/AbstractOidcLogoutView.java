@@ -19,10 +19,8 @@ package eu.jsentinel.jcustos.identity.oidc.vaadin;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.LogoutPerformed;
 import eu.jsentinel.jcustos.audit.SessionRef;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStore;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
 import eu.jsentinel.jcustos.identity.oidc.RpInitiatedLogoutInitiator;
 import eu.jsentinel.jcustos.logout.LogoutScope;
@@ -55,7 +53,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 
 /**
  * Reusable base for the Vaadin OIDC RP-initiated-logout route (V00.78). The
@@ -321,22 +318,17 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
     }
   }
 
-  /** The steps of {@code VaadinLogoutService}, each one guarded: none may stop the others. */
-  @SuppressWarnings({"rawtypes", "unchecked"})
+  /**
+   * The steps of {@code VaadinLogoutService}, each one guarded: none may stop the others.
+   * <p>
+   * JS-SEC-097 (CWE-1041): subject lookup, removal and the audited id go through
+   * {@link CurrentSubject}. A subject store that cannot be read yields no subject - there is
+   * still a session to end - and {@link CurrentSubject#clear()} still tries the removal.
+   */
   private void tearDownLocalIdentity(VaadinSession session) {
-    SubjectStore store = null;
-    Class subjectType = null;
-    Object subject = null;
-    try {
-      store = SubjectStores.findSubjectStore().orElse(null);
-      subjectType = JCustosServiceResolver.<Object, Object>authenticationService().subjectType();
-      if (store != null && subjectType != null) {
-        subject = store.currentSubject(subjectType).orElse(null);
-      }
-    } catch (RuntimeException ignored) {
-      // without a subject there is still a session to end
-    }
-    String subjectId = subjectIdOf(subject);
+    Object subject = CurrentSubject.current().orElse(null);
+    // the resolver's id, else the identity handle; never toString(), never empty
+    String subjectId = subject == null ? null : CurrentSubject.subjectIdOf(subject);
     // JS-SEC-117 (CWE-532, CWE-522): the policy and the LogoutPerformed event see the
     // reference of the session id, never the session cookie.
     String sessionId = SessionRef.ofNullable(sessionIdOf(session));
@@ -348,13 +340,8 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
     } catch (RuntimeException ignored) {
       // never block the logout flow
     }
-    try {
-      if (store != null && subjectType != null) {
-        store.deleteCurrentSubject(subjectType);
-      }
-    } catch (RuntimeException ignored) {
-      // the session is closed below regardless
-    }
+    // best effort, never throws; the session is closed below regardless
+    CurrentSubject.clear();
     try {
       JCustosServiceResolver.findTokenCredentialStore().ifPresent(TokenCredentialStore::clear);
     } catch (RuntimeException ignored) {
@@ -398,20 +385,6 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
       }
     } catch (RuntimeException alreadyInvalidated) {
       // nothing left to invalidate
-    }
-  }
-
-  /** The audit id of the subject; never {@code subject.toString()} (JS-SEC-004). */
-  private static String subjectIdOf(Object subject) {
-    if (subject == null) {
-      return "";
-    }
-    try {
-      Optional<SubjectIdResolver<Object>> resolver = JCustosServiceResolver.findSubjectIdResolver();
-      String resolved = resolver.map(r -> r.resolve(subject).value()).orElse("");
-      return resolved == null ? "" : resolved;
-    } catch (RuntimeException ignored) {
-      return "";
     }
   }
 

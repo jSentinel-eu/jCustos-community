@@ -29,9 +29,9 @@ import eu.jsentinel.jcustos.authorization.api.AccessEvaluator;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationEvaluator;
 import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.navigation.AccessContext;
 import eu.jsentinel.jcustos.authorization.navigation.AccessDecision;
 import com.vaadin.flow.component.UI;
@@ -299,12 +299,22 @@ public class AuthorizationListener
     }
   }
 
-  /** Mirrors the subject check of {@link LoginListener}; "cannot tell" counts as bound. */
-  @SuppressWarnings({"rawtypes", "unchecked"})
+  /**
+   * Mirrors the subject check of {@link LoginListener}; "cannot tell" counts as bound.
+   * <p>
+   * JS-SEC-097 (CWE-1041): the subject comes from {@link CurrentSubject}, read through
+   * {@link CurrentSubject#currentPropagatingFailures()}. {@link CurrentSubject#current()} reads
+   * a subject store that cannot be resolved or read as "no subject" and would forward a
+   * visitor whose state is unknown to the login view; here that store ends the navigation in
+   * the error view, as before. A subject type that cannot be told - no authentication
+   * service, a failing one, or one without a type - counts as bound for the same reason.
+   */
   private static boolean subjectBound() {
     try {
-      Class subjectType = JCustosServiceResolver.<Object, Object>authenticationService().subjectType();
-      return SubjectStores.subjectStore().currentSubject(subjectType).isPresent();
+      if (CurrentSubject.subjectType().isEmpty()) {
+        return true;
+      }
+      return CurrentSubject.currentPropagatingFailures().isPresent();
     } catch (RuntimeException unknown) {
       return true;
     }

@@ -590,4 +590,47 @@ class JCustosEnforcerTest {
     assertTrue(ex.getMessage().contains("method=MFA"));
     assertTrue(ex.getMessage().contains("high-value op"));
   }
+
+  /** A subject whose toString() leaks what must never become a subject id. */
+  static final class LeakyUser {
+    @Override public String toString() { return "LeakyUser[email=a@example.org, password=pw-SECRET-4711]"; }
+  }
+
+  static final class LeakyAuthn implements AuthenticationService<String, LeakyUser> {
+    @Override public boolean checkCredentials(String creds) { return false; }
+    @Override public LeakyUser loadSubject(String creds) { return null; }
+    @Override public Class<LeakyUser> subjectType() { return LeakyUser.class; }
+  }
+
+  static final class LeakyAuthz implements AuthorizationService<LeakyUser> {
+    @Override public HasRoles rolesFor(LeakyUser u) { return List::of; }
+    @Override public HasPermissions permissionsFor(LeakyUser u) { return List::of; }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-097: without a resolver the enforcer's subject id is the identity handle, never toString()")
+  void subjectIdWithoutResolverIsTheIdentityHandle() {
+    JCustosServiceResolver.setAuthenticationService(new LeakyAuthn());
+    JCustosServiceResolver.setAuthorizationService(new LeakyAuthz());
+    LeakyUser user = new LeakyUser();
+    store.setCurrentSubject(user, LeakyUser.class);
+
+    JCustosSubject subject = JCustosEnforcer.currentSubject().orElseThrow();
+
+    assertEquals(CurrentSubject.subjectIdOf(user), subject.subjectId());
+    assertTrue(subject.subjectId().startsWith("LeakyUser@"), subject.subjectId());
+    assertTrue(!subject.subjectId().contains("SECRET") && !subject.displayName().contains("SECRET"),
+        "the subject's toString() must not reach the access context");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-097: with a resolver the enforcer uses the resolver's id")
+  void subjectIdWithResolverIsTheResolversValue() {
+    JCustosServiceResolver.setAuthenticationService(new LeakyAuthn());
+    JCustosServiceResolver.setAuthorizationService(new LeakyAuthz());
+    JCustosServiceResolver.<LeakyUser>setSubjectIdResolver(u -> eu.jsentinel.jcustos.logout.SubjectId.of("user-42"));
+    store.setCurrentSubject(new LeakyUser(), LeakyUser.class);
+
+    assertEquals("user-42", JCustosEnforcer.currentSubject().orElseThrow().subjectId());
+  }
 }

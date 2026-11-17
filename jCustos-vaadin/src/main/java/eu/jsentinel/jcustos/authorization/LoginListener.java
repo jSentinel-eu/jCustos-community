@@ -17,8 +17,7 @@
 package eu.jsentinel.jcustos.authorization;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
-import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.impl.RouteRestrictionResolver;
 import eu.jsentinel.jcustos.authorization.impl.VaadinNavigationAccessDecisionMapper;
 import eu.jsentinel.jcustos.authorization.navigation.NavigationAccessDecision;
@@ -71,9 +70,10 @@ public abstract class LoginListener<U>
     final boolean isRestricted =
         isRestrictedTarget(navigationTarget, beforeEnterEvent.getLayouts());
     final boolean isLoginView = navigationTarget.equals(loginNavigationTarget());
-    final boolean subjectAvailable = SubjectStores.subjectStore()
-        .currentSubject(subjectType())
-        .isPresent();
+    // JS-SEC-097 (CWE-1041): the shared facade. A subject store that cannot be resolved or
+    // read counts as "no subject": a restricted target goes to the login view, never past
+    // it. Until 00.84.00 the lookup threw out of the navigation instead.
+    final boolean subjectAvailable = CurrentSubject.current().isPresent();
 
     NavigationJCustosContext ctx = new NavigationJCustosContext(
         navigationTarget, isRestricted, subjectAvailable, isLoginView);
@@ -130,11 +130,4 @@ public abstract class LoginListener<U>
    * @return the class with the Route Annotation for the default (main) view
    */
   public abstract Class<? extends Component> defaultNavigationTarget();
-
-  @SuppressWarnings("unchecked")
-  private Class<U> subjectType() {
-    return (Class<U>) JCustosServiceResolver
-        .<Object, Object>authenticationService()
-        .subjectType();
-  }
 }
