@@ -29,9 +29,10 @@ import java.util.Optional;
  * The existing default {@code InMemoryLoginAttemptPolicy} keeps its
  * counters in process memory — fine for a single-instance demo, but
  * unsuited for clustered deployments or for tracking lockouts across
- * restarts. A store-backed policy (planned for Phase 4) delegates
- * counter mutation and lookup to a {@code LoginAttemptStore}, so the
- * lockout state survives the process and is shared across nodes.
+ * restarts. {@link StoreBackedLoginAttemptPolicy} delegates counter
+ * mutation and lookup to a {@code LoginAttemptStore}, so the lockout state
+ * survives the process and - with a store that all nodes reach - is shared
+ * across nodes.
  *
  * <p>The API is behaviour-flavoured rather than pure CRUD because
  * the data shape is so narrow (counter + timestamp): callers either
@@ -79,6 +80,17 @@ import java.util.Optional;
  * store that derives the deadlines of restored entries from limits it has
  * seen should keep the limits of address keys apart from those of account
  * keys, as {@link InMemoryLoginAttemptStore} does.
+ *
+ * <h2>Account keys (since 00.84.00)</h2>
+ *
+ * <p>{@link StoreBackedLoginAttemptPolicy} also counts every attempt on
+ * {@link LoginAttemptKey#forAccount} (JS-SEC-166, CWE-307) - an ordinary key
+ * whose user id starts with {@link LoginAttemptKey#ACCOUNT_USER_ID_PREFIX} and
+ * whose address is {@link LoginAttemptKey#ANY_ADDRESS}, passed with the account
+ * limits. A store keeps it like any other key and stores it verbatim. A store
+ * that several nodes share has to perform each attempt operation atomically in
+ * its backend, not behind a lock inside one JVM; see
+ * {@code docs/security/deployment/cluster.md}.
  */
 @ExperimentalJCustosApi
 public interface LoginAttemptStore {

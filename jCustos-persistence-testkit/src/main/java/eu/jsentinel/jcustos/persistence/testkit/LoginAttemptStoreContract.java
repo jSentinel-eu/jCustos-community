@@ -16,20 +16,38 @@
  */
 package eu.jsentinel.jcustos.persistence.testkit;
 
+import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptConfiguration;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptKey;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptLimits;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore.AttemptLimits;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore.AttemptStatus;
+import eu.jsentinel.jcustos.bruteforce.StoreBackedLoginAttemptPolicy;
+import eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -50,6 +68,20 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * keeps such a key like any other; the tests below check the round trip,
  * the independence from account keys and - for an atomic store - the
  * reservation.
+ *
+ * <p>Several nodes (JS-SEC-166, since 00.84.00): the tests whose name starts with
+ * {@code JS-SEC-166} run two {@link StoreBackedLoginAttemptPolicy} instances - two
+ * "nodes" - on the one store under test, with clocks of their own and, for the
+ * reservations, on threads of their own: a lockout earned through one node refuses
+ * the account on the other, from any address; the attempts in flight on both nodes
+ * together never exceed the threshold; the reservations of a node that fails lapse;
+ * and a skew of two seconds between the node clocks moves the end of a lockout by
+ * at most those two seconds, neither releasing it early nor keeping it for good.
+ * Node B works with {@link #secondNodeStore(LoginAttemptStore)}: by default the
+ * same instance as node A, which proves atomicity within one instance only - a
+ * store whose atomicity rests on a lock inside the JVM passes then. A store meant
+ * for several nodes overrides it with a second client of the same backend, so that
+ * the two nodes meet in the backend as they do in a cluster.
  */
 @DisplayName("LoginAttemptStore — contract")
 public interface LoginAttemptStoreContract {
@@ -352,5 +384,237 @@ public interface LoginAttemptStoreContract {
     assertFalse(store.tryBeginAttempt(address, t0.plusSeconds(1), limits).blocked(),
         "an abandoned attempt frees its slot");
     assertEquals(0, store.failureCount(address), "and counts nothing");
+  }
+
+  // ── several nodes on one store (JS-SEC-166, since 00.84.00) ────────
+
+  /**
+   * The thresholds of the two-node tests, the vocabulary of {@link #limits()}: 3 failures within
+   * 10 min lock for 5 min.
+   */
+  private static LoginAttemptLimits nodeLimits() {
+    return LoginAttemptLimits.of(new LoginAttemptConfiguration(3, Duration.ofMinutes(10),
+        Duration.ofMinutes(5), Duration.ofMinutes(5)));
+  }
+
+  /**
+   * The store node B of the two-node tests (JS-SEC-166) counts on: a second instance over the
+   * same backing data as {@code store}, built the way a second node would build it. The default
+   * returns {@code store} itself.
+   *
+   * @param store the store of node A, as {@link #newStore()} returned it
+   * @return the store of node B
+   * @since 00.84.00
+   */
+  default LoginAttemptStore secondNodeStore(LoginAttemptStore store) {
+    return store;
+  }
+
+  /** One node of a cluster: a store-backed policy on the shared {@code store}. */
+  private static LoginAttemptPolicy node(LoginAttemptStore store, Clock clock) {
+    return new StoreBackedLoginAttemptPolicy(store, nodeLimits(), TenantId.DEFAULT, clock,
+        SubjectKeyCanonicalizer.defaults(), NoopJCustosAuditService.INSTANCE);
+  }
+
+  private static LoginAttemptContext attempt(String user, String address, SharedTime time) {
+    return new LoginAttemptContext(user, address, null, time.now());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: a lockout earned through node A refuses the account on node B - from the same address and from any other")
+  default void lockoutOnOneNodeAppliesOnTheOther() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    SharedTime time = new SharedTime(t0);
+    LoginAttemptPolicy nodeA = node(store, time.node(Duration.ZERO));
+    LoginAttemptPolicy nodeB = node(secondNodeStore(store), time.node(Duration.ZERO));
+    LoginAttemptConfiguration limits = nodeLimits().perAccount();
+
+    // one address, every guess through node A
+    for (int i = 0; i < limits.failureThreshold(); i++) {
+      LoginAttemptContext guess = attempt("alice", "10.0.0.1", time);
+      assertEquals(LoginAttemptDecision.allowed(), nodeA.beforeAttempt(guess), "guess " + (i + 1));
+      nodeA.recordFailure(guess);
+    }
+    LoginAttemptDecision.LockedOut locked = assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+        nodeB.beforeAttempt(attempt("alice", "10.0.0.1", time)), "node B sees node A's lockout");
+    assertEquals(limits.initialLockout(), locked.remaining());
+    assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+        nodeB.peek(attempt("alice", "192.0.2.99", time)), "from an address alice never used");
+
+    // address hopping, the guesses spread over both nodes
+    for (int i = 0; i < limits.failureThreshold(); i++) {
+      LoginAttemptPolicy node = i % 2 == 0 ? nodeA : nodeB;
+      LoginAttemptContext guess = attempt("carol", "10.0.1." + i, time);
+      assertEquals(LoginAttemptDecision.allowed(), node.beforeAttempt(guess), "guess " + (i + 1));
+      node.recordFailure(guess);
+    }
+    for (LoginAttemptPolicy node : List.of(nodeA, nodeB)) {
+      assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+          node.beforeAttempt(attempt("carol", "192.0.2.99", time)),
+          "the account is locked on every node, whatever the address");
+    }
+    assertEquals(LoginAttemptDecision.allowed(), nodeB.peek(attempt("bob", "10.0.1.0", time)),
+        "the addresses themselves are not locked");
+
+    time.set(t0.plus(limits.initialLockout()));
+    for (LoginAttemptPolicy node : List.of(nodeA, nodeB)) {
+      LoginAttemptContext later = attempt("carol", "192.0.2.99", time);
+      assertEquals(LoginAttemptDecision.allowed(), node.beforeAttempt(later),
+          "the lockout ends on time on every node");
+      node.abandonAttempt(later);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: two nodes with 24 threads each, every guess from its own address - exactly threshold-many are evaluated, every round")
+  default void reservationsOfBothNodesStayWithinTheThreshold() throws Exception {
+    assumeTrue(this instanceof AtomicLoginAttemptStoreContract,
+        "only an atomic store reserves attempts");
+    LoginAttemptStore store = newStore();
+    SharedTime time = new SharedTime(Instant.parse("2026-01-01T00:00:00Z"));
+    List<LoginAttemptPolicy> nodes = List.of(node(store, time.node(Duration.ZERO)),
+        node(secondNodeStore(store), time.node(Duration.ZERO)));
+    int threshold = nodeLimits().perAccount().failureThreshold();
+    int perNode = 24;
+    int rounds = 8;
+    List<ExecutorService> pools = List.of(Executors.newFixedThreadPool(perNode),
+        Executors.newFixedThreadPool(perNode));
+    try {
+      for (int round = 0; round < rounds; round++) {
+        String victim = "victim-" + round;
+        CountDownLatch ready = new CountDownLatch(2 * perNode);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch decided = new CountDownLatch(2 * perNode);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        for (int i = 0; i < 2 * perNode; i++) {
+          LoginAttemptPolicy node = nodes.get(i % 2);
+          LoginAttemptContext guess = attempt(victim, "10." + round + ".0." + i, time);
+          outcomes.add(pools.get(i % 2).submit(() -> {
+            ready.countDown();
+            start.await();
+            boolean admitted = node.beforeAttempt(guess) instanceof LoginAttemptDecision.Allowed;
+            decided.countDown();
+            if (admitted) {
+              // every guess is decided before the first failure is reported
+              decided.await(30, TimeUnit.SECONDS);
+              node.recordFailure(guess);
+            }
+            return admitted;
+          }));
+        }
+        assertTrue(ready.await(10, TimeUnit.SECONDS), "the threads did not start");
+        start.countDown();
+        int admitted = 0;
+        for (Future<Boolean> outcome : outcomes) {
+          if (outcome.get(60, TimeUnit.SECONDS)) {
+            admitted++;
+          }
+        }
+        assertEquals(threshold, admitted, "round " + round + ": " + (2 * perNode)
+            + " parallel guesses on two nodes against threshold " + threshold);
+        assertEquals(threshold,
+            store.failureCount(LoginAttemptKey.forAccount(TenantId.DEFAULT, victim)),
+            "round " + round + ": the account key holds exactly the evaluated guesses");
+        for (LoginAttemptPolicy node : nodes) {
+          assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+              node.beforeAttempt(attempt(victim, "192.0.2.1", time)), "round " + round);
+        }
+      }
+    } finally {
+      pools.forEach(ExecutorService::shutdownNow);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: the attempts in flight of a node that fails lapse - the other node gets the account back")
+  default void reservationsOfAFailedNodeLapse() {
+    assumeTrue(this instanceof AtomicLoginAttemptStoreContract,
+        "only an atomic store reserves attempts");
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    SharedTime time = new SharedTime(t0);
+    LoginAttemptPolicy nodeA = node(store, time.node(Duration.ZERO));
+    LoginAttemptPolicy nodeB = node(secondNodeStore(store), time.node(Duration.ZERO));
+    int threshold = nodeLimits().perAccount().failureThreshold();
+
+    for (int i = 0; i < threshold; i++) {
+      // node A admits and then fails before it can report anything
+      assertEquals(LoginAttemptDecision.allowed(),
+          nodeA.beforeAttempt(attempt("alice", "10.0.0." + i, time)));
+    }
+    LoginAttemptDecision.LockedOut refused = assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+        nodeB.beforeAttempt(attempt("alice", "192.0.2.1", time)),
+        "the threshold is in flight on node A");
+    assertTrue(refused.remaining().compareTo(InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL) <= 0,
+        "until a reservation lapses: " + refused.remaining());
+
+    time.set(t0.plus(InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL).minusMillis(1));
+    assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+        nodeB.beforeAttempt(attempt("alice", "192.0.2.1", time)));
+    time.set(t0.plus(InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL));
+    LoginAttemptContext owner = attempt("alice", "192.0.2.1", time);
+    assertEquals(LoginAttemptDecision.allowed(), nodeB.beforeAttempt(owner),
+        "the reservations of the failed node have lapsed");
+    assertEquals(LoginAttemptDecision.allowed(), nodeB.confirmSuccess(owner));
+    assertEquals(0, store.failureCount(LoginAttemptKey.forAccount(TenantId.DEFAULT, "alice")),
+        "a lapsed reservation counts no failure");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: a clock skew of ±2 s between the nodes moves the end of a lockout by at most 2 s - no early release, no lockout for good")
+  default void clockSkewMovesTheLockoutByTheSkewAtMost() {
+    Duration skew = Duration.ofSeconds(2);
+    LoginAttemptConfiguration limits = nodeLimits().perAccount();
+    int threshold = limits.failureThreshold();
+    // one store for all four scenarios, each a day after the one before and on its own account
+    LoginAttemptStore store = newStore();
+    int scenarioIndex = 0;
+    for (Duration skewOfB : List.of(skew, skew.negated())) {
+      for (int lockingNode = 0; lockingNode < 2; lockingNode++) {
+        String scenario = "node B " + skewOfB + ", the locking failure on node "
+            + (lockingNode == 0 ? "A" : "B");
+        Instant t0 = Instant.parse("2026-01-01T00:00:00Z").plus(Duration.ofDays(scenarioIndex));
+        String user = "alice-" + scenarioIndex++;
+        SharedTime time = new SharedTime(t0);
+        List<LoginAttemptPolicy> nodes = List.of(node(store, time.node(Duration.ZERO)),
+            node(secondNodeStore(store), time.node(skewOfB)));
+
+        // one guess a second, alternating between the nodes, every one from its own address
+        for (int i = 0; i < threshold; i++) {
+          time.set(t0.plusSeconds(i));
+          LoginAttemptPolicy node = nodes.get((threshold - 1 - i + lockingNode) % 2);
+          LoginAttemptContext guess = attempt(user, "10.0.0." + i, time);
+          assertEquals(LoginAttemptDecision.allowed(), node.beforeAttempt(guess),
+              scenario + ", guess " + (i + 1));
+          node.recordFailure(guess);
+        }
+        Instant lockingFailure = t0.plusSeconds(threshold - 1L);
+        Instant lockoutEnds = lockingFailure.plus(limits.initialLockout());
+
+        time.set(lockoutEnds.minus(skew).minusMillis(1));
+        for (int n = 0; n < 2; n++) {
+          assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+              nodes.get(n).beforeAttempt(attempt(user, "192.0.2.1", time)),
+              scenario + ": node " + (n == 0 ? "A" : "B") + " released the lockout more than "
+                  + skew + " early");
+        }
+
+        time.set(lockoutEnds.plus(skew));
+        for (int n = 0; n < 2; n++) {
+          LoginAttemptContext probe = attempt(user, "192.0.2.1", time);
+          assertEquals(LoginAttemptDecision.allowed(), nodes.get(n).beforeAttempt(probe),
+              scenario + ": node " + (n == 0 ? "A" : "B") + " still locks " + skew
+                  + " after the lockout ended");
+          nodes.get(n).abandonAttempt(probe);
+        }
+        LoginAttemptContext owner = attempt(user, "192.0.2.1", time);
+        assertEquals(LoginAttemptDecision.allowed(), nodes.get(1).beforeAttempt(owner), scenario);
+        assertEquals(LoginAttemptDecision.allowed(), nodes.get(1).confirmSuccess(owner),
+            scenario + ": the owner's login is accepted");
+        assertEquals(0, store.failureCount(LoginAttemptKey.forAccount(TenantId.DEFAULT, user)),
+            scenario + ": and clears the account");
+      }
+    }
   }
 }

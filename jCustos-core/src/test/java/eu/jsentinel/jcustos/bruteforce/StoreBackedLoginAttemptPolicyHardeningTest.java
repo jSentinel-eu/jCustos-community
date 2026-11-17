@@ -138,7 +138,8 @@ class StoreBackedLoginAttemptPolicyHardeningTest {
     for (int i = 0; i < 10; i++) {
       failedLogin(policy, "one-shot-" + i, clock.instant());
     }
-    assertEquals(10, store.trackedKeyCount());
+    // JS-SEC-166: every failure is counted on the tuple and on the account key
+    assertEquals(20, store.trackedKeyCount());
 
     clock.advance(Duration.ofMinutes(15));
     policy.beforeAttempt(ctx("someone-else", "10.0.0.1", clock.instant()));

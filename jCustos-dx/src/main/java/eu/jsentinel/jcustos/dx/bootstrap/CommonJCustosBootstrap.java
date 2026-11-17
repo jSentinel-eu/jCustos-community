@@ -130,6 +130,17 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
    * {@code install()} reports that as {@code bruteforce/noop-policy} - a
    * WARNING, an ERROR in PRODUCTION and STRICT.
    *
+   * <p>JS-SEC-166: an {@code InMemoryLoginAttemptPolicy} - also the default -
+   * counts on one node only. With store-backed sessions
+   * ({@code .sessions(s -> s.storeBacked(...))}) PRODUCTION and STRICT report
+   * {@code bruteforce/in-memory-with-shared-sessions} (WARNING); several nodes
+   * share a {@code StoreBackedLoginAttemptPolicy} over one
+   * {@code LoginAttemptStore} instead. JS-SEC-062: a policy with an address limit
+   * ({@code LoginAttemptLimits.perAddress()}) and no
+   * {@link #clientAddress(ClientAddressResolver) client-address resolver} is
+   * reported as {@code bruteforce/address-limit-without-resolver} (WARNING).
+   * Neither applies to the standalone adapter.
+   *
    * @param policy non-null login-attempt policy
    * @return this builder
    * @since 00.74.00
@@ -142,7 +153,11 @@ public interface CommonJCustosBootstrap<B extends CommonJCustosBootstrap<B>> {
    * with the proxy addresses so {@code X-Forwarded-For} is honoured from those
    * peers only; without this call the connection peer is the client. Wired
    * through {@code JCustosServiceResolver.setClientAddressResolver(...)} by
-   * {@code install()}.
+   * {@code install()}. A login policy with an address limit makes the choice
+   * mandatory: without this call or a registered resolver, {@code install()}
+   * reports {@code bruteforce/address-limit-without-resolver}; an application
+   * without a proxy confirms the connection peer with
+   * {@code ClientAddressResolver.remoteAddress()}.
    *
    * @param resolver non-null resolver
    * @return this builder

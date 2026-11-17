@@ -27,4 +27,10 @@ class EclipseStoreLoginAttemptStoreContractTest
   public LoginAttemptStore newStore() {
     return storage.loginAttemptStore();
   }
+
+  /** JS-SEC-166: node B gets an adapter of its own over the same storage. */
+  @Override
+  public LoginAttemptStore secondNodeStore(LoginAttemptStore store) {
+    return storage.loginAttemptStore();
+  }
 }

@@ -16,12 +16,18 @@
  */
 package eu.jsentinel.jcustos.persistence.testkit;
 
+import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.ratelimiting.InMemoryRateLimitPolicy;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitDecision;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitEscalation;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitKey;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitStore;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -60,6 +67,20 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * the oldest event overrides {@link #reportsOldestInWindow()}; a store that
  * keeps no blocks overrides {@link #keepsBlocks()}, and the contract then checks
  * that it refuses blocks instead of dropping them.</p>
+ *
+ * <p>Several nodes (JS-SEC-166, since 00.84.00): the tests whose name starts with
+ * {@code JS-SEC-166} run two {@link InMemoryRateLimitPolicy} instances - two
+ * "nodes" - on the one store under test: the requests both nodes admit together,
+ * on threads of their own, never exceed the limit; a block that one node sets
+ * refuses the key on the other, and the throttles of both nodes count towards it;
+ * a skew of two seconds between the node clocks moves the end of a window or a
+ * block by at most those two seconds. Node B works with
+ * {@link #secondNodeStore(RateLimitStore)}: by default the same instance as node A,
+ * which proves atomicity within one instance only - a store whose atomicity rests
+ * on a lock inside the JVM, such as the SPI default of {@link RateLimitStore#tryAdmit},
+ * passes then. A store meant for several nodes overrides it with a second client of
+ * the same backend, so that the two nodes meet in the backend as they do in a
+ * cluster.</p>
  */
 @DisplayName("RateLimitStore — contract")
 public interface RateLimitStoreContract {
@@ -535,5 +556,213 @@ public interface RateLimitStoreContract {
     assertThrows(NullPointerException.class, () -> store.blockedUntil(null));
     assertThrows(NullPointerException.class, () -> store.block(null, T0));
     assertThrows(NullPointerException.class, () -> store.block(key("ip:1.2.3.4"), null));
+  }
+
+  // ── several nodes on one store (JS-SEC-166, since 00.84.00) ────────
+
+  /**
+   * The store node B of the two-node tests (JS-SEC-166) works with: a second instance over the
+   * same backing data as {@code store}, built the way a second node would build it. The default
+   * returns {@code store} itself.
+   *
+   * @param store the store of node A, as {@link #newStore()} returned it
+   * @return the store of node B
+   * @since 00.84.00
+   */
+  default RateLimitStore secondNodeStore(RateLimitStore store) {
+    return store;
+  }
+
+  /** One node of a cluster: a rate-limit policy on the shared {@code store}. */
+  private static InMemoryRateLimitPolicy node(RateLimitStore store, Clock clock, int limit,
+                                              Duration window) {
+    return new InMemoryRateLimitPolicy(store, NoopJCustosAuditService.INSTANCE, limit, window,
+        clock);
+  }
+
+  /** One node of a cluster whose policy escalates to a block. */
+  private static InMemoryRateLimitPolicy node(RateLimitStore store, Clock clock, int limit,
+                                              Duration window, RateLimitEscalation escalation) {
+    return new InMemoryRateLimitPolicy(store, NoopJCustosAuditService.INSTANCE, limit, window,
+        clock, escalation);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: two nodes with 24 threads each admit exactly `limit` requests together, every round")
+  default void twoNodesAdmitTheLimitTogether() throws Exception {
+    assumeTrue(admitsAtomically(),
+        "this store declares that it cannot check and record as one step");
+    RateLimitStore store = newStore();
+    SharedTime time = new SharedTime(T0);
+    int limit = 10;
+    Duration window = Duration.ofMinutes(1);
+    List<InMemoryRateLimitPolicy> nodes = List.of(
+        node(store, time.node(Duration.ZERO), limit, window),
+        node(secondNodeStore(store), time.node(Duration.ZERO), limit, window));
+    int perNode = 24;
+    int rounds = 8;
+    List<ExecutorService> pools = List.of(Executors.newFixedThreadPool(perNode),
+        Executors.newFixedThreadPool(perNode));
+    try {
+      for (int round = 0; round < rounds; round++) {
+        RateLimitKey k = key("login:nodes-round-" + round);
+        CountDownLatch ready = new CountDownLatch(2 * perNode);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        for (int i = 0; i < 2 * perNode; i++) {
+          InMemoryRateLimitPolicy node = nodes.get(i % 2);
+          Callable<Boolean> caller = () -> {
+            ready.countDown();
+            start.await();
+            return node.tryAcquire(k) instanceof RateLimitDecision.Allowed;
+          };
+          outcomes.add(pools.get(i % 2).submit(caller));
+        }
+        assertTrue(ready.await(10, TimeUnit.SECONDS), "callers did not start");
+        start.countDown();
+        int admitted = 0;
+        for (Future<Boolean> outcome : outcomes) {
+          if (outcome.get(30, TimeUnit.SECONDS)) {
+            admitted++;
+          }
+        }
+        assertEquals(limit, admitted, "round " + round + ": " + (2 * perNode)
+            + " parallel callers on two nodes against limit " + limit);
+        assertEquals(limit, store.countSince(k, T0.minus(window)),
+            "round " + round + ": the store holds exactly the admitted events");
+        for (InMemoryRateLimitPolicy node : nodes) {
+          assertInstanceOf(RateLimitDecision.Throttled.class, node.tryAcquire(k),
+              "round " + round + ": both nodes see the full window");
+        }
+      }
+    } finally {
+      pools.forEach(ExecutorService::shutdownNow);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: the throttles of both nodes count towards one block, and the block refuses on both")
+  default void aBlockOnOneNodeRefusesOnTheOther() {
+    assumeTrue(keepsBlocks(), "this store keeps no blocks");
+    RateLimitStore store = newStore();
+    SharedTime time = new SharedTime(T0);
+    Duration window = Duration.ofMinutes(1);
+    Duration blockDuration = Duration.ofMinutes(10);
+    RateLimitEscalation escalation = new RateLimitEscalation(2, Duration.ofMinutes(10),
+        blockDuration);
+    InMemoryRateLimitPolicy nodeA = node(store, time.node(Duration.ZERO), 1, window, escalation);
+    InMemoryRateLimitPolicy nodeB = node(secondNodeStore(store), time.node(Duration.ZERO), 1, window,
+        escalation);
+    RateLimitKey k = key("login:ip:203.0.113.7");
+
+    assertInstanceOf(RateLimitDecision.Allowed.class, nodeA.tryAcquire(k));
+    assertInstanceOf(RateLimitDecision.Throttled.class, nodeA.tryAcquire(k), "first throttle, node A");
+    RateLimitDecision.Blocked blocked = assertInstanceOf(RateLimitDecision.Blocked.class,
+        nodeB.tryAcquire(k), "second throttle, node B: the threshold is reached across the nodes");
+    assertEquals(blockDuration, blocked.retryAfter());
+    assertInstanceOf(RateLimitDecision.Blocked.class, nodeA.tryAcquire(k),
+        "node A honours the block node B set");
+    assertEquals(Optional.of(T0.plus(blockDuration)), store.blockedUntil(k));
+    assertEquals(1, store.countSince(k, T0.minus(window)), "a refused request records nothing");
+
+    time.set(T0.plus(blockDuration));
+    assertInstanceOf(RateLimitDecision.Allowed.class, nodeB.tryAcquire(k),
+        "the block ends on time on every node");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: a clock skew of ±2 s between the nodes moves the end of a window by at most 2 s")
+  default void clockSkewMovesTheWindowByTheSkewAtMost() {
+    Duration skew = Duration.ofSeconds(2);
+    Duration window = Duration.ofMinutes(1);
+    int limit = 3;
+    // one store for all four scenarios, each an hour after the one before and on its own key
+    RateLimitStore store = newStore();
+    int scenarioIndex = 0;
+    for (Duration skewOfB : List.of(skew, skew.negated())) {
+      for (int filling = 0; filling < 2; filling++) {
+        String scenario = "node B " + skewOfB + ", the window filled on node "
+            + (filling == 0 ? "A" : "B");
+        Instant start = T0.plus(Duration.ofHours(scenarioIndex));
+        RateLimitKey k = key("login:ip:203.0.113.8:" + scenarioIndex++);
+        SharedTime time = new SharedTime(start);
+        List<InMemoryRateLimitPolicy> nodes = List.of(
+            node(store, time.node(Duration.ZERO), limit, window),
+            node(secondNodeStore(store), time.node(skewOfB), limit, window));
+        for (int i = 0; i < limit; i++) {
+          assertInstanceOf(RateLimitDecision.Allowed.class, nodes.get(filling).tryAcquire(k),
+              scenario);
+        }
+
+        Instant windowEnds = start.plus(window);
+        time.set(windowEnds.minus(skew).minusMillis(1));
+        for (int n = 0; n < 2; n++) {
+          RateLimitDecision.Throttled throttled = assertInstanceOf(
+              RateLimitDecision.Throttled.class, nodes.get(n).tryAcquire(k),
+              scenario + ": node " + (n == 0 ? "A" : "B") + " freed a slot more than " + skew
+                  + " early");
+          Instant retryAt = time.now().plus(throttled.retryAfter());
+          if (reportsOldestInWindow()) {
+            assertFalse(retryAt.isBefore(windowEnds.minus(skew)), scenario + ": " + retryAt);
+            assertFalse(retryAt.isAfter(windowEnds.plus(skew).plusNanos(1)),
+                scenario + ": " + retryAt);
+          } else {
+            assertEquals(window, throttled.retryAfter(), scenario);
+          }
+        }
+
+        time.set(windowEnds.plus(skew).plusMillis(1));
+        for (int n = 0; n < 2; n++) {
+          assertInstanceOf(RateLimitDecision.Allowed.class, nodes.get(n).tryAcquire(k),
+              scenario + ": node " + (n == 0 ? "A" : "B") + " still counts the old events "
+                  + skew + " after they left the window");
+        }
+      }
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-166: a clock skew of ±2 s between the nodes moves the end of a block by at most 2 s - no early release, no block for good")
+  default void clockSkewMovesTheBlockByTheSkewAtMost() {
+    assumeTrue(keepsBlocks(), "this store keeps no blocks");
+    Duration skew = Duration.ofSeconds(2);
+    Duration window = Duration.ofMinutes(1);
+    Duration blockDuration = Duration.ofMinutes(10);
+    RateLimitEscalation escalation = new RateLimitEscalation(1, Duration.ofMinutes(10),
+        blockDuration);
+    // one store for all four scenarios, each a day after the one before and on its own key
+    RateLimitStore store = newStore();
+    int scenarioIndex = 0;
+    for (Duration skewOfB : List.of(skew, skew.negated())) {
+      for (int blocking = 0; blocking < 2; blocking++) {
+        String scenario = "node B " + skewOfB + ", the block set on node "
+            + (blocking == 0 ? "A" : "B");
+        Instant start = T0.plus(Duration.ofDays(scenarioIndex));
+        RateLimitKey k = key("login:ip:203.0.113.9:" + scenarioIndex++);
+        SharedTime time = new SharedTime(start);
+        List<InMemoryRateLimitPolicy> nodes = List.of(
+            node(store, time.node(Duration.ZERO), 2, window, escalation),
+            node(secondNodeStore(store), time.node(skewOfB), 2, window, escalation));
+        assertInstanceOf(RateLimitDecision.Allowed.class, nodes.get(blocking).tryAcquire(k));
+        assertInstanceOf(RateLimitDecision.Allowed.class, nodes.get(blocking).tryAcquire(k));
+        assertInstanceOf(RateLimitDecision.Blocked.class, nodes.get(blocking).tryAcquire(k),
+            scenario + ": the first throttle blocks");
+
+        Instant blockEnds = start.plus(blockDuration);
+        time.set(blockEnds.minus(skew).minusMillis(1));
+        for (int n = 0; n < 2; n++) {
+          assertInstanceOf(RateLimitDecision.Blocked.class, nodes.get(n).tryAcquire(k),
+              scenario + ": node " + (n == 0 ? "A" : "B") + " lifted the block more than " + skew
+                  + " early");
+        }
+
+        time.set(blockEnds.plus(skew));
+        for (int n = 0; n < 2; n++) {
+          assertInstanceOf(RateLimitDecision.Allowed.class, nodes.get(n).tryAcquire(k),
+              scenario + ": node " + (n == 0 ? "A" : "B") + " still blocks " + skew
+                  + " after the block ended");
+        }
+      }
+    }
   }
 }

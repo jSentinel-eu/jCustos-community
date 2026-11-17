@@ -1,6 +1,7 @@
 package eu.jsentinel.jcustos.dx.bootstrap;
 
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapMode;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
@@ -80,6 +81,32 @@ class OAuth2BootstrapTest {
         .applyOauth2();
     assertFalse(has(warnings, "oauth2/redirect-uri-not-https", Severity.ERROR),
         "loopback http must be allowed");
+  }
+
+  @Test
+  @DisplayName("loopback redirect URIs per RFC 8252: [::1] and all of 127.0.0.0/8 are accepted without -Djcustos.dev, look-alikes are not")
+  void loopbackRedirectUrisFollowTheSharedLoopbackRule() {
+    assertFalse(EndpointSecurity.devModeEnabled(), "the test must run without the dev flag");
+    for (String accepted : List.of("http://[::1]:8080/callback", "http://127.0.0.2:8080/callback",
+        "http://127.255.0.9/callback", "http://LOCALHOST:8080/callback")) {
+      assertFalse(has(redirect(accepted), "oauth2/redirect-uri-not-https", Severity.ERROR),
+          accepted + " is a loopback redirect URI");
+    }
+    for (String refused : List.of("http://127.0.0.1.example.com/callback",
+        "http://[::2]/callback", "http://localhost.example/callback", "http://10.0.0.1/callback",
+        "ftp://127.0.0.1/callback")) {
+      assertTrue(has(redirect(refused), "oauth2/redirect-uri-not-https", Severity.ERROR),
+          refused + " must be refused");
+    }
+  }
+
+  private static List<JCustosBootstrapWarning> redirect(String uri) {
+    return new TestBootstrap()
+        .oauth2(o -> o.clientId("rp")
+            .tokenEndpoint(URI.create("https://idp.example/token"))
+            .redirectUri(URI.create(uri))
+            .scope("openid"))
+        .applyOauth2();
   }
 
   @Test

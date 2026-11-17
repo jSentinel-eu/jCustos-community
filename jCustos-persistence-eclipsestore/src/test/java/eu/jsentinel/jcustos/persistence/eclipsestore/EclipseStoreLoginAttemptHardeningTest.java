@@ -142,7 +142,9 @@ class EclipseStoreLoginAttemptHardeningTest {
       failedLogin(policy, "bystander");
       // an attempt in flight at shutdown: working state only, must not be persisted
       assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(ctx("in-flight")));
-      assertEquals(List.of(key("victim"), key("bystander")),
+      // JS-SEC-166: every failure is stored on the tuple and on the account key
+      assertEquals(List.of(key("victim"), LoginAttemptKey.forAccount(TenantId.DEFAULT, "victim"),
+              key("bystander"), LoginAttemptKey.forAccount(TenantId.DEFAULT, "bystander")),
           storage.tables().loginAttempts.keys());
     }
 

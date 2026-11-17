@@ -25,7 +25,10 @@ import eu.jsentinel.jcustos.authorization.api.AuthorizationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptLimits;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.StoreBackedLoginAttemptPolicy;
 import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
@@ -266,6 +269,8 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
     applyDirectServiceConfiguration(services, warnings);
     applyAuditConfiguration(services, warnings);
     applySessionConfiguration(adapter, services, warnings);
+    // JS-SEC-166, JS-SEC-062: after the sessions, so the store-backed session model is known
+    reportLoginThrottleScope(adapter, warnings);
     applyRoleConfiguration(services, warnings);
     applyCredentialConfiguration(services, warnings);
     applyPolicyConfiguration(services, warnings);
@@ -546,14 +551,20 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
         OAuth2State.class, OAuth2State.class, "bootstrap-oauth2", false));
   }
 
+  /**
+   * A redirect URI that is https, or plain http to a loopback host. RFC 8252 (sections 7.3 and
+   * 8.3) allows loopback redirect URIs for native applications, so the loopback form is accepted
+   * without {@code -Djcustos.dev=true}, unlike an outgoing endpoint. The host is recognised by
+   * {@link EndpointSecurity#isLoopbackHost(String)}, the one rule for every module (ER31):
+   * {@code localhost}, all of {@code 127.0.0.0/8} and {@code ::1}. Until 00.84.00 this check
+   * knew {@code 127.0.0.1} and {@code [::1]} only.
+   */
   private static boolean isHttpsOrLoopback(java.net.URI uri) {
     if ("https".equalsIgnoreCase(uri.getScheme())) {
       return true;
     }
-    String host = uri.getHost();
     return "http".equalsIgnoreCase(uri.getScheme())
-        && host != null
-        && ("localhost".equalsIgnoreCase(host) || "127.0.0.1".equals(host) || "[::1]".equals(host));
+        && EndpointSecurity.isLoopbackHost(uri.getHost());
   }
 
   /**
@@ -1464,6 +1475,102 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
           "No LogoutService is configured; logout requests are discarded and sessions stay valid.",
           "Call .logout(...) (for example with a SubjectClearingLogoutService) or register a "
               + "LogoutService via META-INF/services."));
+    }
+  }
+
+  /**
+   * Two findings about where the login throttle counts. Neither applies to
+   * {@link AdapterKind#STANDALONE}: the CLI adapter has neither a session model nor a client
+   * address.
+   *
+   * <ul>
+   *   <li>{@code bruteforce/in-memory-with-shared-sessions} (JS-SEC-166, CWE-307) - sessions are
+   *       store-backed ({@code .sessions(s -> s.storeBacked(...))}), so they are meant to
+   *       outlive the process or to be shared between nodes, but the effective
+   *       {@link LoginAttemptPolicy} is an {@link InMemoryLoginAttemptPolicy}, also the resolver
+   *       default. Every node then counts failed logins on its own: an attacker who spreads the
+   *       guesses over the nodes multiplies the threshold by their number, and a restart forgets
+   *       every lockout. A WARNING in PRODUCTION and STRICT; not reported in the development
+   *       modes, which run on one node.</li>
+   *   <li>{@code bruteforce/address-limit-without-resolver} (JS-SEC-062, CWE-307, CWE-348) - the
+   *       effective policy counts failures per client address
+   *       ({@link LoginAttemptLimits#perAddress()}), but no {@link ClientAddressResolver} was
+   *       passed to {@code .clientAddress(...)} or registered. Behind a reverse proxy every client
+   *       then has the proxy's address: all of them share one counter, and a few failed logins
+   *       lock everybody out. A WARNING in every mode.</li>
+   * </ul>
+   *
+   * <p>A policy of another type than the two shipped ones is not inspected, and the no-op is
+   * left to {@code bruteforce/noop-policy}.
+   *
+   * @param adapter  the adapter kind
+   * @param warnings findings, appended to
+   * @since 00.84.00
+   */
+  private void reportLoginThrottleScope(AdapterKind adapter,
+                                        List<JCustosBootstrapWarning> warnings) {
+    if (adapter == AdapterKind.STANDALONE) {
+      return;
+    }
+    Optional<LoginAttemptPolicy> registered;
+    try {
+      registered = JCustosServiceResolver.findLoginAttemptPolicy();
+      if (registered.isEmpty() && JCustosServiceResolver.isLoginThrottlingDisabled()) {
+        return;
+      }
+    } catch (IllegalStateException severalImplementations) {
+      return;
+    }
+    // without a registration the resolver default applies: an InMemoryLoginAttemptPolicy with
+    // the default thresholds and no address counter
+    boolean inMemory = registered.isEmpty()
+        || registered.get() instanceof InMemoryLoginAttemptPolicy;
+    boolean sessionsStoreBacked = state.sessionsConfigured()
+        && state.sessionState().sessionStore() != null;
+    boolean production = state.mode() == JCustosBootstrapMode.PRODUCTION
+        || state.mode() == JCustosBootstrapMode.STRICT;
+    if (inMemory && sessionsStoreBacked && production) {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.WARNING,
+          "bruteforce/in-memory-with-shared-sessions",
+          "Sessions are store-backed, but the login throttle is an InMemoryLoginAttemptPolicy: "
+              + "every node counts failed logins on its own, and a restart forgets every lockout.",
+          "Pass .bruteForce(new StoreBackedLoginAttemptPolicy(store, ...)) with a "
+              + "LoginAttemptStore that every node shares (docs/security/deployment/cluster.md); "
+              + "a single node that may lose its lockouts on restart can ignore this finding."));
+    }
+    boolean addressLimit = registered.flatMap(AbstractJCustosBootstrap::loginAttemptLimits)
+        .flatMap(LoginAttemptLimits::perAddress)
+        .isPresent();
+    if (addressLimit && state.clientAddressResolver() == null && !clientAddressResolverRegistered()) {
+      warnings.add(new JCustosBootstrapWarning(
+          Severity.WARNING,
+          "bruteforce/address-limit-without-resolver",
+          "The login policy counts failed logins per client address, but no "
+              + "ClientAddressResolver is registered: behind a reverse proxy every client has the "
+              + "proxy's address, shares one counter and is locked out with the others.",
+          "Behind a proxy call .clientAddress(ClientAddressResolver.trustedProxies(...)) with "
+              + "the proxy addresses; without one confirm the connection peer with "
+              + ".clientAddress(ClientAddressResolver.remoteAddress())."));
+    }
+  }
+
+  /** The limits of a shipped login policy; empty for any other implementation. */
+  private static Optional<LoginAttemptLimits> loginAttemptLimits(LoginAttemptPolicy policy) {
+    if (policy instanceof InMemoryLoginAttemptPolicy inMemory) {
+      return Optional.of(inMemory.limits());
+    }
+    if (policy instanceof StoreBackedLoginAttemptPolicy storeBacked) {
+      return Optional.of(storeBacked.limits());
+    }
+    return Optional.empty();
+  }
+
+  private static boolean clientAddressResolverRegistered() {
+    try {
+      return JCustosServiceResolver.findClientAddressResolver().isPresent();
+    } catch (IllegalStateException severalImplementations) {
+      return true;
     }
   }
 

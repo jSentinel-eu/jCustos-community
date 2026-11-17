@@ -27,4 +27,10 @@ class EclipseStoreRateLimitStoreContractTest
   public RateLimitStore newStore() {
     return storage.rateLimitStore();
   }
+
+  /** JS-SEC-166: node B gets an adapter of its own over the same storage. */
+  @Override
+  public RateLimitStore secondNodeStore(RateLimitStore store) {
+    return storage.rateLimitStore();
+  }
 }

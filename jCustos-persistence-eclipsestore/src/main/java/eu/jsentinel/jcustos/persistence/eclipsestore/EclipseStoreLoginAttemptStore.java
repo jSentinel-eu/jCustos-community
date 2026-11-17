@@ -59,7 +59,13 @@ import static java.util.Objects.requireNonNull;
  *       of the existing shape, so the format is unchanged. After a restart the
  *       working state derives an address lockout from the limits of the first
  *       address operation, not from the shorter limits of the accounts.</li>
+ *   <li><strong>Account keys</strong> (JS-SEC-166): the counter of an account
+ *       across all addresses is persisted under {@link LoginAttemptKey#forAccount},
+ *       a key of the existing shape as well.</li>
  * </ul>
+ *
+ * <p>The storage is embedded in one process: it carries lockouts across a restart
+ * of one node, but several nodes cannot share it (JS-SEC-166).</p>
  */
 final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {
 

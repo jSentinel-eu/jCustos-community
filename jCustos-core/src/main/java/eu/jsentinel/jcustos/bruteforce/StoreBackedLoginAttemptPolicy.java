@@ -26,6 +26,8 @@ import eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 import static java.util.Objects.requireNonNull;
@@ -62,28 +64,54 @@ import static java.util.Objects.requireNonNull;
  * only inherits the SPI defaults the policy behaves as it did before
  * 00.84.00, apart from the late success.
  *
- * <p><strong>Scope (JS-SEC-012):</strong> the lockout key is the
- * {@code (tenant, username, ip)} tuple, so this policy only locks a
- * <em>single</em> username from a <em>single</em> source address. Without
- * further configuration it does <strong>not</strong> stop password spraying
- * (many usernames, one host) or distributed credential stuffing (one account,
- * many IPs) — those keep every per-tuple counter under the threshold.
+ * <p><strong>Scope (JS-SEC-012, JS-SEC-166, CWE-307).</strong> Every attempt is
+ * counted on two keys with the thresholds of
+ * {@link LoginAttemptLimits#perAccount()}, as {@link InMemoryLoginAttemptPolicy}
+ * counts it on its combined and its user-name counter:
+ *
+ * <ul>
+ *   <li>the {@code (tenant, username, ip)} tuple - one user name from one source
+ *       address;</li>
+ *   <li>the account key {@link LoginAttemptKey#forAccount(TenantId, String)} -
+ *       the account from every address, so distributed credential stuffing (one
+ *       account, many addresses) locks the account once the threshold is reached
+ *       in total.</li>
+ * </ul>
+ *
+ * <p>Until 00.84.00 the policy counted the tuple only, and an attacker who
+ * changed address after every few guesses was never locked out (JS-SEC-012);
+ * whoever moved from the in-memory policy to this one to run several nodes lost
+ * that protection. The account key is always on, as the user-name counter of the
+ * in-memory policy is. <strong>Consequence:</strong> anybody who knows a user
+ * name can lock that account for {@code initialLockout} by failing
+ * {@code failureThreshold} times from any addresses - the same targeted lockout
+ * the in-memory policy has always allowed. A success never lifts a lockout in
+ * force; the next one is possible after it ends. The tuple, the account and the
+ * address key are separate store operations, not one atomic step: a lockout of
+ * one of them that sets in between them is caught by the next attempt.
  *
  * <p><strong>Password spraying (JS-SEC-062, CWE-307).</strong> With
  * {@link LoginAttemptLimits#perAddress()} set, every attempt that carries a
  * client address is also counted on the address key
- * {@link LoginAttemptKey#forAddress(TenantId, String)}: a second store
+ * {@link LoginAttemptKey#forAddress(TenantId, String)}: a third store
  * operation per attempt, with the address thresholds and the flat lockout of
  * this policy ({@code initialLockout}; {@code maxLockout} is not used here). The
- * account is asked first; when the address then refuses, the account's
- * reservation is given back. A successful login releases the address's
- * reservation but does not reset its counter. The account key and the address
- * key are separate store operations, not one atomic step: a lockout of the
- * address that sets in between them is caught by the next attempt. User names
- * pass through {@link LoginAttemptKey#accountUserId(String)}, so no account
- * can share the address's counter. Distributed stuffing against one account
- * remains the job of the {@code AbuseDetectionService} (TENANT / GLOBAL
- * volume, per the ASVS L2 map).
+ * account keys are asked first; when the address then refuses, their
+ * reservations are given back. A successful login releases the address's
+ * reservation but does not reset its counter. User names pass through
+ * {@link LoginAttemptKey#accountUserId(String)}, so no account can share the
+ * counter of an address or of an account key.
+ *
+ * <p><strong>Several nodes (JS-SEC-166).</strong> Policies on several nodes that
+ * share one store act as one throttle: a lockout earned through one node refuses
+ * the attempt on every other node, and the reservations of all nodes together
+ * stay within the threshold - provided the store performs each attempt operation
+ * atomically for every caller, not only within one process. Every node passes its
+ * own clock's instant to the store, so a skew between the node clocks lengthens or
+ * shortens a lockout by up to that skew. The in-memory store and the Eclipse-Store
+ * adapter live in one process and cannot be shared between nodes; the deployment
+ * guide {@code docs/security/deployment/cluster.md} names what a shared store has
+ * to provide.
  *
  * <p><strong>Concurrent credential checks (JS-SEC-063, CWE-770).</strong>
  * {@link #credentialCheckGate()} returns the gate of the policy's
@@ -95,6 +123,9 @@ import static java.util.Objects.requireNonNull;
  */
 @ExperimentalJCustosApi
 public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
+
+  /** Stands for a missing or blank user name or client address in a key. */
+  private static final String NO_VALUE = "-";
 
   private final LoginAttemptStore store;
   private final LoginAttemptLimits loginLimits;
@@ -240,37 +271,56 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   public LoginAttemptDecision beforeAttempt(LoginAttemptContext context) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    LoginAttemptKey account = key(context);
-    // JS-SEC-123 (CWE-367): one store operation checks the lockout and reserves the attempt.
-    AttemptStatus accountStatus = store.tryBeginAttempt(account, now, limits);
-    LoginAttemptKey address = addressKey(context);
-    if (accountStatus.blocked() || address == null) {
-      return decision(accountStatus, now);
+    Keys keys = keys(context);
+    // JS-SEC-123 (CWE-367): one store operation per key checks the lockout and reserves the
+    // attempt. JS-SEC-166 / JS-SEC-062 (CWE-307): the tuple first, then the account, then the
+    // address; a refusal gives back what the keys before it reserved.
+    List<LoginAttemptKey> reserved = new ArrayList<>(3);
+    for (Counter counter : keys.counters(limits, addressLimits)) {
+      AttemptStatus status;
+      try {
+        status = store.tryBeginAttempt(counter.key(), now, counter.limits());
+      } catch (RuntimeException storeFailure) {
+        giveBack(reserved, now, storeFailure);
+        throw storeFailure;
+      }
+      if (status.blocked()) {
+        giveBack(reserved, now, null);
+        return decision(status, now);
+      }
+      reserved.add(counter.key());
     }
-    // JS-SEC-062 (CWE-307): the address is asked second; a refusal gives the account back.
-    AttemptStatus addressStatus;
-    try {
-      addressStatus = store.tryBeginAttempt(address, now, addressLimits);
-    } catch (RuntimeException storeFailure) {
-      store.abandonAttempt(account, now);
-      throw storeFailure;
+    return LoginAttemptDecision.allowed();
+  }
+
+  /**
+   * Releases the reservations of {@code reserved}. A store failure while doing so is attached to
+   * {@code cause} when there is one, so it does not hide the failure that is being reported.
+   */
+  private void giveBack(List<LoginAttemptKey> reserved, Instant now, RuntimeException cause) {
+    for (LoginAttemptKey key : reserved) {
+      try {
+        store.abandonAttempt(key, now);
+      } catch (RuntimeException releaseFailure) {
+        if (cause == null) {
+          throw releaseFailure;
+        }
+        cause.addSuppressed(releaseFailure);
+      }
     }
-    if (addressStatus.blocked()) {
-      store.abandonAttempt(account, now);
-    }
-    return decision(addressStatus, now);
   }
 
   @Override
   public LoginAttemptDecision peek(LoginAttemptContext context) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    LoginAttemptDecision account = derivedLockout(key(context), limits, now);
-    if (account instanceof LoginAttemptDecision.LockedOut) {
-      return account;
+    for (Counter counter : keys(context).counters(limits, addressLimits)) {
+      LoginAttemptDecision lockout = derivedLockout(counter.key(), counter.limits(), now);
+      if (lockout instanceof LoginAttemptDecision.LockedOut) {
+        return lockout;
+      }
     }
-    LoginAttemptKey address = addressKey(context);
-    return address == null ? account : derivedLockout(address, addressLimits, now);
+    return LoginAttemptDecision.allowed();
   }
 
   /**
@@ -300,21 +350,28 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   public LoginAttemptDecision confirmSuccess(LoginAttemptContext context) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    LoginAttemptKey account = key(context);
-    LoginAttemptKey address = addressKey(context);
-    if (address != null) {
+    Keys keys = keys(context);
+    if (keys.address() != null) {
       // JS-SEC-062: the address keeps its failures - a success only gives its slot back. A
       // lockout of the address that set in while this attempt was checked denies the login,
-      // as a lockout of the account does (JS-SEC-123), and leaves the account counter alone.
-      store.abandonAttempt(address, now);
-      LoginAttemptDecision addressLock = derivedLockout(address, addressLimits, now);
+      // as a lockout of the account does (JS-SEC-123), and leaves the account counters alone.
+      store.abandonAttempt(keys.address(), now);
+      LoginAttemptDecision addressLock = derivedLockout(keys.address(), addressLimits, now);
       if (addressLock instanceof LoginAttemptDecision.LockedOut) {
-        store.abandonAttempt(account, now);
+        store.abandonAttempt(keys.account(), now);
+        store.abandonAttempt(keys.tuple(), now);
         return addressLock;
       }
     }
+    // JS-SEC-166 (CWE-307): the account before the tuple. A lockout earned from other addresses
+    // while this attempt was checked denies the login and leaves the tuple's counter alone.
+    AttemptStatus account = store.completeSuccess(keys.account(), now, limits);
+    if (account.blocked()) {
+      store.abandonAttempt(keys.tuple(), now);
+      return decision(account, now);
+    }
     // JS-SEC-123 (CWE-307): the store keeps a live lockout and reports it; the login is denied.
-    return decision(store.completeSuccess(account, now, limits), now);
+    return decision(store.completeSuccess(keys.tuple(), now, limits), now);
   }
 
   @Override
@@ -331,20 +388,25 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
    * <p>When the failure locks the key, {@code BruteForceLimitReached} follows, as with
    * {@link InMemoryLoginAttemptPolicy}. Until 00.84.00 this policy ignored the status the store
    * reported, and a lockout earned against the persistent store never reached the audit trail
-   * (JS-SEC-123, CWE-778).</p>
+   * (JS-SEC-123, CWE-778). The tuple and the account key lock at the same threshold; when one
+   * failure locks both, one event is published (JS-SEC-166).</p>
    */
   @Override
   public void recordFailure(LoginAttemptContext context, String reason) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    AttemptStatus status = store.completeFailure(key(context), now, limits);
-    LoginAttemptKey address = addressKey(context);
-    AttemptStatus addressStatus = address == null
+    Keys keys = keys(context);
+    AttemptStatus status = store.completeFailure(keys.tuple(), now, limits);
+    AttemptStatus accountStatus = store.completeFailure(keys.account(), now, limits);
+    AttemptStatus addressStatus = keys.address() == null
         ? null
-        : store.completeFailure(address, now, addressLimits);
+        : store.completeFailure(keys.address(), now, addressLimits);
     LoginFailureAudit.publish(auditService, now, context, reason);
     if (lockedByThisFailure(status, now, limits)) {
       publishLimitReached(context, status, now);
+    } else if (lockedByThisFailure(accountStatus, now, limits)) {
+      // JS-SEC-166: the account reached the threshold across several addresses
+      publishLimitReached(context, accountStatus, now);
     }
     if (addressStatus != null && lockedByThisFailure(addressStatus, now, addressLimits)) {
       // JS-SEC-062: the lockout belongs to the address, not to the account that was tried last
@@ -385,11 +447,9 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   public void abandonAttempt(LoginAttemptContext context) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    // JS-SEC-126 (CWE-703): no verdict - release the reservation, count nothing.
-    store.abandonAttempt(key(context), now);
-    LoginAttemptKey address = addressKey(context);
-    if (address != null) {
-      store.abandonAttempt(address, now);
+    // JS-SEC-126 (CWE-703): no verdict - release the reservations, count nothing.
+    for (Counter counter : keys(context).counters(limits, addressLimits)) {
+      store.abandonAttempt(counter.key(), now);
     }
   }
 
@@ -402,34 +462,64 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
     return LoginAttemptDecision.lockedOut(remaining, status.failures());
   }
 
-  private LoginAttemptKey key(LoginAttemptContext context) {
-    return new LoginAttemptKey(tenant, username(context.username()),
-        address(context.clientAddress()));
+  /**
+   * The keys of one attempt. The user name is canonicalised once: the tuple key carries it
+   * escaped ({@link LoginAttemptKey#accountUserId(String)}), the account key unchanged behind
+   * its reserved prefix (JS-SEC-166).
+   */
+  private Keys keys(LoginAttemptContext context) {
+    String canonical = canonicalUsername(context.username());
+    String address = address(context.clientAddress());
+    return new Keys(
+        new LoginAttemptKey(tenant, LoginAttemptKey.accountUserId(canonical), address),
+        LoginAttemptKey.forAccount(tenant, canonical),
+        addressKey(context, address));
   }
 
   /**
    * JS-SEC-062: the address key, or {@code null} when the address counter is off or the attempt
    * carries no client address - an address that is not known is not counted.
    */
-  private LoginAttemptKey addressKey(LoginAttemptContext context) {
+  private LoginAttemptKey addressKey(LoginAttemptContext context, String normalisedAddress) {
     if (addressLimits == null || context.clientAddress() == null
         || context.clientAddress().isBlank()) {
       return null;
     }
-    return LoginAttemptKey.forAddress(tenant, address(context.clientAddress()));
+    return LoginAttemptKey.forAddress(tenant, normalisedAddress);
   }
 
-  private String username(String value) {
+  /** The canonical user name, or {@code "-"} for a missing or blank one. */
+  private String canonicalUsername(String value) {
     if (value == null || value.isBlank()) {
-      return "-";
+      return NO_VALUE;
     }
     String canonical = canonicalizer.canonicalize(value);
-    // JS-SEC-062: a name that looks like a reserved user id is escaped - no account shares the
-    // counter of an address key
-    return canonical.isBlank() ? "-" : LoginAttemptKey.accountUserId(canonical);
+    return canonical.isBlank() ? NO_VALUE : canonical;
   }
 
   private static String address(String value) {
-    return value == null || value.isBlank() ? "-" : value.trim().toLowerCase(Locale.ROOT);
+    return value == null || value.isBlank() ? NO_VALUE : value.trim().toLowerCase(Locale.ROOT);
+  }
+
+  /**
+   * The keys one attempt is counted on (JS-SEC-166).
+   *
+   * @param tuple   the {@code (tenant, username, ip)} key
+   * @param account the account key across all addresses
+   * @param address the address key; {@code null} when the address counter does not apply
+   */
+  private record Keys(LoginAttemptKey tuple, LoginAttemptKey account, LoginAttemptKey address) {
+
+    /** The keys with their limits, in the order they are asked. */
+    List<Counter> counters(AttemptLimits accountLimits, AttemptLimits addressLimits) {
+      return address == null
+          ? List.of(new Counter(tuple, accountLimits), new Counter(account, accountLimits))
+          : List.of(new Counter(tuple, accountLimits), new Counter(account, accountLimits),
+              new Counter(address, addressLimits));
+    }
+  }
+
+  /** A key and the limits it is counted with. */
+  private record Counter(LoginAttemptKey key, AttemptLimits limits) {
   }
 }

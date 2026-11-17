@@ -23,11 +23,20 @@ import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
  * Composite key under which {@link LoginAttemptStore} tracks
  * failed-attempt counters and the last failure instant.
  * <p>
- * Both dimensions are recorded independently: {@code userId} catches
- * an attacker hopping IPs against the same account, {@code ip}
- * catches one cycling usernames from the same source. Brute-force
- * policies typically consult both keys per attempt and back off as
- * soon as either counter trips.
+ * A key built with the constructor counts one user name from one client
+ * address - the {@code (tenant, user, address)} tuple. It does not see an
+ * attacker who hops addresses against one account, nor one who cycles user
+ * names from one address. The two factories below build the keys that do;
+ * {@link StoreBackedLoginAttemptPolicy} asks all of them per attempt and
+ * refuses as soon as one of them is locked.
+ *
+ * <p><strong>Account keys (JS-SEC-166, CWE-307).</strong> A key built by
+ * {@link #forAccount(TenantId, String)} counts the failures of one account
+ * across all client addresses - the user-name counter of
+ * {@link InMemoryLoginAttemptPolicy}. Its {@code userId} is
+ * {@link #ACCOUNT_USER_ID_PREFIX} followed by the canonical user name and its
+ * {@code ip} the reserved {@link #ANY_ADDRESS}, so a store keeps it like any
+ * other key and the Eclipse-Store format is unchanged.
  *
  * <p><strong>Address keys (JS-SEC-062, CWE-307).</strong> A key built by
  * {@link #forAddress(TenantId, String)} counts the failures of one client
@@ -37,6 +46,13 @@ import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
  * user id: {@link #accountUserId(String)} rewrites every user name that
  * starts with {@link #RESERVED_PREFIX}, and
  * {@link StoreBackedLoginAttemptPolicy} passes every user name through it.
+ *
+ * <p><strong>Reserved user ids.</strong> A user id that starts with exactly one
+ * {@link #RESERVED_PREFIX} belongs to a factory key: {@link #ADDRESS_USER_ID}
+ * and every id that starts with {@link #ACCOUNT_USER_ID_PREFIX}. The user id of
+ * a tuple key passes through {@link #accountUserId(String)} and therefore either
+ * does not start with the prefix or starts with it twice, so the three kinds of
+ * key never share a counter.
  *
  * @param tenant tenant scope; {@code null} becomes {@link TenantId#DEFAULT}
  * @param userId username dimension; non-blank
@@ -59,6 +75,22 @@ public record LoginAttemptKey(TenantId tenant, String userId, String ip) {
    * @since 00.84.00
    */
   public static final String ADDRESS_USER_ID = RESERVED_PREFIX + "address";
+
+  /**
+   * Start of the {@code userId} of every account key (JS-SEC-166): {@value}. The
+   * canonical user name follows it unchanged.
+   *
+   * @since 00.84.00
+   */
+  public static final String ACCOUNT_USER_ID_PREFIX = RESERVED_PREFIX + "account:";
+
+  /**
+   * The {@code ip} of every account key (JS-SEC-166): {@value}. An account key
+   * counts the failures from every address.
+   *
+   * @since 00.84.00
+   */
+  public static final String ANY_ADDRESS = RESERVED_PREFIX + "any";
 
   /**
    * Validates the record components and normalises a {@code null}
@@ -92,11 +124,33 @@ public record LoginAttemptKey(TenantId tenant, String userId, String ip) {
   }
 
   /**
+   * The key that counts the failures of one account across all client
+   * addresses (JS-SEC-166, CWE-307): {@code userId} is
+   * {@link #ACCOUNT_USER_ID_PREFIX} followed by {@code canonicalUserName},
+   * {@code ip} is {@link #ANY_ADDRESS}. The mapping is injective, and the
+   * user id starts with exactly one {@link #RESERVED_PREFIX}, so the key never
+   * equals a tuple key or an address key.
+   *
+   * @param tenant            tenant scope; {@code null} becomes {@link TenantId#DEFAULT}
+   * @param canonicalUserName the user name after canonicalisation; non-blank
+   * @return the account key
+   * @since 00.84.00
+   */
+  public static LoginAttemptKey forAccount(TenantId tenant, String canonicalUserName) {
+    if (canonicalUserName == null || canonicalUserName.isBlank()) {
+      throw new IllegalArgumentException("canonicalUserName must not be blank");
+    }
+    return new LoginAttemptKey(tenant, ACCOUNT_USER_ID_PREFIX + canonicalUserName, ANY_ADDRESS);
+  }
+
+  /**
    * Maps a canonical user name onto the {@code userId} of its account key.
    * A name that starts with {@link #RESERVED_PREFIX} gets the prefix once
    * more; every other name stays as it is. The mapping is injective and
-   * never yields {@link #ADDRESS_USER_ID} - an escaped name starts with the
-   * prefix twice - so no user name can share the counter of an address.
+   * never yields a reserved user id - {@link #ADDRESS_USER_ID} or one that
+   * starts with {@link #ACCOUNT_USER_ID_PREFIX}; an escaped name starts with
+   * the prefix twice - so no tuple key can share the counter of an address or
+   * of an account key.
    *
    * @param canonicalUserName the user name after canonicalisation; non-null
    * @return the user id of the account key
@@ -114,5 +168,13 @@ public record LoginAttemptKey(TenantId tenant, String userId, String ip) {
    */
   public boolean addressScoped() {
     return ADDRESS_USER_ID.equals(userId);
+  }
+
+  /**
+   * @return {@code true} for a key built by {@link #forAccount(TenantId, String)}
+   * @since 00.84.00
+   */
+  public boolean accountScoped() {
+    return userId.startsWith(ACCOUNT_USER_ID_PREFIX);
   }
 }

@@ -1,6 +1,7 @@
 package eu.jsentinel.jcustos.dx.bootstrap;
 
 import eu.jsentinel.jcustos.dx.internal.AbstractJCustosBootstrap;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.dx.runtime.JCustosBootstrapWarning;
 import eu.jsentinel.jcustos.dx.runtime.RegisteredJCustosService;
 import eu.jsentinel.jcustos.dx.runtime.Severity;
@@ -35,6 +36,24 @@ class OidcBootstrapTest {
   @DisplayName("an empty .oidc(o -> {}) is silent")
   void emptyIsSilent() {
     assertTrue(new TestBootstrap().oidc(o -> { }).applyOidc().isEmpty());
+  }
+
+  @Test
+  @DisplayName("loopback redirect URIs per RFC 8252: [::1] and 127.0.0.2 are accepted without -Djcustos.dev")
+  void loopbackRedirectUrisFollowTheSharedLoopbackRule() {
+    assertFalse(EndpointSecurity.devModeEnabled(), "the test must run without the dev flag");
+    for (String accepted : List.of("http://[::1]:8080/cb", "http://127.0.0.2:8080/cb")) {
+      List<JCustosBootstrapWarning> w = new TestBootstrap()
+          .oidc(o -> o.issuer("https://idp").clientId("app").scope("openid")
+              .redirectUri(URI.create(accepted)))
+          .applyOidc();
+      assertFalse(has(w, "oidc/redirect-uri-not-https", Severity.ERROR), accepted);
+    }
+    List<JCustosBootstrapWarning> w = new TestBootstrap()
+        .oidc(o -> o.issuer("https://idp").clientId("app").scope("openid")
+            .redirectUri(URI.create("http://127.0.0.1.example.com/cb")))
+        .applyOidc();
+    assertTrue(has(w, "oidc/redirect-uri-not-https", Severity.ERROR));
   }
 
   @Test
