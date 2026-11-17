@@ -31,11 +31,10 @@ JC_SNAPSHOTS_URL="https://repo.jsentinel.eu/snapshots"
 # key. Consumers compare against the same value; it is published in
 # docs/security/release-verification.md and SECURITY.md.
 #
-# <<TO BE DECIDED BY THE MAINTAINER: fingerprint of the release signing key.
-#   Until it is entered here (or exported as JCUSTOS_RELEASE_KEY_FINGERPRINT)
-#   every release run stops at the trust-anchor check; --dry-run reports the
-#   gap and continues.>>
-JC_DEFAULT_RELEASE_KEY_FINGERPRINT=""
+# The key that signed 00.81.10 to 00.83.00 on Maven Central, pinned for
+# 00.84.00 (decision SA42-D1, 2026-11-17); a dedicated release key follows in
+# 00.85.00 and replaces this value then.
+JC_DEFAULT_RELEASE_KEY_FINGERPRINT="4CCCE751C38AD66AB1DC94D044A7EECD37010CF3"
 # ---------------------------------------------------------------------------
 JCUSTOS_RELEASE_KEY_FINGERPRINT="${JCUSTOS_RELEASE_KEY_FINGERPRINT:-$JC_DEFAULT_RELEASE_KEY_FINGERPRINT}"
 JCUSTOS_RELEASE_KEY_FINGERPRINT=$(printf '%s' "$JCUSTOS_RELEASE_KEY_FINGERPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')

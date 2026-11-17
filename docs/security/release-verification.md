@@ -42,12 +42,21 @@ Every file of a release is signed with one key. Its fingerprint is the trust
 anchor: a signature proves nothing unless it is compared with a fingerprint
 obtained from a place the attacker does not control.
 
-- Fingerprint: <<TO BE DECIDED BY THE MAINTAINER: the OpenPGP fingerprint of
-  the release signing key (40 hex digits)>>
-- Published at: <<TO BE DECIDED BY THE MAINTAINER: where the fingerprint and
-  the public key are published — this file and `SECURITY.md` in the
-  repository, and at least one channel outside it, for example the project
-  website and a key server>>
+- Fingerprint: `4CCC E751 C38A D66A B1DC  94D0 44A7 EECD 3701 0CF3`
+  (without spaces `4CCCE751C38AD66AB1DC94D044A7EECD37010CF3`), RSA 2048,
+  created 2013-08-08, user ID `Sven Ruppert <sven.ruppert@gmail.com>`.
+- Published at: this page and `SECURITY.md` in the repository, and the key
+  servers `keys.openpgp.org` and `keyserver.ubuntu.com`:
+
+  ```bash
+  gpg --keyserver hkps://keys.openpgp.org --recv-keys 4CCCE751C38AD66AB1DC94D044A7EECD37010CF3
+  ```
+
+This key signed the releases 00.81.10 to 00.83.00 on Maven Central and signs
+00.84.00. A dedicated release key, Ed25519 and held on a hardware token, is
+planned for 00.85.00. It will be certified by this key and announced here and
+in `SECURITY.md` before it signs a release; this key stays valid, so earlier
+releases can still be verified.
 
 The same value is configured in `scripts/lib/release-common.sh`
 (`JC_DEFAULT_RELEASE_KEY_FINGERPRINT`); the release scripts sign with that key

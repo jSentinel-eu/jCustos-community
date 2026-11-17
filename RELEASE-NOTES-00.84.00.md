@@ -1529,8 +1529,10 @@ signed tag `v<version>`, and sign with a pinned release key. The Central bundle 
 archive` of the tag into an empty local repository; every signature is verified against the pinned
 key before bundling and again after the upload to `repo.jsentinel.eu`, and a manifest records tag,
 commit, tool versions and the SHA-256 of every file. `project.build.outputTimestamp` makes the jars
-reproducible; two builds of the same commit are compared byte for byte. The release-key fingerprint
-is not decided yet, and the scripts refuse to release until it is.
+reproducible; two builds of the same commit are compared byte for byte. The pinned release key is
+`4CCC E751 C38A D66A B1DC  94D0 44A7 EECD 3701 0CF3`, the key that signed 00.81.10 to 00.83.00 on
+Maven Central; `docs/security/release-verification.md` names it and where it is published. A
+dedicated release key is planned for 00.85.00 and will be certified by this one.
 
 **Consumers:** from 00.84.00 every module ships `-cyclonedx.json` and `-cyclonedx.xml` with
 signatures, and `repo.jsentinel.eu` serves the same signed artefact set as Maven Central.
@@ -1552,8 +1554,8 @@ prepared but not yet a required check and has not run on a runner. **Consumers:*
 Key stores, keys, signatures, environment files, local Maven settings, local tool state and release
 output are now ignored; the two synthetic test key stores of `jCustos-events` stay tracked as
 explicit exceptions. A security policy (`SECURITY.md`) is prepared, but its reporting channel,
-response times, disclosure deadline, supported versions and release-key fingerprint are still to be
-decided, and it is not part of this build yet. **Consumers:** no change.
+response times, disclosure deadline and supported versions are still to be decided, and it is not
+part of this build yet; the release-key fingerprint is entered. **Consumers:** no change.
 
 ## A REST skill token names a user, not a frozen copy of it, and every route has its own key (SA32, JS-SEC-132, CWE-613, CWE-672, CWE-436, CWE-284)
 
