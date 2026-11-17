@@ -85,7 +85,7 @@ if (result instanceof JCustosEventVerificationResult.Valid valid) {
 }
 // else: InvalidSignature / UnknownKey / KeyRevoked / KeyExpired / Expired /
 //       PayloadHashMismatch / ReplayDetected / SequenceViolation / ProducerNotAllowed /
-//       KeyNotAuthorizedForProducer / PayloadMetadataMismatch
+//       KeyNotAuthorizedForProducer / PayloadMetadataMismatch / AcceptanceWindowExceeded
 ```
 
 Since 00.84.00 the pipeline checks that the verifying key is bound to the
@@ -97,6 +97,12 @@ sequence (`SequenceValidator.DEFAULT_MAX_INITIAL_SEQUENCE`, JS-SEC-105): a
 consumer that joins a running producer with an empty sequence store seeds the
 scope with `updateSequence` or uses
 `new SequenceValidator(maxInitialSequence, maxTolerableGap)`.
+The consumer also caps how long an envelope may stay valid
+(`ConsumePipeline.DEFAULT_MAX_ACCEPTANCE_WINDOW`, one hour, JS-SEC-094): an
+envelope whose `expiresAt` lies further away, from its `issuedAt` or from now,
+is rejected as `AcceptanceWindowExceeded`. Producers with a longer time to
+live need the `ConsumePipeline` constructor that ends in
+`Duration maxAcceptanceWindow`.
 
 ## 6. Opt-in: persistence + REST/SSE bridge
 
