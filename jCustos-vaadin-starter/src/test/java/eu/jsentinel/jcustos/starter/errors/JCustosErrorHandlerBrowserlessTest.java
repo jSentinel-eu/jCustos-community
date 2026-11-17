@@ -36,6 +36,7 @@ import com.vaadin.flow.function.DeploymentConfiguration;
 import com.vaadin.flow.router.BeforeEnterEvent;
 import com.vaadin.flow.router.ErrorParameter;
 import com.vaadin.flow.router.HasErrorParameter;
+import com.vaadin.flow.router.InternalServerError;
 import com.vaadin.flow.router.Route;
 import com.vaadin.flow.server.DefaultErrorHandler;
 import com.vaadin.flow.server.ErrorEvent;
@@ -242,6 +243,45 @@ class JCustosErrorHandlerBrowserlessTest {
     assertFalse(log.contains("Unhandled error"), log);
   }
 
+  @Test
+  @DisplayName("RF15: a plain java.lang.Exception shows the reference, not Vaadin's InternalServerError with its root cause")
+  void plainException_takesTheReferencePath() throws Exception {
+    ActionView.failure = () -> sneakyThrow(
+        new Exception("wrapper", new IllegalStateException(LEAKY_MESSAGE)));
+    ActionView view = navigateToActions();
+
+    String log = capturingStdErr(() -> clickThroughTheRpcHandler(view.action));
+
+    assertInstanceOf(ActionView.class, activeView(),
+        "Vaadin's InternalServerError - registered for java.lang.Exception - must not be shown");
+    Matcher logged = LOGGED_REFERENCE.matcher(log);
+    assertTrue(logged.find(), "the error is logged under a reference; stderr was: " + log);
+    List<Notification> notifications = openNotifications();
+    assertEquals(1, notifications.size());
+    assertEquals(MessageFormat.format(JCustosErrorHandler.FALLBACK_MESSAGE, logged.group(1)),
+        textOf(notifications.getFirst()));
+    String page = pageText();
+    for (String leak : List.of(SECRET, "alice@example.test", "UPDATE accounts", "root cause")) {
+      assertFalse(page.contains(leak), "the page leaked '" + leak + "': " + page);
+    }
+  }
+
+  @Test
+  @DisplayName("RF15 control: InternalServerError is the error view Vaadin would pick for a plain Exception")
+  void internalServerError_isRegisteredForException() {
+    session.setErrorHandler(new DefaultErrorHandler());
+    ActionView.failure = () -> sneakyThrow(
+        new Exception("wrapper", new IllegalStateException(LEAKY_MESSAGE)));
+    ActionView view = navigateToActions();
+
+    capturingStdErr(() -> clickThroughTheRpcHandler(view.action));
+
+    assertInstanceOf(InternalServerError.class, activeView(),
+        "precondition: without the jCustos handler Vaadin shows its InternalServerError");
+    assertTrue(pageText().contains(SECRET),
+        "precondition: that view writes the root cause into the page");
+  }
+
   // ── failures inside the handler ────────────────────────────────
 
   @Test
@@ -308,6 +348,8 @@ class JCustosErrorHandlerBrowserlessTest {
     Routes routes = new Routes();
     routes.getRoutes().addAll(List.of(ActionView.class, GuardedView.class));
     routes.getErrorRoutes().add(AccessDeniedView.class);
+    // as in every application: Vaadin registers its InternalServerError for java.lang.Exception
+    routes.getErrorRoutes().add(InternalServerError.class);
     MockVaadin.setup(MockedUI::new, new ApplicationServlet(routes, installHandler));
     session = VaadinSession.getCurrent();
     ui = UI.getCurrent();
@@ -320,6 +362,11 @@ class JCustosErrorHandlerBrowserlessTest {
 
   private HasElement activeView() {
     return ui.getInternals().getActiveRouterTargetsChain().getFirst();
+  }
+
+  /** The text the browser shows: the active view and whatever else hangs off the UI. */
+  private String pageText() {
+    return activeView().getElement().getTextRecursively() + "\n" + ui.getElement().getTextRecursively();
   }
 
   /**
@@ -377,6 +424,12 @@ class JCustosErrorHandlerBrowserlessTest {
   @FunctionalInterface
   private interface ThrowingRunnable {
     void run() throws Exception;
+  }
+
+  /** Throws a checked exception from a {@link Runnable}, as Kotlin or a sneaky throw does. */
+  @SuppressWarnings("unchecked")
+  private static <T extends Throwable> void sneakyThrow(Throwable throwable) throws T {
+    throw (T) throwable;
   }
 
   // ── fixtures ───────────────────────────────────────────────────

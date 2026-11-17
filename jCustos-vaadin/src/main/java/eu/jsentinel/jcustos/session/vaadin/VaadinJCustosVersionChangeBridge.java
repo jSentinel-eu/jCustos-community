@@ -30,10 +30,10 @@ import eu.jsentinel.jcustos.session.JCustosVersionEnforcer.EnforcementOutcome;
 import eu.jsentinel.jcustos.session.JCustosVersionKey;
 import eu.jsentinel.jcustos.session.ObservableJCustosVersionStore;
 import com.vaadin.flow.component.Component;
+import com.vaadin.flow.component.HasElement;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.UIDetachedException;
 import com.vaadin.flow.internal.CurrentInstance;
-import com.vaadin.flow.router.Location;
 import com.vaadin.flow.router.RouteConfiguration;
 import com.vaadin.flow.server.ServiceInitEvent;
 import com.vaadin.flow.server.UIInitListener;
@@ -63,7 +63,9 @@ import static java.util.Objects.requireNonNull;
  *   <li><strong>The session's own snapshot drifted</strong> - the subject the session was
  *       opened for: the session is ended as the per-request check ends it. The subject, the
  *       version snapshot and a bound token credential are dropped,
- *       {@link JCustosVersionEnforcer} audits {@code SessionStale}, every UI of the session is
+ *       {@link JCustosVersionEnforcer} audits {@code SessionStale} - with the class of the view
+ *       the UI shows as its route, as the navigation check names it, never the URL with its
+ *       route parameters - every UI of the session is
  *       sent to the reroute target - typically the login view - and the Vaadin session is
  *       closed, the HTTP session invalidated and destroyed.</li>
  *   <li><strong>No drift</strong> - a session without a snapshot whose subject resolves to the
@@ -71,7 +73,9 @@ import static java.util.Objects.requireNonNull;
  *       evaluated again through {@link SecuredVisibility#refreshAll(UI)}.</li>
  * </ul>
  * Each reaction runs in {@link UI#access} under the lock of the target session: at once when
- * that session is idle, otherwise as soon as its current request releases the lock.
+ * that session is idle, otherwise as soon as its current request releases the lock. A UI that
+ * cannot be reached - its push channel fails, say - is logged and skipped; the other UIs are
+ * still handled, and its session is checked again on its next request (exit review RF23).
  * <p>
  * <strong>Push.</strong> With {@code @Push} the browser receives the redirect without a click.
  * Without push the session is ended on the server all the same; the browser learns of it with
@@ -179,6 +183,11 @@ public final class VaadinJCustosVersionChangeBridge implements JCustosVersionCha
         ui.access(() -> react(ui, key));
       } catch (UIDetachedException detached) {
         keys.remove(ui);
+      } catch (RuntimeException accessFailure) {
+        // RF23: one UI that cannot be reached - a failing push, for instance - must not keep
+        // the others from being handled; the per-request check still covers its session
+        logger().warn("Reaching a UI after a security-version change failed with {}; its session "
+            + "is checked again on its next request", accessFailure.getClass().getName());
       }
     }
   }
@@ -299,10 +308,18 @@ public final class VaadinJCustosVersionChangeBridge implements JCustosVersionCha
     return new JCustosVersionKey(snapshot.tenant(), snapshot.subjectId());
   }
 
+  /**
+   * RF16 (CWE-532, CWE-1041): the class of the view the UI shows - what
+   * {@link JCustosVersionEnforcerListener} audits for a navigation - not the URL path, which
+   * carries route parameter values ({@code customer/4711}, {@code search/<free text>}) into
+   * the hash-chained audit trail.
+   *
+   * @return the binary name of the active route target, or {@code null} when there is none
+   */
   private static String routeOf(UI ui) {
     try {
-      Location location = ui.getInternals().getActiveViewLocation();
-      return location == null ? null : location.getPath();
+      List<HasElement> chain = ui.getInternals().getActiveRouterTargetsChain();
+      return chain.isEmpty() ? null : chain.getFirst().getClass().getName();
     } catch (RuntimeException unavailable) {
       return null;
     }

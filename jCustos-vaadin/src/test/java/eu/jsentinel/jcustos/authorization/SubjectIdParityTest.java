@@ -68,11 +68,13 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 /**
  * JS-SEC-097 (CWE-1041, CWE-532), acceptance of ER30: the same subject yields the same
- * subject id in the navigation context of the authorisation listener, in
- * {@link SecuredVisibility}, in the {@link SessionLifetimeListener} (the metadata its policy
- * evaluates and the {@code SessionExpired} event) and in the audit of the session rotation
- * after a login - with a registered {@code SubjectIdResolver} the resolver value, without
- * one the identity handle. None of them carries the subject's {@code toString()}.
+ * subject id in the navigation context of the authorisation listener, in the
+ * {@link SessionLifetimeListener} (the metadata its policy evaluates and the
+ * {@code SessionExpired} event) and in the audit of the session rotation after a login - with
+ * a registered {@code SubjectIdResolver} the resolver value, without one the identity handle -
+ * and {@link SecuredVisibility} decides on the same subject's roles. None of them carries the
+ * subject's {@code toString()}. Since exit review RF17 the view of {@code SecuredVisibility}
+ * carries no subject id: no requirement reads one.
  * <p>
  * Until 00.84.00 the navigation and the lifetime listener fell back to the identity handle,
  * the login rotation to an empty string. The policy context of the starter's
@@ -124,7 +126,7 @@ class SubjectIdParityTest {
 
   @ParameterizedTest(name = "resolver registered: {0}")
   @ValueSource(booleans = {true, false})
-  @DisplayName("navigation, SecuredVisibility, session lifetime and login rotation derive the same subject id")
+  @DisplayName("navigation, session lifetime and login rotation derive the same subject id; SecuredVisibility sees the same subject")
   void sameSubjectIdEverywhere(boolean withResolver) {
     if (withResolver) {
       JCustosServiceResolver.<PiiUser>setSubjectIdResolver(user -> SubjectId.of("user-7"));
@@ -141,11 +143,14 @@ class SubjectIdParityTest {
     ids.put("navigation", navigation.subjectId());
     ids.put("navigation/displayName", navigation.displayName());
 
-    // 2. the view SecuredButton / SecuredRouterLink / SecuredMenuItem decide on
+    // 2. the view SecuredButton / SecuredRouterLink / SecuredMenuItem decide on: the roles and
+    // permissions of the facade's subject. Exit review RF17: it carries no subject id - no
+    // requirement reads one, and resolving it per component cost a lookup each
     SecuredVisibility.JCustosView view = SecuredVisibility.currentJCustosView().orElseThrow();
-    JCustosSubject secured = assertInstanceOf(JCustosSubject.class, view.roles(),
+    CurrentSubject.RolesAndPermissions secured = assertInstanceOf(
+        CurrentSubject.RolesAndPermissions.class, view.roles(),
         "the components decide on the facade's subject");
-    ids.put("SecuredVisibility", secured.subjectId());
+    assertEquals(navigation.roles(), secured.roles(), "the same subject's roles as the navigation");
 
     // 3. the audit id of the session rotation after a login (LoginView, OAuth2 callback)
     ids.put("LoginSessionRotation", LoginView.subjectIdOf(new SessionContext<>(
@@ -160,7 +165,7 @@ class SubjectIdParityTest {
 
     ids.forEach((site, id) -> assertEquals(expected, id, site + " derived a different subject id"));
     assertEquals(expected, CurrentSubject.subjectIdOf(alice));
-    for (JCustosSubject subject : List.of(navigation, secured)) {
+    for (Object subject : List.of(navigation, secured)) {
       assertFalse(subject.toString().contains(SECRET), "the credential in toString() leaked: " + subject);
       assertFalse(subject.toString().contains("alice@example.test"), "the e-mail leaked: " + subject);
     }

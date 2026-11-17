@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.authorization.api;
 
 import eu.jsentinel.jcustos.action.ActionAuthorizationService;
+import eu.jsentinel.jcustos.audit.AuditCorrelation;
 import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
@@ -27,6 +28,7 @@ import eu.jsentinel.jcustos.authentication.Pbkdf2PasswordHasher;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
+import eu.jsentinel.jcustos.credential.propagation.OutboundHeaderContext;
 import eu.jsentinel.jcustos.credential.propagation.OutboundTokenStrategy;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
@@ -348,9 +350,12 @@ public final class JCustosServiceResolver {
    * SPI implementation is configured (R5, JS-SEC-066, CWE-778): a
    * {@code TrustedPeerCorrelationIdResolver} that takes {@code X-Request-ID}
    * only from a peer the registered {@link ClientAddressResolver} trusts and
-   * generates a UUID otherwise. Never throws.
+   * generates a UUID otherwise. More than one registered implementation is
+   * reported, not resolved; the outcome of the lookup is kept until a set or a
+   * reset (RF22, see {@link JCustosContext#correlationIdResolver()}).
    *
    * @return the resolver, never {@code null}
+   * @throws IllegalStateException when more than one implementation is registered
    * @since 00.84.00
    */
   public static CorrelationIdResolver correlationIdResolver() {
@@ -658,10 +663,14 @@ public final class JCustosServiceResolver {
 
   /**
    * Returns the SPI-registered {@link SubjectIdResolver}, or
-   * empty when no implementation is configured.
+   * empty when no implementation is configured. The outcome of the SPI lookup
+   * is kept until a set or a reset (RF17, see
+   * {@link JCustosContext#findSubjectIdResolver()}).
    *
    * @param <U> application user type
    * @return the registered resolver, or empty
+   * @throws IllegalStateException when more than one implementation is registered
+   *                               and none was set
    */
   public static <U> Optional<SubjectIdResolver<U>> findSubjectIdResolver() {
     return DEFAULT.findSubjectIdResolver();
@@ -882,8 +891,14 @@ public final class JCustosServiceResolver {
    * Returns the default context to the state of a freshly constructed one
    * ({@link JCustosContext#resetAll()}, which also forgets the installed
    * {@link eu.jsentinel.jcustos.jwt.api.JwtValidator}) and resets
-   * {@link SubjectStores}. Intended for testing scenarios where SPI
-   * registrations change between runs.
+   * {@link SubjectStores} and the warning throttle of {@link CurrentSubject}.
+   * Intended for testing scenarios where SPI registrations change between runs.
+   * <p>
+   * Exit review RF21 (ER29, CWE-459): it also ends the request-scoped state the
+   * <em>calling</em> thread still holds - its correlation scopes
+   * ({@link AuditCorrelation#resetCurrentThread()}) and a header bound in
+   * {@link OutboundHeaderContext} - so a test that leaves either behind does not
+   * hand it to the next test on the same thread. Other threads are not touched.
    * <p>
    * Registries of the adapter and DX modules keep their own {@code reset()}
    * methods and are not touched here; the JVM-wide warn-once flags of the
@@ -892,6 +907,9 @@ public final class JCustosServiceResolver {
   public static void resetAll() {
     DEFAULT.resetAll();
     SubjectStores.reset();
+    CurrentSubject.resetResolverWarnings();
+    AuditCorrelation.resetCurrentThread();
+    OutboundHeaderContext.clear();
   }
 
   static <S> S requireSingleService(Class<S> serviceType, Iterable<? extends S> services) {

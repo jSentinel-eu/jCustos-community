@@ -18,7 +18,6 @@ package eu.jsentinel.jcustos.components;
 
 import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
-import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.PermissionGuard;
 import eu.jsentinel.jcustos.authorization.api.permissions.HasPermissions;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
@@ -254,9 +253,16 @@ public final class SecuredVisibility {
    * {@code ObservableJCustosVersionStore}, through {@code VaadinJCustosVersionChangeBridge} at
    * once. Components that were garbage-collected are dropped; see
    * {@link SecuredBindingRegistry}.
+   * <p>
+   * The bindings decide on the subject of {@code ui}'s session: the method binds {@code ui} as
+   * current while it runs, so an administrator's request that refreshes another user's UI
+   * does not evaluate that UI's controls against the administrator's roles (exit review RF19).
+   * Several bindings on one component combine with AND (RF18).
    *
    * @param ui the UI whose bindings are refreshed; non-null
    * @return the number of components that were refreshed
+   * @throws IllegalStateException when the calling thread does not hold the session lock of
+   *                               {@code ui}
    * @since 00.84.00
    */
   public static int refreshAll(UI ui) {
@@ -278,22 +284,23 @@ public final class SecuredVisibility {
   }
 
   /**
-   * SPI lookup through {@link CurrentSubject#currentJCustosSubject()}: typed user via the
+   * SPI lookup through {@link CurrentSubject#currentRolesAndPermissions()}: typed user via the
    * {@code SubjectStore}, roles and permissions via the registered
    * {@code AuthorizationService}. Returns empty when any prerequisite is missing (no SPI
    * wiring, no current subject, ...) or a lookup fails - the caller treats absence as
    * denial.
    * <p>
-   * JS-SEC-097 (CWE-1041): the view carries the facade's {@link JCustosSubject} as its role
-   * and permission view, so the components decide on the same subject - with the same subject
-   * id - as the navigation listener and the policy-backed {@code SecuredUi} components. The
+   * JS-SEC-097 (CWE-1041): the components decide on the subject of the shared facade - the
+   * one the navigation listener and the policy-backed {@code SecuredUi} components see. The
    * roles and permissions are resolved before the view is returned; a failure there denies
-   * instead of escaping from {@link #apply apply(...)}.
+   * instead of escaping from {@link #apply apply(...)}. Exit review RF17 (CWE-400): the view
+   * carries no subject id, since no requirement reads one, so a page with many secured
+   * components does not resolve the id once per component.
    *
    * @return current security view, if resolvable
    */
   public static Optional<JCustosView> currentJCustosView() {
-    return CurrentSubject.currentJCustosSubject()
-        .map(subject -> new JCustosView(subject, subject));
+    return CurrentSubject.currentRolesAndPermissions()
+        .map(granted -> new JCustosView(granted, granted));
   }
 }

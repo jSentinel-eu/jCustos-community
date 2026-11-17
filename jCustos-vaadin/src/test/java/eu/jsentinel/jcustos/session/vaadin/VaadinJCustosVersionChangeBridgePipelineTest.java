@@ -37,10 +37,13 @@ import eu.jsentinel.jcustos.session.ObservableJCustosVersionStore;
 import eu.jsentinel.jcustos.session.vaadin.RequestPipeline.Exchange;
 import eu.jsentinel.jcustos.session.vaadin.SessionLifetimePipelineTest.LockRecordingSubjectStore;
 import eu.jsentinel.jcustos.test.RecordingAuditSink;
+import com.vaadin.browserless.internal.MockVaadin;
+import com.vaadin.browserless.mocks.MockedUI;
 import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.component.internal.PendingJavaScriptInvocation;
 import com.vaadin.flow.router.Route;
+import com.vaadin.flow.router.RouteParameters;
 import com.vaadin.flow.server.VaadinSession;
 import com.vaadin.flow.server.communication.PushConnection;
 import com.vaadin.flow.server.VaadinSessionState;
@@ -106,7 +109,7 @@ class VaadinJCustosVersionChangeBridgePipelineTest {
     VaadinJCustosVersionChangeBridge bridge = new VaadinJCustosVersionChangeBridge(enforcer, BridgeLoginView.class);
     pipeline = RequestPipeline.start(Clock.systemUTC(),
         List.of(listener::register, event -> bridge.register(event, versionStore)),
-        BridgeWorkView.class, BridgeLoginView.class);
+        BridgeWorkView.class, BridgeLoginView.class, BridgeCustomerView.class);
     session = pipeline.session();
     ui = pipeline.ui();
     subjects.setCurrentSubject("alice", String.class);
@@ -159,7 +162,8 @@ class VaadinJCustosVersionChangeBridgePipelineTest {
     SessionStale stale = audit.single(SessionStale.class);
     assertEquals("alice", stale.subjectId());
     assertEquals(SessionRef.of("sid-r8"), stale.sessionId(), "never the session id (JS-SEC-117)");
-    assertEquals("r8-bridge/work", stale.route(), "the route the user had open");
+    assertEquals(BridgeWorkView.class.getName(), stale.route(),
+        "RF16: the class of the view the user had open, as the navigation check names it");
     // reading session state needs the lock under Vaadin's strict check - no request was sent
     pipeline.reacquireLock();
     assertNotEquals(VaadinSessionState.OPEN, session.getState(), "the session is closed without a request");
@@ -241,6 +245,78 @@ class VaadinJCustosVersionChangeBridgePipelineTest {
     assertTrue(audit.all(SessionStale.class).isEmpty());
   }
 
+  @Test
+  @DisplayName("RF16: a view with a route parameter - SessionStale names the view class, never the parameter value")
+  void drift_routeParameterNotAudited() {
+    VaadinJCustosVersionContext.record(session, ALICE, TenantId.DEFAULT, JCustosVersion.INITIAL, "sid-rf16");
+    ui.navigate(BridgeCustomerView.class, new RouteParameters("customerId", "4711-alice@example.test"));
+    assertTrue(ui.getInternals().getActiveViewLocation().getPath().contains("4711"),
+        "precondition: the URL carries the parameter");
+    audit.clear();
+    pipeline.releaseLock();
+
+    versionStore.increment(ALICE_KEY);
+
+    SessionStale stale = audit.single(SessionStale.class);
+    assertEquals(BridgeCustomerView.class.getName(), stale.route());
+    assertFalse(stale.route().contains("4711") || stale.route().contains("alice@example.test"),
+        "route parameter values must not reach the hash-chained audit trail: " + stale.route());
+  }
+
+  @Test
+  @DisplayName("RF23: a UI whose push fails does not keep the bridge from the subject's other UI")
+  void failingPush_otherUiStillReached() {
+    JCustosServiceResolver.setSubjectIdResolver((SubjectIdResolver<String>) SubjectId::new);
+    StubAuthorizationService.put("alice", Set.of(ADMIN), Set.of());
+    BridgeWorkView first = pipeline.navigate(BridgeWorkView.class);
+    // a second tab of the same browser session
+    MockVaadin.createUI(MockedUI::new, session);
+    UI secondUi = UI.getCurrent();
+    secondUi.navigate(BridgeWorkView.class);
+    BridgeWorkView second = (BridgeWorkView) secondUi.getInternals().getActiveRouterTargetsChain().get(0);
+    UI.setCurrent(ui);
+    assertTrue(first.delete.isEnabled() && second.delete.isEnabled(), "precondition: alice holds the role");
+    List<UI> tabs = List.of(ui, secondUi);
+    for (UI tab : tabs) {
+      tab.getPushConfiguration().setPushMode(PushMode.AUTOMATIC);
+      tab.getInternals().setPushConnection(new FailingPushChannel());
+    }
+    StubAuthorizationService.put("alice", Set.of(), Set.of());
+    pipeline.releaseLock();
+    try {
+      versionStore.increment(ALICE_KEY);
+
+      pipeline.reacquireLock();
+      assertFalse(first.delete.isEnabled(), "the first tab follows the withdrawn role");
+      assertFalse(second.delete.isEnabled(),
+          "whichever tab's push failed first, the other tab is still reached");
+      assertEquals(VaadinSessionState.OPEN, session.getState());
+    } finally {
+      pipeline.reacquireLock();
+      for (UI tab : tabs) {
+        // the teardown releases the lock, which pushes every UI with automatic push
+        tab.getPushConfiguration().setPushMode(PushMode.DISABLED);
+        tab.getInternals().setPushConnection(null);
+      }
+    }
+  }
+
+  /** A connected push channel that breaks on every push - a dropped WebSocket. */
+  private static final class FailingPushChannel implements PushConnection {
+    private static final long serialVersionUID = 1L;
+
+    @Override public void push() {
+      throw new IllegalStateException("push channel broken");
+    }
+
+    @Override public void disconnect() {
+    }
+
+    @Override public boolean isConnected() {
+      return true;
+    }
+  }
+
   /**
    * A connected push channel that records what each push sends: the JavaScript invocations the
    * UIDL message of a real push would carry. Hand-written stand-in for the browser's WebSocket.
@@ -285,6 +361,10 @@ class VaadinJCustosVersionChangeBridgePipelineTest {
       add(delete);
       getElement().addEventListener("privileged", event -> ACTIONS.incrementAndGet());
     }
+  }
+
+  @Route("r8-bridge/customer/:customerId")
+  public static class BridgeCustomerView extends Div {
   }
 
   @Route("r8-bridge/login")

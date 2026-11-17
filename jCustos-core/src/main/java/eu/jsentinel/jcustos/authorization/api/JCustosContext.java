@@ -137,6 +137,10 @@ public final class JCustosContext {
       new AtomicReference<>();
   private final AtomicReference<SubjectIdResolver<?>> subjectIdResolverRef =
       new AtomicReference<>();
+  /** RF17: the SPI lookup found no {@link SubjectIdResolver}; not repeated until a set or reset. */
+  private final AtomicBoolean subjectIdResolverAbsent = new AtomicBoolean(false);
+  /** RF17: why the SPI lookup of the {@link SubjectIdResolver} failed - several registered. */
+  private final AtomicReference<String> subjectIdResolverAmbiguityRef = new AtomicReference<>();
   // V00.84 (JS-SEC-061, CWE-348): which address identifies the client.
   private final AtomicReference<ClientAddressResolver> clientAddressResolverRef =
       new AtomicReference<>();
@@ -145,6 +149,9 @@ public final class JCustosContext {
       new AtomicReference<>();
   /** R5: the resolver {@link #correlationIdResolver()} created as its default, if any. */
   private final AtomicReference<CorrelationIdResolver> defaultedCorrelationIdResolverRef =
+      new AtomicReference<>();
+  /** RF22: why the SPI lookup of the {@link CorrelationIdResolver} failed - several registered. */
+  private final AtomicReference<String> correlationIdResolverAmbiguityRef =
       new AtomicReference<>();
   private final AtomicReference<String> stepUpRouteNameRef =
       new AtomicReference<>();
@@ -691,10 +698,19 @@ public final class JCustosContext {
    * {@link TrustedPeerCorrelationIdResolver} that takes {@code X-Request-ID}
    * only from a peer this context's {@link #clientAddressResolver()} trusts —
    * looked up per request, so a client-address resolver registered later
-   * applies — and generates a UUID otherwise. This method <strong>never</strong>
-   * throws.
+   * applies — and generates a UUID otherwise.
+   * <p>
+   * RF22: more than one implementation registered through
+   * {@code META-INF/services} is a misconfiguration this method reports with an
+   * {@link IllegalStateException} naming them; it does not pick one.
+   * {@code AuditCorrelation} then falls back to a UUID and warns once. The
+   * outcome of the lookup - the resolver, the default, or the ambiguity - is
+   * kept until {@link #setCorrelationIdResolver(CorrelationIdResolver)} or
+   * {@link #resetAll()}, so a misconfigured application does not scan the class
+   * path on every request.
    *
    * @return the resolver, never {@code null}
+   * @throws IllegalStateException when more than one implementation is registered
    * @since 00.84.00
    */
   public CorrelationIdResolver correlationIdResolver() {
@@ -703,13 +719,27 @@ public final class JCustosContext {
       return cached;
     }
 
-    CorrelationIdResolver loaded = findSingleService(
-        CorrelationIdResolver.class,
-        ServiceLoader.load(CorrelationIdResolver.class))
+    CorrelationIdResolver loaded = findCorrelationIdResolverRegistration()
         .orElseGet(this::defaultCorrelationIdResolver);
 
     correlationIdResolverRef.compareAndSet(null, loaded);
     return correlationIdResolverRef.get();
+  }
+
+  /** The SPI registration; an ambiguous one is remembered and thrown again without a scan. */
+  private Optional<CorrelationIdResolver> findCorrelationIdResolverRegistration() {
+    String ambiguity = correlationIdResolverAmbiguityRef.get();
+    if (ambiguity != null) {
+      throw new IllegalStateException(ambiguity);
+    }
+    try {
+      return findSingleService(
+          CorrelationIdResolver.class,
+          ServiceLoader.load(CorrelationIdResolver.class));
+    } catch (IllegalStateException ambiguous) {
+      correlationIdResolverAmbiguityRef.compareAndSet(null, ambiguous.getMessage());
+      throw ambiguous;
+    }
   }
 
   /**
@@ -729,6 +759,8 @@ public final class JCustosContext {
    * diagnostics use this method to tell a default from a registration.
    *
    * @return the SPI-registered or explicitly set resolver, or empty
+   * @throws IllegalStateException when more than one implementation is registered
+   *                               and none was set
    * @since 00.84.00
    */
   public Optional<CorrelationIdResolver> findCorrelationIdResolver() {
@@ -739,9 +771,7 @@ public final class JCustosContext {
           : Optional.of(cached);
     }
 
-    Optional<CorrelationIdResolver> loaded = findSingleService(
-        CorrelationIdResolver.class,
-        ServiceLoader.load(CorrelationIdResolver.class));
+    Optional<CorrelationIdResolver> loaded = findCorrelationIdResolverRegistration();
     loaded.ifPresent(resolver -> correlationIdResolverRef.compareAndSet(null, resolver));
     return loaded;
   }
@@ -749,12 +779,14 @@ public final class JCustosContext {
   /**
    * Replaces the cached {@link CorrelationIdResolver}. Intended for the DX
    * bootstrap, tests and applications that prefer programmatic wiring over SPI.
+   * Forgets an ambiguous SPI registration found earlier.
    *
    * @param resolver the resolver, or {@code null} to clear
    * @since 00.84.00
    */
   public void setCorrelationIdResolver(CorrelationIdResolver resolver) {
     correlationIdResolverRef.set(resolver);
+    correlationIdResolverAmbiguityRef.set(null);
   }
 
   // ── SessionPolicy ──────────────────────────────────────────────
@@ -1284,9 +1316,18 @@ public final class JCustosContext {
   /**
    * Returns the SPI-registered {@link SubjectIdResolver}, or
    * empty when no implementation is configured.
+   * <p>
+   * RF17 (CWE-400): {@code CurrentSubject.subjectIdOf(...)} asks for the
+   * resolver on every subject id, so the outcome of the SPI lookup is kept until
+   * {@link #setSubjectIdResolver(SubjectIdResolver)} or {@link #resetAll()} -
+   * the resolver, its absence, and an ambiguous registration (more than one
+   * implementation), which is thrown again without another scan of the class
+   * path.
    *
    * @param <U> application user type
    * @return the registered resolver, or empty
+   * @throws IllegalStateException when more than one implementation is registered
+   *                               and none was set
    */
   @SuppressWarnings("unchecked")
   public <U> Optional<SubjectIdResolver<U>> findSubjectIdResolver() {
@@ -1294,23 +1335,44 @@ public final class JCustosContext {
     if (cached != null) {
       return Optional.of((SubjectIdResolver<U>) cached);
     }
-    Optional<SubjectIdResolver> loaded = findSingleService(
-        SubjectIdResolver.class,
-        ServiceLoader.load(SubjectIdResolver.class));
-    loaded.ifPresent(resolver -> subjectIdResolverRef.compareAndSet(null, resolver));
+    String ambiguity = subjectIdResolverAmbiguityRef.get();
+    if (ambiguity != null) {
+      throw new IllegalStateException(ambiguity);
+    }
+    if (subjectIdResolverAbsent.get()) {
+      return Optional.empty();
+    }
+    Optional<SubjectIdResolver> loaded;
+    try {
+      loaded = findSingleService(
+          SubjectIdResolver.class,
+          ServiceLoader.load(SubjectIdResolver.class));
+    } catch (IllegalStateException ambiguous) {
+      subjectIdResolverAmbiguityRef.compareAndSet(null, ambiguous.getMessage());
+      throw ambiguous;
+    }
+    if (loaded.isPresent()) {
+      subjectIdResolverRef.compareAndSet(null, loaded.get());
+    } else {
+      subjectIdResolverAbsent.set(true);
+    }
+    // a resolver set while the class path was scanned wins
     return Optional.ofNullable((SubjectIdResolver<U>) subjectIdResolverRef.get());
   }
 
   /**
    * Replaces the cached {@link SubjectIdResolver}. Intended for
    * tests and for applications that prefer programmatic wiring
-   * over SPI.
+   * over SPI. Forgets the outcome of an earlier SPI lookup, so
+   * {@code null} makes the next lookup scan the class path again.
    *
    * @param resolver the resolver, or {@code null} to clear
    * @param <U>      application user type
    */
   public <U> void setSubjectIdResolver(SubjectIdResolver<U> resolver) {
     subjectIdResolverRef.set(resolver);
+    subjectIdResolverAbsent.set(false);
+    subjectIdResolverAmbiguityRef.set(null);
   }
 
   // ── Step-up route ─────────────────────────────────────────────
@@ -1556,9 +1618,12 @@ public final class JCustosContext {
     roleHierarchyRef.set(null);
     securityVersionStoreRef.set(null);
     subjectIdResolverRef.set(null);
+    subjectIdResolverAbsent.set(false);
+    subjectIdResolverAmbiguityRef.set(null);
     clientAddressResolverRef.set(null);
     correlationIdResolverRef.set(null);
     defaultedCorrelationIdResolverRef.set(null);
+    correlationIdResolverAmbiguityRef.set(null);
     stepUpRouteNameRef.set(null);
     loginRouteNameRef.set(null);
     denyByDefaultRef.set(false);

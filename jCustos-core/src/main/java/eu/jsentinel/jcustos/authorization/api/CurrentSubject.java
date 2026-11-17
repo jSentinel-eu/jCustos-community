@@ -18,12 +18,17 @@ package eu.jsentinel.jcustos.authorization.api;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
+import eu.jsentinel.jcustos.authorization.api.permissions.HasPermissions;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
+import eu.jsentinel.jcustos.authorization.api.roles.HasRoles;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
 import eu.jsentinel.jcustos.logout.SubjectId;
 
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 
 import static java.util.Objects.requireNonNull;
 
@@ -47,6 +52,13 @@ import static java.util.Objects.requireNonNull;
  * anything the subject's {@code toString()} would reveal. Applications that need correlated
  * audit trails register a resolver; the DX bootstrap of the Vaadin adapter reports a missing
  * one as {@code audit/no-subject-id-resolver}.
+ * <p>
+ * The resolver is looked up once: its absence and an ambiguous registration are remembered
+ * until {@code JCustosServiceResolver.setSubjectIdResolver(...)} or {@code resetAll()}. A
+ * resolver that fails, or a lookup that fails, is reported as a WARN at most once per
+ * {@linkplain #RESOLVER_WARNING_INTERVAL_SECONDS minute} for each resolver class (exit review
+ * RF17, CWE-400, CWE-779). A visibility decision needs no subject id and asks
+ * {@link #currentRolesAndPermissions()}, which does not resolve one.
  *
  * <h2>Failures</h2>
  * The lookups never throw. A missing {@code AuthenticationService}, {@link SubjectStore} or
@@ -62,6 +74,26 @@ public final class CurrentSubject {
 
   /** Separator between the class name and the identity hash of the identity handle. */
   private static final String IDENTITY_HANDLE_SEPARATOR = "@";
+
+  /**
+   * RF17 (CWE-779): minimum time between two WARN lines about the same failing
+   * {@link SubjectIdResolver} class - or about a resolver lookup that fails - in seconds;
+   * default 60. Every call in between still falls back to the identity handle.
+   */
+  public static final long RESOLVER_WARNING_INTERVAL_SECONDS = 60;
+
+  private static final long RESOLVER_WARNING_INTERVAL_NANOS =
+      TimeUnit.SECONDS.toNanos(RESOLVER_WARNING_INTERVAL_SECONDS);
+
+  /** Throttle key of a failing lookup; no class name contains parentheses. */
+  private static final String LOOKUP_FAILURE_KEY = "(lookup)";
+
+  /**
+   * RF17: when each key - a failing resolver class, or {@link #LOOKUP_FAILURE_KEY} - was last
+   * reported ({@link System#nanoTime()}). Bounded by the number of resolver classes; cleared
+   * by {@code JCustosServiceResolver.resetAll()}.
+   */
+  private static final ConcurrentMap<String, Long> RESOLVER_WARNINGS = new ConcurrentHashMap<>();
 
   private CurrentSubject() {
     throw new AssertionError("no instances");
@@ -133,21 +165,51 @@ public final class CurrentSubject {
    */
   public static String subjectIdOf(Object subject) {
     requireNonNull(subject, "subject must not be null");
+    Optional<SubjectIdResolver<Object>> resolver;
     try {
-      Optional<SubjectIdResolver<Object>> resolver = JCustosServiceResolver.findSubjectIdResolver();
-      if (resolver.isPresent()) {
+      resolver = JCustosServiceResolver.findSubjectIdResolver();
+    } catch (RuntimeException lookupFailure) {
+      // RF17: an ambiguous registration fails every lookup; one line a minute is enough
+      if (dueForWarning(LOOKUP_FAILURE_KEY)) {
+        HasLogger.staticLogger().warn("No SubjectIdResolver can be resolved ({}, for instance "
+                + "several registered); the identity handle stands in for the subject id "
+                + "(reported at most once every {} seconds)", lookupFailure.getClass().getName(),
+            RESOLVER_WARNING_INTERVAL_SECONDS);
+      }
+      return identityHandleOf(subject);
+    }
+    if (resolver.isPresent()) {
+      try {
         SubjectId resolved = resolver.get().resolve(subject);
         if (resolved != null && resolved.value() != null && !resolved.value().isBlank()) {
           return resolved.value();
         }
+      } catch (RuntimeException resolverFailure) {
+        // the classes only - the message of a failing resolver may carry what it was asked
+        // about. RF17: throttled per resolver class, the throttle is cleared by resetAll().
+        String resolverClass = resolver.get().getClass().getName();
+        if (dueForWarning(resolverClass)) {
+          HasLogger.staticLogger().warn("The SubjectIdResolver {} failed ({}); the identity handle "
+                  + "stands in for the subject id (reported at most once every {} seconds)",
+              resolverClass, resolverFailure.getClass().getName(), RESOLVER_WARNING_INTERVAL_SECONDS);
+        }
       }
-    } catch (RuntimeException resolverFailure) {
-      // the class only - the message of a failing resolver may carry what it was asked about.
-      // No warn-once flag: a JVM-wide flag would be state outside JCustosServiceResolver.resetAll().
-      HasLogger.staticLogger().warn("The SubjectIdResolver failed ({}); the identity handle stands "
-          + "in for the subject id.", resolverFailure.getClass().getName());
     }
     return identityHandleOf(subject);
+  }
+
+  /**
+   * The roles and permissions of the current subject, without its subject id: what a
+   * visibility decision needs (exit review RF17). Unlike {@link #currentJCustosSubject()} it
+   * does not consult the {@link SubjectIdResolver}, so a page with many secured components
+   * does not resolve the id once per component.
+   *
+   * @return the roles and permissions; empty when no subject is bound, a prerequisite is
+   *     missing or a lookup fails
+   * @since 00.84.00
+   */
+  public static Optional<RolesAndPermissions> currentRolesAndPermissions() {
+    return current().flatMap(CurrentSubject::rolesAndPermissionsOf);
   }
 
   /**
@@ -163,22 +225,13 @@ public final class CurrentSubject {
     if (subject.isEmpty()) {
       return Optional.empty();
     }
-    try {
-      Optional<AuthorizationService<Object>> authorization =
-          JCustosServiceResolver.findAuthorizationService();
-      if (authorization.isEmpty()) {
-        return Optional.empty();
-      }
-      Set<RoleName> roles = Set.copyOf(authorization.get().rolesFor(subject.get()).roleNames());
-      Set<PermissionName> permissions =
-          Set.copyOf(authorization.get().permissionsFor(subject.get()).permissionNames());
-      String subjectId = subjectIdOf(subject.get());
-      return Optional.of(new JCustosSubject(subjectId, subjectId, roles, permissions));
-    } catch (RuntimeException lookupFailure) {
-      HasLogger.staticLogger().debug("CurrentSubject: roles or permissions could not be resolved ({})",
-          lookupFailure.getClass().getName());
+    Optional<RolesAndPermissions> granted = rolesAndPermissionsOf(subject.get());
+    if (granted.isEmpty()) {
       return Optional.empty();
     }
+    String subjectId = subjectIdOf(subject.get());
+    return Optional.of(new JCustosSubject(subjectId, subjectId, granted.get().roles(),
+        granted.get().permissions()));
   }
 
   /**
@@ -199,6 +252,45 @@ public final class CurrentSubject {
     }
   }
 
+  /**
+   * Re-arms the warning throttle of {@link #subjectIdOf(Object)}; called by
+   * {@code JCustosServiceResolver.resetAll()}.
+   */
+  static void resetResolverWarnings() {
+    RESOLVER_WARNINGS.clear();
+  }
+
+  private static Optional<RolesAndPermissions> rolesAndPermissionsOf(Object subject) {
+    try {
+      Optional<AuthorizationService<Object>> authorization =
+          JCustosServiceResolver.findAuthorizationService();
+      if (authorization.isEmpty()) {
+        return Optional.empty();
+      }
+      return Optional.of(new RolesAndPermissions(
+          Set.copyOf(authorization.get().rolesFor(subject).roleNames()),
+          Set.copyOf(authorization.get().permissionsFor(subject).permissionNames())));
+    } catch (RuntimeException lookupFailure) {
+      HasLogger.staticLogger().debug("CurrentSubject: roles or permissions could not be resolved ({})",
+          lookupFailure.getClass().getName());
+      return Optional.empty();
+    }
+  }
+
+  /** @return {@code true} when {@code key} was not reported within the warning interval */
+  private static boolean dueForWarning(String key) {
+    long now = System.nanoTime();
+    boolean[] due = new boolean[1];
+    RESOLVER_WARNINGS.compute(key, (ignored, last) -> {
+      if (last == null || now - last >= RESOLVER_WARNING_INTERVAL_NANOS) {
+        due[0] = true;
+        return now;
+      }
+      return last;
+    });
+    return due[0];
+  }
+
   private static Class<?> subjectTypeOf(AuthenticationService<?, ?> authentication) {
     return authentication.subjectType();
   }
@@ -211,5 +303,33 @@ public final class CurrentSubject {
   @SuppressWarnings("unchecked")
   private static Class<Object> asObjectType(Class<?> type) {
     return (Class<Object>) type;
+  }
+
+  /**
+   * The roles and permissions of a subject, without its id (exit review RF17): the view a
+   * visibility decision works on. Both sets are copied.
+   *
+   * @param roles       the subject's roles; non-null
+   * @param permissions the subject's permissions; non-null
+   * @since 00.84.00
+   */
+  public record RolesAndPermissions(Set<RoleName> roles, Set<PermissionName> permissions)
+      implements HasRoles, HasPermissions {
+
+    /** Validates and copies the components. */
+    public RolesAndPermissions {
+      roles = Set.copyOf(requireNonNull(roles, "roles must not be null"));
+      permissions = Set.copyOf(requireNonNull(permissions, "permissions must not be null"));
+    }
+
+    @Override
+    public Set<RoleName> roleNames() {
+      return roles;
+    }
+
+    @Override
+    public Set<PermissionName> permissionNames() {
+      return permissions;
+    }
   }
 }

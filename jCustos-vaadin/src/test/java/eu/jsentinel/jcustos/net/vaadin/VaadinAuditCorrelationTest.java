@@ -49,15 +49,23 @@ import org.slf4j.event.Level;
 import org.slf4j.helpers.AbstractLogger;
 import org.slf4j.helpers.MessageFormatter;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -72,6 +80,9 @@ class VaadinAuditCorrelationTest extends BrowserlessTest {
 
   private static final String PROXY_ID = "caddy-4f1c2b9e-77aa-4c3e-9d0b-6a1f0c2d3e4f";
   private static final String FORGED_ID = "attacker-chosen-id";
+  /** RF01: one refused request, then the 1000 more of the acceptance test. */
+  private static final int REFUSED_REQUESTS = 1 + 1000;
+  private static final Pattern STALE_SCOPE_WARNING = Pattern.compile("audit/correlation-scope-stale");
 
   @Route("audit-correlation-fixture")
   public static class Fixture extends Div {
@@ -177,7 +188,127 @@ class VaadinAuditCorrelationTest extends BrowserlessTest {
     assertTrue(!lines.getFirst().contains("corr="), lines.getFirst());
   }
 
+  // ── RF01: a request whose end never comes ───────────────────────
+
+  @Test
+  @DisplayName("RF01: 1001 requests refused by a later interceptor leave no scope; the next request audits its own id")
+  void refusedRequestsLeaveNoScopeBehind() {
+    MockRequest mock = currentMockRequest();
+    VaadinService service = VaadinService.getCurrent();
+    VaadinRequest request = VaadinRequest.getCurrent();
+    VaadinResponse response = VaadinResponse.getCurrent();
+    List<VaadinRequestInterceptor> interceptors = new ArrayList<>();
+    service.getVaadinRequestInterceptors().forEach(interceptors::add);
+    assertTrue(indexOf(interceptors, VaadinAuditCorrelation.class)
+            < indexOf(interceptors, RefusingInterceptorServiceInitListener.Refusing.class),
+        "precondition: the application's interceptor runs after the correlation scope opened: "
+            + interceptors);
+    VaadinAuditCorrelation.resetStaleScopeWarning();
+    mock.getHeaders().put(RefusingInterceptorServiceInitListener.REFUSE_HEADER, List.of("1"));
+
+    String log = capturingStdErr(() -> {
+      for (int i = 0; i < REFUSED_REQUESTS; i++) {
+        request.removeAttribute(VaadinAuditCorrelation.SCOPE_ATTRIBUTE); // a new request
+        // VaadinService.handleRequest calls requestStart outside its try/finally: requestEnd
+        // never comes for these requests
+        assertThrows(IllegalStateException.class, () -> service.requestStart(request, response));
+      }
+    });
+    String refused = AuditCorrelation.current().orElseThrow(
+        () -> new AssertionError("precondition: the last refused request's scope is open"));
+    assertEquals(1, chainDepth(), "the scopes of the refused requests do not pile up");
+
+    // the next request on the same pooled thread, handled normally
+    mock.getHeaders().remove(RefusingInterceptorServiceInitListener.REFUSE_HEADER);
+    request.removeAttribute(VaadinAuditCorrelation.SCOPE_ATTRIBUTE);
+    useStoreAndLog();
+    service.requestStart(request, response);
+    String own = AuditCorrelation.current().orElseThrow();
+    assertNotEquals(refused, own, "the request audits under its own id");
+    assertEquals(1, chainDepth(), "the scope of the last refused request was closed first");
+    JCustosServiceResolver.securityAuditService().publish(loginFailed());
+    // as VaadinService.requestEnd does - which also clears every current instance the
+    // browserless test still needs
+    registered().requestEnd(request, response, VaadinSession.getCurrent());
+
+    assertEquals(Optional.empty(), AuditCorrelation.current(),
+        "after the request the pooled thread carries no correlation id");
+    JCustosServiceResolver.securityAuditService().publish(loginFailed());
+    List<AuditEnvelope> envelopes = store.query(TenantId.DEFAULT, AuditQuery.all());
+    assertEquals(2, envelopes.size(), envelopes.toString());
+    assertEquals(List.of(own), envelopes.stream().map(AuditEnvelope::correlationId)
+        .filter(id -> id != null).toList(), "the request's event carries its own id");
+    assertNull(envelopes.stream().filter(e -> !own.equals(e.correlationId())).findFirst()
+        .orElseThrow().correlationId(), "an event after the request carries no id: " + envelopes);
+    assertTrue(!lines.getLast().contains("corr="), lines.getLast());
+    assertEquals(1, count(STALE_SCOPE_WARNING, log), "reported once per JVM: " + log);
+  }
+
+  @Test
+  @DisplayName("RF01 control: a scope that resetAll() already ended is dropped without a warning")
+  void scopeEndedByResetAll_noWarning() {
+    MockRequest mock = currentMockRequest();
+    VaadinService service = VaadinService.getCurrent();
+    VaadinRequest request = VaadinRequest.getCurrent();
+    VaadinResponse response = VaadinResponse.getCurrent();
+    VaadinAuditCorrelation.resetStaleScopeWarning();
+    mock.getHeaders().put(RefusingInterceptorServiceInitListener.REFUSE_HEADER, List.of("1"));
+    assertThrows(IllegalStateException.class, () -> service.requestStart(request, response));
+    JCustosServiceResolver.resetAll();
+    assertEquals(Optional.empty(), AuditCorrelation.current(), "RF21: the reset ends the scope");
+    mock.getHeaders().remove(RefusingInterceptorServiceInitListener.REFUSE_HEADER);
+    request.removeAttribute(VaadinAuditCorrelation.SCOPE_ATTRIBUTE);
+
+    String log = capturingStdErr(() -> {
+      service.requestStart(request, response);
+      registered().requestEnd(request, response, VaadinSession.getCurrent());
+    });
+
+    assertEquals(0, count(STALE_SCOPE_WARNING, log), log);
+    assertEquals(Optional.empty(), AuditCorrelation.current());
+  }
+
   // ── helpers ────────────────────────────────────────────────────
+
+  /** The number of scopes on the thread's chain, read from {@code AuditCorrelation.Scope}. */
+  private static int chainDepth() {
+    try {
+      Field current = AuditCorrelation.class.getDeclaredField("CURRENT");
+      current.setAccessible(true);
+      Field previous = AuditCorrelation.Scope.class.getDeclaredField("previous");
+      previous.setAccessible(true);
+      int depth = 0;
+      for (Object scope = ((ThreadLocal<?>) current.get(null)).get(); scope != null;
+           scope = previous.get(scope)) {
+        depth++;
+      }
+      return depth;
+    } catch (ReflectiveOperationException e) {
+      throw new AssertionError("the scope chain of AuditCorrelation could not be read", e);
+    }
+  }
+
+  private static int count(Pattern pattern, String text) {
+    Matcher matcher = pattern.matcher(text);
+    int found = 0;
+    while (matcher.find()) {
+      found++;
+    }
+    return found;
+  }
+
+  /** Runs {@code action} and returns what slf4j-simple wrote to {@code System.err} meanwhile. */
+  private static String capturingStdErr(Runnable action) {
+    PrintStream original = System.err;
+    ByteArrayOutputStream captured = new ByteArrayOutputStream();
+    System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+    try {
+      action.run();
+    } finally {
+      System.setErr(original);
+    }
+    return captured.toString(StandardCharsets.UTF_8);
+  }
 
   /** requestStart, an audit event, requestEnd - as Vaadin brackets every request. */
   private AuditEnvelope auditWithinRequest() {

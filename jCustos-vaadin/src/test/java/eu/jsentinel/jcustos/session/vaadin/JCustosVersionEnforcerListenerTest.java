@@ -21,8 +21,11 @@ import eu.jsentinel.jcustos.audit.AuditEvent;
 import eu.jsentinel.jcustos.audit.AuditQuery;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.SessionStale;
+import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
+import eu.jsentinel.jcustos.credential.propagation.BearerToken;
+import eu.jsentinel.jcustos.credential.propagation.vaadin.VaadinSessionTokenCredentialStore;
 import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import eu.jsentinel.jcustos.session.JCustosVersion;
@@ -48,6 +51,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -69,6 +73,7 @@ class JCustosVersionEnforcerListenerTest {
   @BeforeEach
   void setUp() {
     CurrentInstance.clearAll();
+    JCustosServiceResolver.resetAll();
     SubjectStores.reset();
     versionStore = new InMemoryJCustosVersionStore();
     audit = new CollectingAuditService();
@@ -80,6 +85,7 @@ class JCustosVersionEnforcerListenerTest {
   @AfterEach
   void teardown() {
     CurrentInstance.clearAll();
+    JCustosServiceResolver.resetAll();
     SubjectStores.reset();
   }
 
@@ -163,6 +169,29 @@ class JCustosVersionEnforcerListenerTest {
     assertSame(DummyLoginView.class, event.rerouteTarget);
     assertTrue(SubjectStores.subjectStore().currentSubject(String.class).isEmpty(),
         "drift must drop the cached subject (JS-SEC-002)");
+  }
+
+  @Test
+  @DisplayName("RF20: drift on navigation drops a bound token credential, as the UIDL, push and bridge paths do")
+  void driftDropsBoundTokenCredential() {
+    InMemoryVaadinSession session = bindSession();
+    VaadinSessionTokenCredentialStore tokens = new VaadinSessionTokenCredentialStore();
+    JCustosServiceResolver.setTokenCredentialStore(tokens);
+    tokens.bind(new BearerToken("old-access-token", Optional.empty(), Optional.empty(),
+        Optional.empty()));
+    VaadinJCustosVersionContext.record(session, ALICE, TenantId.DEFAULT,
+        JCustosVersion.INITIAL, "sid-11");
+    versionStore.increment(ALICE_KEY);
+
+    RecordingEvent event = new RecordingEvent();
+    VaadinSession.setCurrent(session);
+    assertTrue(tokens.current().isPresent(), "precondition: the session carries a bearer token");
+    listener.beforeEnter(event);
+
+    assertSame(DummyLoginView.class, event.rerouteTarget);
+    assertTrue(tokens.current().isEmpty(),
+        "the drifted session must not keep the old bearer token for outbound propagation");
+    assertTrue(VaadinJCustosVersionContext.current(session).isEmpty());
   }
 
   @Test

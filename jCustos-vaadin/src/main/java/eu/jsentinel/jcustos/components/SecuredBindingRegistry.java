@@ -20,11 +20,15 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.ComponentUtil;
+import com.vaadin.flow.component.HasEnabled;
 import com.vaadin.flow.component.UI;
+import com.vaadin.flow.internal.CurrentInstance;
+import com.vaadin.flow.server.VaadinSession;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -58,9 +62,21 @@ import static java.util.Objects.requireNonNull;
  * while their UI is current. A component that turns up in another UI is dropped from the
  * first one by the next {@link #refreshAll(UI)}.
  * <p>
- * <strong>Locking.</strong> Like every change to a component, {@link #refreshAll(UI)} needs the
- * session lock of the UI: call it from a listener, a navigation observer or inside
- * {@code ui.access(...)}.
+ * <strong>Several bindings on one component</strong> (exit review RF18) combine with AND: the
+ * component is shown and enabled only when every binding allows it, hidden when one of them
+ * hides it or cannot be evaluated, and disabled when one disables it. A {@code SecuredButton}
+ * that {@code SecuredUi.action(...)} binds to a second requirement therefore needs both. Until
+ * then each binding applied its own verdict and the last one won - a later binding could show
+ * a control an earlier one had hidden, a failing one included. The combined verdict is applied
+ * by {@link #refreshAll(UI)}, when a second binding is registered, and after every attach, once
+ * the bindings re-evaluated themselves; a binding's own {@code refresh()} still applies its own
+ * requirement only.
+ * <p>
+ * <strong>Locking and subject.</strong> Like every change to a component, {@link #refreshAll(UI)}
+ * needs the session lock of the UI: call it from a listener, a navigation observer or inside
+ * {@code ui.access(...)}. It refuses to run without that lock, and it evaluates with {@code ui}
+ * and its session bound as current, so the bindings see the subject of that session - not the
+ * subject of whoever calls it (exit review RF19).
  *
  * @since 00.84.00
  */
@@ -73,9 +89,11 @@ public final class SecuredBindingRegistry {
 
   /**
    * Registers a binding: {@code refresh} applies the requirement of {@code component} again.
-   * The registry does not run it now - the caller evaluated the requirement already - and
-   * does not run it on attach; it runs it from {@link #refreshAll(UI)}. A component may carry
-   * several bindings; each is refreshed.
+   * The registry does not run a component's first binding now - the caller evaluated the
+   * requirement already - and does not run it on attach; it runs it from
+   * {@link #refreshAll(UI)}. A component may carry several bindings, which combine with AND
+   * (RF18): when a second one is registered, all of them are evaluated at once and the combined
+   * verdict is applied, and again after every attach of the component.
    *
    * @param component the secured component; non-null
    * @param refresh   evaluates the requirement and applies the result to the component;
@@ -86,11 +104,19 @@ public final class SecuredBindingRegistry {
     requireNonNull(refresh, "refresh must not be null");
     Bindings bindings = ComponentUtil.getData(component, Bindings.class);
     if (bindings == null) {
-      bindings = new Bindings();
-      ComponentUtil.setData(component, Bindings.class, bindings);
-      component.addAttachListener(attach -> track(attach.getUI(), attach.getSource()));
+      Bindings created = new Bindings();
+      bindings = created;
+      ComponentUtil.setData(component, Bindings.class, created);
+      component.addAttachListener(attach -> {
+        track(attach.getUI(), attach.getSource());
+        combineAfterAttach(attach.getUI(), attach.getSource(), created);
+      });
     }
     bindings.refreshers.add(refresh);
+    if (bindings.refreshers.size() > 1) {
+      // RF18: the caller evaluated its own requirement only; show the combined verdict
+      refresh(component, bindings);
+    }
     UI ui = component.getUI().orElseGet(UI::getCurrent);
     if (ui != null) {
       track(ui, component);
@@ -101,34 +127,54 @@ public final class SecuredBindingRegistry {
    * Evaluates every binding registered with {@code ui} again and drops the components that
    * were garbage-collected or now belong to another UI. A refresh that throws is logged with
    * the class of the component and of the exception, and the component is hidden: a binding
-   * that cannot be evaluated does not show its control (fail closed). Call it with the session
-   * lock of {@code ui} held.
+   * that cannot be evaluated does not show its control (fail closed). Several bindings of one
+   * component combine with AND (RF18).
+   * <p>
+   * RF19: the bindings are evaluated with {@code ui} - and with it its session and service -
+   * bound as current, as {@code ui.access(...)} binds them, so they decide on the subject of
+   * {@code ui}'s session even when another session's request calls this method. The previous
+   * current instances are restored afterwards.
    *
    * @param ui the UI whose bindings are refreshed; non-null
-   * @return the number of components that were refreshed
+   * @return the number of components that were refreshed; 0 for a UI without a session
+   * @throws IllegalStateException when the calling thread does not hold the session lock of
+   *                               {@code ui}
    */
   public static int refreshAll(UI ui) {
     requireNonNull(ui, "ui must not be null");
+    VaadinSession session = ui.getSession();
+    if (session == null) {
+      return 0; // a detached UI shows nothing any more
+    }
+    if (!session.hasLock()) {
+      throw new IllegalStateException("refreshAll(ui) needs the session lock of ui - call it "
+          + "inside ui.access(...)");
+    }
     Tracked tracked = ComponentUtil.getData(ui, Tracked.class);
     if (tracked == null) {
       return 0;
     }
-    int refreshed = 0;
-    for (Component component : tracked.snapshot()) {
-      Optional<UI> owner = component.getUI();
-      if (owner.isPresent() && owner.get() != ui) {
-        tracked.remove(component);
-        continue;
+    Map<Class<?>, CurrentInstance> previous = CurrentInstance.setCurrent(ui);
+    try {
+      int refreshed = 0;
+      for (Component component : tracked.snapshot()) {
+        Optional<UI> owner = component.getUI();
+        if (owner.isPresent() && owner.get() != ui) {
+          tracked.remove(component);
+          continue;
+        }
+        Bindings bindings = ComponentUtil.getData(component, Bindings.class);
+        if (bindings == null) {
+          tracked.remove(component);
+          continue;
+        }
+        refresh(component, bindings);
+        refreshed++;
       }
-      Bindings bindings = ComponentUtil.getData(component, Bindings.class);
-      if (bindings == null) {
-        tracked.remove(component);
-        continue;
-      }
-      refresh(component, bindings);
-      refreshed++;
+      return refreshed;
+    } finally {
+      CurrentInstance.restoreInstances(previous);
     }
-    return refreshed;
   }
 
   /**
@@ -142,17 +188,58 @@ public final class SecuredBindingRegistry {
   }
 
   private static void refresh(Component component, Bindings bindings) {
-    for (Runnable refresher : bindings.refreshers) {
+    List<Runnable> refreshers = List.copyOf(bindings.refreshers);
+    if (refreshers.size() == 1) {
       try {
-        refresher.run();
+        refreshers.getFirst().run();
       } catch (RuntimeException refreshFailure) {
         // fail closed: a control whose requirement cannot be evaluated is not shown
-        HasLogger.staticLogger().warn("Refreshing the secured binding of a {} failed with {}; "
-                + "the component is hidden", component.getClass().getName(),
-            refreshFailure.getClass().getName());
+        logRefreshFailure(component, refreshFailure);
         component.setVisible(false);
       }
+      return;
     }
+    // RF18: every binding applies its own verdict; the combined one is read off after each
+    boolean visible = true;
+    boolean enabled = true;
+    for (Runnable refresher : refreshers) {
+      try {
+        refresher.run();
+        visible &= component.isVisible();
+        enabled &= isEnabledSelf(component);
+      } catch (RuntimeException refreshFailure) {
+        logRefreshFailure(component, refreshFailure);
+        visible = false; // a binding that cannot be evaluated hides its control
+      }
+    }
+    applyCombined(component, visible, enabled);
+  }
+
+  /** RF18: a disabled or hidden verdict of one binding is not undone by another. */
+  private static void applyCombined(Component component, boolean visible, boolean enabled) {
+    if (component instanceof HasEnabled hasEnabled) {
+      hasEnabled.setEnabled(enabled);
+    }
+    // JS-SEC-153: visibility last, so nothing set before can undo a hide
+    component.setVisible(visible);
+  }
+
+  /** The component's own enabled flag; a disabled parent is not the bindings' verdict. */
+  private static boolean isEnabledSelf(Component component) {
+    return !(component instanceof HasEnabled) || component.getElement().getNode().isEnabledSelf();
+  }
+
+  /** Runs once the bindings re-evaluated themselves on attach, so the last one does not win. */
+  private static void combineAfterAttach(UI ui, Component component, Bindings bindings) {
+    if (bindings.refreshers.size() > 1) {
+      ui.beforeClientResponse(component, context -> refresh(component, bindings));
+    }
+  }
+
+  private static void logRefreshFailure(Component component, RuntimeException refreshFailure) {
+    HasLogger.staticLogger().warn("Refreshing the secured binding of a {} failed with {}; "
+            + "the component is hidden", component.getClass().getName(),
+        refreshFailure.getClass().getName());
   }
 
   private static void track(UI ui, Component component) {

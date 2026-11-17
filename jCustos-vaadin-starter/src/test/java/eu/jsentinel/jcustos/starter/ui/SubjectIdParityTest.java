@@ -48,10 +48,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * JS-SEC-097 (CWE-1041, CWE-532), acceptance of ER30, starter half: the same subject yields
- * the same subject id in {@link SecuredVisibility} and in the policy context of
- * {@code SecuredUi.requiresPolicy(...)} as {@link CurrentSubject#subjectIdOf(Object)} - with
- * a registered {@code SubjectIdResolver} the resolver value, without one the identity handle.
- * Neither carries the subject's {@code toString()}.
+ * the same subject id in the policy context of {@code SecuredUi.requiresPolicy(...)} as
+ * {@link CurrentSubject#subjectIdOf(Object)} - with a registered {@code SubjectIdResolver} the
+ * resolver value, without one the identity handle - and {@link SecuredVisibility} decides on
+ * that subject's roles. Neither carries the subject's {@code toString()}. Since exit review
+ * RF17 the view of {@code SecuredVisibility} carries no subject id: no requirement reads one.
  * <p>
  * The navigation context, the session-lifetime listener and the login rotation are compared
  * with {@code SecuredVisibility} and {@code CurrentSubject} in jCustos-vaadin's
@@ -106,7 +107,7 @@ class SubjectIdParityTest {
 
   @ParameterizedTest(name = "resolver registered: {0}")
   @ValueSource(booleans = {true, false})
-  @DisplayName("SecuredVisibility and the policy context derive the subject id of CurrentSubject")
+  @DisplayName("the policy context derives the subject id of CurrentSubject; SecuredVisibility sees the same subject")
   void sameSubjectIdEverywhere(boolean withResolver) {
     if (withResolver) {
       JCustosServiceResolver.<PiiUser>setSubjectIdResolver(user -> SubjectId.of("user-7"));
@@ -118,11 +119,13 @@ class SubjectIdParityTest {
     Map<String, String> ids = new LinkedHashMap<>();
     Map<String, String> displayNames = new LinkedHashMap<>();
 
-    // 1. the view SecuredButton / SecuredRouterLink / SecuredMenuItem decide on
+    // 1. the view SecuredButton / SecuredRouterLink / SecuredMenuItem decide on: the roles of
+    // the facade's subject, without a subject id since RF17
     SecuredVisibility.JCustosView view = SecuredVisibility.currentJCustosView().orElseThrow();
-    JCustosSubject secured = assertInstanceOf(JCustosSubject.class, view.roles(),
+    CurrentSubject.RolesAndPermissions secured = assertInstanceOf(
+        CurrentSubject.RolesAndPermissions.class, view.roles(),
         "the components decide on the facade's subject");
-    ids.put("SecuredVisibility", secured.subjectId());
+    assertEquals(Set.of(new RoleName("ADMIN")), secured.roles());
 
     // 2. the context a policy of SecuredUi.requiresPolicy(...) sees
     Div guarded = SecuredUi.component(new Div()).requiresPolicy(POLICY).bind();
@@ -135,7 +138,7 @@ class SubjectIdParityTest {
     displayNames.forEach((site, name) -> assertEquals(expected, name,
         site + ": the display name is the subject id, never toString()"));
     assertEquals(expected, CurrentSubject.subjectIdOf(alice));
-    for (JCustosSubject subject : List.of(secured, policy)) {
+    for (Object subject : List.of(secured, policy)) {
       assertFalse(subject.toString().contains(SECRET), "the credential in toString() leaked: " + subject);
       assertFalse(subject.toString().contains("alice@example.test"), "the e-mail leaked: " + subject);
     }

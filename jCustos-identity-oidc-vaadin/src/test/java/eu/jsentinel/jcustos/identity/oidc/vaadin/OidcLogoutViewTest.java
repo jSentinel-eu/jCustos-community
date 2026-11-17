@@ -63,7 +63,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -239,6 +242,30 @@ class OidcLogoutViewTest {
 
     assertLoggedOutLocally();
     assertTrue(redirectLocation().startsWith(END_SESSION + "?"), redirectLocation());
+  }
+
+  @Test
+  @DisplayName("(b) RF33: a throwing onBeforeLogout() is logged with its class, never with its message")
+  void throwingHook_messageNotLogged() {
+    LogoutView.beforeLogout = () -> {
+      throw new IllegalStateException("teardown failed for alice@example.test with key k-SECRET-4711");
+    };
+
+    PrintStream original = System.err;
+    ByteArrayOutputStream captured = new ByteArrayOutputStream();
+    System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+    try {
+      ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+    } finally {
+      System.setErr(original);
+    }
+    String log = captured.toString(StandardCharsets.UTF_8);
+
+    assertLoggedOutLocally();
+    assertTrue(log.contains("onBeforeLogout() failed with " + IllegalStateException.class.getName()),
+        "the failure is reported with its class: " + log);
+    assertFalse(log.contains("alice@example.test") || log.contains("k-SECRET-4711"),
+        "the application's exception message must not reach the log: " + log);
   }
 
   @Test

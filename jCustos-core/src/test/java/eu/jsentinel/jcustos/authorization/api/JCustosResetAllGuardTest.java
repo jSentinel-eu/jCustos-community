@@ -22,10 +22,13 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import eu.jsentinel.jcustos.audit.AuditCorrelation;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.bruteforce.NoopLoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
+import eu.jsentinel.jcustos.credential.propagation.HeaderValue;
+import eu.jsentinel.jcustos.credential.propagation.OutboundHeaderContext;
 import eu.jsentinel.jcustos.jwt.api.JwtValidator;
 import eu.jsentinel.jcustos.session.NoopSessionPolicy;
 import eu.jsentinel.jcustos.session.SessionPolicy;
@@ -33,6 +36,8 @@ import eu.jsentinel.jcustos.session.SessionPolicy;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -41,6 +46,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -71,14 +78,18 @@ import org.junit.jupiter.api.Test;
  *       documented exception ({@link #DELIBERATE_EXCEPTIONS}), so a new holder class cannot
  *       escape the reset unnoticed.</li>
  * </ul>
+ * A {@link ThreadLocal} static counts as mutable state too (exit review RF21): the reset clears
+ * the calling thread's value - the correlation scope of {@link AuditCorrelation}, the header
+ * bound in {@link OutboundHeaderContext} - since that is the thread the next test runs on.
  * A slot of a kind the guard does not understand fails the test with instructions rather than
  * being skipped. No mocks: plain reference slots are filled with real framework types.
  */
 class JCustosResetAllGuardTest {
 
   /** The classes whose static state {@link JCustosServiceResolver#resetAll()} clears. */
-  private static final List<Class<?>> RESET_SCOPE =
-      List.of(JCustosServiceResolver.class, JCustosContext.class, SubjectStores.class);
+  private static final List<Class<?>> RESET_SCOPE = List.of(JCustosServiceResolver.class,
+      JCustosContext.class, SubjectStores.class, CurrentSubject.class, AuditCorrelation.class,
+      OutboundHeaderContext.class);
 
   private static final String WARN_ONCE_AUDIT = "JS-SEC-080 warn-once flag of the Noop audit "
       + "fallback and its counter: JVM-wide by design, not state of a context, re-armed only by "
@@ -136,9 +147,17 @@ class JCustosResetAllGuardTest {
   private static final Object SENTINEL = new Object();
   private static final String SENTINEL_KEY = "er29-reset-guard";
 
+  /**
+   * Real values for {@link ThreadLocal} slots, keyed by the type argument of the slot: the code
+   * that clears a thread-local may read the value it removes, so a plain sentinel would not do.
+   */
+  private static final Map<Class<?>, Supplier<Object>> THREAD_LOCAL_SAMPLES = Map.of(
+      AuditCorrelation.Scope.class, () -> AuditCorrelation.open(SENTINEL_KEY),
+      HeaderValue.class, () -> new HeaderValue("X-Er29-Reset-Guard", SENTINEL_KEY));
+
   /** How the guard fills and inspects a slot. */
   private enum Kind {
-    REFERENCE_HOLDER, BOOLEAN_HOLDER, INT_HOLDER, LONG_HOLDER, MAP, COLLECTION,
+    REFERENCE_HOLDER, BOOLEAN_HOLDER, INT_HOLDER, LONG_HOLDER, MAP, COLLECTION, THREAD_LOCAL,
     PLAIN_REFERENCE, PLAIN_PRIMITIVE, CONSTANT, CONTEXT, UNKNOWN
   }
 
@@ -179,6 +198,44 @@ class JCustosResetAllGuardTest {
     isolated.setJwtValidator(validator);
     isolated.resetAll();
     assertTrue(isolated.findJwtValidator().isEmpty());
+  }
+
+  @Test
+  @DisplayName("RF21: resetAll() ends the calling thread's correlation scopes and bound header; other threads keep theirs")
+  void resetAllClearsTheCallingThreadsRequestState() throws InterruptedException {
+    AuditCorrelation.Scope outer = AuditCorrelation.open("leaked-outer");
+    AuditCorrelation.Scope inner = AuditCorrelation.open("leaked-inner");
+    OutboundHeaderContext.bind(new HeaderValue("Authorization", "Bearer leaked"));
+    CountDownLatch opened = new CountDownLatch(1);
+    CountDownLatch resetDone = new CountDownLatch(1);
+    AtomicReference<Optional<String>> seenByOtherThread = new AtomicReference<>();
+    Thread other = new Thread(() -> {
+      try (AuditCorrelation.Scope ignored = AuditCorrelation.open("other-thread")) {
+        opened.countDown();
+        resetDone.await();
+        seenByOtherThread.set(AuditCorrelation.current());
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+      }
+    }, "rf21-other-request");
+    other.start();
+    opened.await();
+
+    JCustosServiceResolver.resetAll();
+    resetDone.countDown();
+    other.join();
+
+    assertEquals(Optional.empty(), AuditCorrelation.current(),
+        "a scope left open must not lend its id to the next test on this thread");
+    assertFalse(outer.isOpen() || inner.isOpen(), "every scope of the thread counts as closed");
+    inner.close();
+    outer.close();
+    assertEquals(Optional.empty(), AuditCorrelation.current(), "a late close changes nothing");
+    assertTrue(OutboundHeaderContext.current().isEmpty(), "the bound header is gone");
+    OutboundHeaderContext.bind(new HeaderValue("Authorization", "Bearer next"));
+    OutboundHeaderContext.clear();
+    assertEquals(Optional.of("other-thread"), seenByOtherThread.get(),
+        "only the calling thread is reset");
   }
 
   @Test
@@ -237,6 +294,8 @@ class JCustosResetAllGuardTest {
       }
       assertTrue(saved.containsKey(SubjectStores.class.getDeclaredField("SUBJECT_STORE_REF")),
           "the guard must at least see the SubjectStores slot");
+      assertTrue(saved.containsKey(AuditCorrelation.class.getDeclaredField("CURRENT")),
+          "the guard must see the thread-local correlation scope (RF21)");
 
       JCustosServiceResolver.resetAll();
 
@@ -339,6 +398,9 @@ class JCustosResetAllGuardTest {
 
   private static Kind kindOf(Field slot) {
     Class<?> type = slot.getType();
+    if (ThreadLocal.class.isAssignableFrom(type)) {
+      return Kind.THREAD_LOCAL;
+    }
     if (AtomicReference.class.isAssignableFrom(type)) {
       return Kind.REFERENCE_HOLDER;
     }
@@ -377,7 +439,8 @@ class JCustosResetAllGuardTest {
     return !Modifier.isFinal(slot.getModifiers())
         || type.getPackageName().equals(AtomicReference.class.getPackageName())
         || Map.class.isAssignableFrom(type)
-        || Collection.class.isAssignableFrom(type);
+        || Collection.class.isAssignableFrom(type)
+        || ThreadLocal.class.isAssignableFrom(type);
   }
 
   @SuppressWarnings({"unchecked", "rawtypes"})
@@ -390,6 +453,7 @@ class JCustosResetAllGuardTest {
       case LONG_HOLDER -> ((AtomicLong) value).incrementAndGet();
       case MAP -> ((Map) value).put(SENTINEL_KEY, SENTINEL);
       case COLLECTION -> ((Collection) value).add(SENTINEL);
+      case THREAD_LOCAL -> ((ThreadLocal<Object>) value).set(threadLocalSample(slot));
       case PLAIN_REFERENCE -> slot.set(owner, sample(slot));
       case PLAIN_PRIMITIVE -> slot.set(owner, otherPrimitive(slot, value));
       default -> fail(unknownKind(slot));
@@ -406,6 +470,7 @@ class JCustosResetAllGuardTest {
       case LONG_HOLDER -> ((AtomicLong) value).get();
       case MAP -> new HashMap<>((Map<?, ?>) value);
       case COLLECTION -> new ArrayList<>((Collection<?>) value);
+      case THREAD_LOCAL -> new Identity(((ThreadLocal<?>) value).get());
       case PLAIN_REFERENCE -> new Identity(value);
       case PLAIN_PRIMITIVE -> value;
       default -> throw new AssertionError(unknownKind(slot));
@@ -429,6 +494,14 @@ class JCustosResetAllGuardTest {
         ((Collection) value).clear();
         ((Collection) value).addAll((Collection) snapshot);
       }
+      case THREAD_LOCAL -> {
+        Object previous = ((Identity) snapshot).value();
+        if (previous == null) {
+          ((ThreadLocal<?>) value).remove();
+        } else {
+          ((ThreadLocal<Object>) value).set(previous);
+        }
+      }
       case PLAIN_REFERENCE -> slot.set(owner, ((Identity) snapshot).value());
       case PLAIN_PRIMITIVE -> slot.set(owner, snapshot);
       default -> throw new AssertionError(unknownKind(slot));
@@ -445,6 +518,7 @@ class JCustosResetAllGuardTest {
       case LONG_HOLDER -> ((AtomicLong) value).get() == 0L;
       case MAP -> ((Map<?, ?>) value).isEmpty();
       case COLLECTION -> ((Collection<?>) value).isEmpty();
+      case THREAD_LOCAL -> ((ThreadLocal<?>) value).get() == null;
       case PLAIN_REFERENCE -> value == null;
       case PLAIN_PRIMITIVE -> isZero(value);
       default -> throw new AssertionError(unknownKind(slot));
@@ -461,6 +535,20 @@ class JCustosResetAllGuardTest {
     if (sample == null) {
       fail("no sample value for " + key(slot) + " of type " + slot.getType().getName()
           + "; add a real instance of that type to SAMPLES");
+    }
+    return sample.get();
+  }
+
+  /** A real value of the slot's type argument, so the reset can read what it clears. */
+  private static Object threadLocalSample(Field slot) {
+    Type generic = slot.getGenericType();
+    Type argument = generic instanceof ParameterizedType parameterized
+        ? parameterized.getActualTypeArguments()[0]
+        : null;
+    Supplier<Object> sample = argument instanceof Class<?> type ? THREAD_LOCAL_SAMPLES.get(type) : null;
+    if (sample == null) {
+      fail("no sample value for the thread-local " + key(slot) + " of type " + generic
+          + "; add a real instance of its type argument to THREAD_LOCAL_SAMPLES");
     }
     return sample.get();
   }

@@ -314,7 +314,8 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
         ui.getPage().setLocation(target);
       }
     } catch (RuntimeException navigationFailure) {
-      logger().warn("OIDC logout: sending the browser on failed: {}", navigationFailure.toString());
+      // the class only: the message can repeat the target URL, which carries the id_token_hint
+      logger().warn("OIDC logout: sending the browser on failed: {}", navigationFailure.getClass().getName());
     }
   }
 
@@ -363,8 +364,10 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
     try {
       onBeforeLogout();
     } catch (RuntimeException hookFailure) {
-      logger().warn("OIDC logout: onBeforeLogout() failed, the logout continues: {}",
-          hookFailure.toString());
+      // RF33: the class only - the message of the application's exception may carry what the
+      // hook worked on (a user name, a file path, a token)
+      logger().warn("OIDC logout: onBeforeLogout() failed with {}, the logout continues",
+          hookFailure.getClass().getName());
     }
   }
 

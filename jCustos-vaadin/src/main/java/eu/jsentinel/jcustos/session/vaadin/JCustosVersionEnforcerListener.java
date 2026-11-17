@@ -18,7 +18,6 @@ package eu.jsentinel.jcustos.session.vaadin;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.SessionRef;
-import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer;
 import eu.jsentinel.jcustos.session.JCustosVersionEnforcer.EnforcementOutcome;
@@ -59,7 +58,10 @@ import static java.util.Objects.requireNonNull;
  *   <li>The cached subject is dropped from the {@code SubjectStore} so the
  *       next navigation is evaluated as unauthenticated — revocation is
  *       actually enforced, not just deflected once (JS-SEC-002 / CWE-613).</li>
- *   <li>The recorded snapshot is cleared from the session.</li>
+ *   <li>The recorded snapshot is cleared from the session, and a bound token
+ *       credential is dropped as on the other paths (exit review RF20,
+ *       CWE-613): the session stays open on the login view, and outbound
+ *       propagation must not keep using the old bearer token there.</li>
  *   <li>{@code BeforeEnterEvent#rerouteTo} sends the user to the
  *       supplied target — typically the login view.</li>
  * </ol>
@@ -134,10 +136,10 @@ public final class JCustosVersionEnforcerListener
       // granted against the stale subject, so revocation was never enforced
       // beyond the single reroute.
       // JS-SEC-097: best effort through the shared facade; a failure never blocks the reroute.
-      CurrentSubject.clear();
-      // Clear the snapshot so subsequent requests aren't re-checked
-      // against the stale value while the user is on the login page.
-      VaadinJCustosVersionContext.clear(VaadinSession.getCurrent());
+      // The snapshot is cleared so subsequent requests aren't re-checked against the stale
+      // value while the user is on the login page. RF20 (CWE-613): the bound token credential
+      // goes as well - the UIDL, push and bridge paths dropped it, this one kept it.
+      SessionTermination.clearIdentity(VaadinSession.getCurrent());
       event.rerouteTo(rerouteTargetOnStale);
     }
   }

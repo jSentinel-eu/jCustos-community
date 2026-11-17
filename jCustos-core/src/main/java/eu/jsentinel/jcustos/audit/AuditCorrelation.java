@@ -45,6 +45,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * call in between. Scopes nest; closing one restores the value that was
  * current when it was opened. A scope must be closed on the thread that
  * opened it, in a {@code finally} block or through try-with-resources.
+ * {@code JCustosServiceResolver.resetAll()} ends every scope of the calling
+ * thread ({@link #resetCurrentThread()}), so a scope a test leaves open does
+ * not hand its id to the next test on the same thread.
  *
  * @since 00.84.00
  */
@@ -59,6 +62,10 @@ public final class AuditCorrelation {
    * malformed id; every further request falls back to a UUID silently.
    */
   private static final AtomicBoolean RESOLVER_FAILURE_WARNED = new AtomicBoolean(false);
+
+  private static final String RESOLVER_FAILURE_WARNING = "audit/correlation-resolver-failure: "
+      + "the correlation-id resolver {} {}; audit events of such requests carry a server-side "
+      + "UUID instead (reported once per JVM)";
 
   private AuditCorrelation() {
   }
@@ -99,7 +106,9 @@ public final class AuditCorrelation {
    * {@link JCustosServiceResolver#correlationIdResolver()} and opens a scope
    * for it. Never fails for a misbehaving resolver: one that throws or returns
    * a malformed id is replaced by {@link #newId()} and reported once per JVM as
-   * {@code audit/correlation-resolver-failure}.
+   * {@code audit/correlation-resolver-failure}. So is a resolver that cannot be
+   * looked up - more than one registered through {@code META-INF/services};
+   * the warning then names the registered implementations.
    *
    * @param request the request the scope stands for
    * @return the scope; close it on this thread
@@ -119,36 +128,59 @@ public final class AuditCorrelation {
     return UUID.randomUUID().toString();
   }
 
+  /**
+   * Ends every scope of the calling thread and leaves it without a correlation
+   * id (exit review RF21, ER29, CWE-459). Called by
+   * {@code JCustosServiceResolver.resetAll()}: a scope a test left open - or a
+   * request whose end was never signalled - must not lend its id to whatever
+   * the thread does next. The scopes count as closed afterwards; closing one of
+   * them again has no effect. Other threads are not touched.
+   */
+  public static void resetCurrentThread() {
+    for (Scope scope = CURRENT.get(); scope != null; scope = scope.previous) {
+      scope.closed = true;
+    }
+    CURRENT.remove();
+  }
+
   private static String resolve(ClientRequestView request) {
+    CorrelationIdResolver resolver;
+    try {
+      resolver = JCustosServiceResolver.correlationIdResolver();
+    } catch (RuntimeException lookupFailure) {
+      // RF22: more than one registration; the message names the implementations and
+      // nothing of the request
+      warnResolverFailure("audit/correlation-resolver-failure: no correlation-id resolver can "
+          + "be resolved ({}); audit events carry a server-side UUID instead (reported once per "
+          + "JVM)", LogFieldScrubber.scrubMessage(String.valueOf(lookupFailure.getMessage())));
+      return newId();
+    }
     String resolved;
     try {
-      resolved = JCustosServiceResolver.correlationIdResolver().resolve(request);
+      resolved = resolver.resolve(request);
     } catch (RuntimeException resolverFailure) {
-      warnResolverFailure("threw " + resolverFailure.getClass().getName());
+      warnResolverFailure(RESOLVER_FAILURE_WARNING, resolver.getClass().getName(),
+          "threw " + resolverFailure.getClass().getName());
       return newId();
     }
     if (!AuditEnvelope.isValidCorrelationId(resolved)) {
       // the value itself is not logged: it may be taken from a request header
-      warnResolverFailure("returned a malformed id");
+      warnResolverFailure(RESOLVER_FAILURE_WARNING, resolver.getClass().getName(),
+          "returned a malformed id");
       return newId();
     }
     return resolved;
   }
 
-  private static void warnResolverFailure(String what) {
+  private static void warnResolverFailure(String format, Object... arguments) {
     if (RESOLVER_FAILURE_WARNED.compareAndSet(false, true)) {
-      HasLogger.staticLogger().warn("audit/correlation-resolver-failure: the correlation-id "
-          + "resolver {} {}; audit events of such requests carry a server-side UUID instead "
-          + "(reported once per JVM)", resolverName(), what);
+      HasLogger.staticLogger().warn(format, arguments);
     }
   }
 
-  private static String resolverName() {
-    try {
-      return JCustosServiceResolver.correlationIdResolver().getClass().getName();
-    } catch (RuntimeException unavailable) {
-      return "(unavailable)";
-    }
+  /** Re-arms the once-per-JVM warning; for the tests of this package only. */
+  static void resetResolverFailureWarning() {
+    RESOLVER_FAILURE_WARNED.set(false);
   }
 
   /**
@@ -176,6 +208,17 @@ public final class AuditCorrelation {
      */
     public String correlationId() {
       return correlationId;
+    }
+
+    /**
+     * Whether the scope is still open: neither closed itself, nor ended by
+     * closing an enclosing scope, nor by {@link #resetCurrentThread()}. Meant
+     * for the thread that opened it.
+     *
+     * @return {@code true} while the scope is open
+     */
+    public boolean isOpen() {
+      return !closed;
     }
 
     @Override

@@ -17,14 +17,19 @@
 package eu.jsentinel.jcustos.components.registry;
 
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
 import eu.jsentinel.jcustos.authorization.api.roles.RoleName;
+import eu.jsentinel.jcustos.components.ComponentTarget;
 import eu.jsentinel.jcustos.components.SecuredBindingRegistry;
 import eu.jsentinel.jcustos.components.SecuredButton;
 import eu.jsentinel.jcustos.components.SecuredMenuItem;
 import eu.jsentinel.jcustos.components.SecuredRouterLink;
 import eu.jsentinel.jcustos.components.SecuredVisibility;
 import eu.jsentinel.jcustos.components.SecuredVisibility.Requirement;
+import eu.jsentinel.jcustos.components.SecuredVisibilityMode;
+import eu.jsentinel.jcustos.logout.SubjectId;
 import eu.jsentinel.jcustos.test.FakeAuthenticationService;
 import eu.jsentinel.jcustos.test.FakeAuthorizationService;
 import eu.jsentinel.jcustos.test.InMemorySubjectStore;
@@ -45,6 +50,7 @@ import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -62,6 +68,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SecuredBindingRegistryBrowserlessTest extends BrowserlessTest {
 
   private static final RoleName ADMIN = new RoleName("ADMIN");
+  private static final PermissionName EXPORT = new PermissionName("doc:export");
 
   private final InMemorySubjectStore subjects = new InMemorySubjectStore();
   private final FakeAuthorizationService<String> authorization = new FakeAuthorizationService<>();
@@ -166,9 +173,95 @@ class SecuredBindingRegistryBrowserlessTest extends BrowserlessTest {
   }
 
   @Test
+  @DisplayName("RF18: two bindings on one button combine with AND - an allowing binding does not undo a denying one")
+  void twoBindings_combineWithAnd() {
+    UI ui = UI.getCurrent();
+    // what SecuredUi.action(new SecuredButton(.., role(ADMIN)), onClick).requiresPermission(..) binds
+    SecuredButton button = new SecuredButton("Export", Requirement.role(ADMIN));
+    SecuredBindingRegistry.register(button, permissionBinding(button, SecuredVisibilityMode.DISABLE));
+    ui.add(button);
+    authorization.putRoles("alice", Set.of());
+    authorization.putPermissions("alice", Set.of(EXPORT));
+
+    SecuredVisibility.refreshAll(ui);
+
+    assertFalse(button.isEnabled(), "alice holds the permission but not the role: both are required");
+    assertTrue(button.isVisible());
+
+    authorization.putRoles("alice", Set.of(ADMIN));
+    SecuredVisibility.refreshAll(ui);
+    assertTrue(button.isEnabled(), "both satisfied: enabled");
+
+    authorization.putPermissions("alice", Set.of());
+    SecuredVisibility.refreshAll(ui);
+    assertFalse(button.isEnabled(), "the other way round: the role alone is not enough either");
+  }
+
+  @Test
+  @DisplayName("RF18: a binding that throws hides the component, even when a later binding allows it")
+  void throwingBinding_thenAllowingBinding_hidden() {
+    UI ui = UI.getCurrent();
+    Div panel = new Div();
+    ui.add(panel);
+    SecuredBindingRegistry.register(panel, () -> {
+      throw new IllegalStateException("policy backend unreachable");
+    });
+    SecuredBindingRegistry.register(panel, () -> SecuredVisibility.apply(new ComponentTarget(panel),
+        Requirement.role(ADMIN), SecuredVisibilityMode.HIDE));
+    assertFalse(panel.isVisible(), "the second registration shows the combined verdict at once");
+
+    panel.setVisible(true);
+    assertEquals(1, SecuredVisibility.refreshAll(ui));
+
+    assertFalse(panel.isVisible(), "fail closed across bindings: alice holds the role, the other "
+        + "binding cannot be evaluated");
+  }
+
+  @Test
+  @DisplayName("RF18: after an attach the combined verdict applies, not the binding that re-evaluated last")
+  void twoBindings_combinedAfterAttach() {
+    authorization.putRoles("alice", Set.of());
+    authorization.putPermissions("alice", Set.of(EXPORT));
+    SecuredButton button = new SecuredButton("Export", Requirement.role(ADMIN));
+    Runnable permission = permissionBinding(button, SecuredVisibilityMode.DISABLE);
+    // as SecuredUi binds: evaluated on every attach, after the button's own re-evaluation
+    button.addAttachListener(attach -> permission.run());
+    SecuredBindingRegistry.register(button, permission);
+    assertFalse(button.isEnabled(), "precondition: combined when the second binding was registered");
+
+    UI.getCurrent().add(button);
+    MockVaadin.clientRoundtrip();
+
+    assertFalse(button.isEnabled(), "the permission binding re-evaluated last must not enable it");
+  }
+
+  @Test
+  @DisplayName("RF17: evaluating 50 secured components does not resolve the subject id once")
+  void securedComponents_doNotResolveTheSubjectId() {
+    AtomicInteger resolved = new AtomicInteger();
+    JCustosServiceResolver.setSubjectIdResolver((SubjectIdResolver<String>) subject -> {
+      resolved.incrementAndGet();
+      return SubjectId.of(subject);
+    });
+    UI ui = UI.getCurrent();
+    for (int i = 0; i < 50; i++) {
+      ui.add(new SecuredButton("Action " + i, Requirement.role(ADMIN)));
+    }
+
+    assertEquals(50, SecuredVisibility.refreshAll(ui));
+
+    assertEquals(0, resolved.get(), "no requirement reads the subject id");
+  }
+
+  @Test
   @DisplayName("control: without registered bindings refreshAll does nothing")
   void refreshAll_withoutBindings() {
     assertEquals(0, SecuredVisibility.refreshAll(UI.getCurrent()));
+  }
+
+  private static Runnable permissionBinding(SecuredButton button, SecuredVisibilityMode mode) {
+    return () -> SecuredVisibility.apply(new ComponentTarget(button), Requirement.permission(EXPORT),
+        mode);
   }
 
   private static WeakReference<SecuredButton> createUnreferencedButton() {

@@ -17,17 +17,23 @@ import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.notification.Notification;
 import com.vaadin.flow.component.notification.NotificationVariant;
 import com.vaadin.flow.router.HasErrorParameter;
+import com.vaadin.flow.router.InternalServerError;
+import com.vaadin.flow.router.internal.ErrorTargetEntry;
 import com.vaadin.flow.server.DefaultErrorHandler;
 import com.vaadin.flow.server.ErrorEvent;
 import com.vaadin.flow.server.ErrorHandler;
 import com.vaadin.flow.server.ErrorHandlerUtil;
 import com.vaadin.flow.server.ServiceInitEvent;
+import com.vaadin.flow.server.VaadinService;
 import com.vaadin.flow.server.VaadinServiceInitListener;
+import com.vaadin.flow.server.VaadinSession;
+import com.vaadin.flow.server.startup.ApplicationRouteRegistry;
 import com.vaadin.flow.shared.Registration;
 
 import java.io.Serial;
 import java.security.SecureRandom;
 import java.text.MessageFormat;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -47,7 +53,11 @@ import static java.util.Objects.requireNonNull;
  *       as Vaadin's default does. When an error view is registered for exactly the class of
  *       the throwable - a {@code HasErrorParameter<AccessDeniedException>} for the
  *       {@link AccessDeniedException} a secured service throws, for example - that view is
- *       shown and the handler is done.</li>
+ *       shown and the handler is done. Not so for Vaadin's own {@link InternalServerError},
+ *       which Vaadin registers for {@code java.lang.Exception}: it writes the root cause of
+ *       the exception into the page, so a plain {@code Exception} - a sneaky throw, Kotlin
+ *       code, an application-built {@link ErrorEvent} - takes the reference path below like
+ *       every other error (exit review RF15, CWE-209). The same holds for a subclass of it.</li>
  *   <li>Otherwise it draws a reference of {@value #REFERENCE_LENGTH} Base32 characters from
  *       {@link SecureRandom} and logs {@code "Unhandled error, reference {}"} at ERROR with
  *       the throwable. The message format carries nothing but the reference; the stack trace
@@ -187,12 +197,40 @@ public class JCustosErrorHandler implements ErrorHandler, HasLogger {
 
   private boolean redirectedToErrorView(Throwable throwable) {
     try {
+      if (wouldShowInternalServerError(throwable)) {
+        return false;
+      }
       return ErrorHandlerUtil.handleErrorByRedirectingToErrorView(throwable);
     } catch (RuntimeException redirectFailure) {
       logger().warn("The error view for {} could not be shown ({}); the error is reported with a "
           + "reference instead", throwable.getClass().getName(), redirectFailure.getClass().getName());
       return false;
     }
+  }
+
+  /**
+   * RF15 (CWE-209): whether {@link ErrorHandlerUtil} would show {@link InternalServerError} -
+   * or a subclass that inherits its rendering - for {@code throwable}. It redirects when the
+   * error view registered for the throwable's exact class is found, and Vaadin registers
+   * {@code InternalServerError} for {@code java.lang.Exception}; that view prints the root
+   * cause, with the stack trace outside production mode. Looked up the way
+   * {@code ErrorHandlerUtil} looks it up.
+   */
+  private static boolean wouldShowInternalServerError(Throwable throwable) {
+    if (!(throwable instanceof Exception exception)) {
+      return false;
+    }
+    UI ui = UI.getCurrent();
+    VaadinSession session = ui == null ? null : ui.getSession();
+    VaadinService service = session == null ? null : session.getService();
+    if (service == null || service.getContext() == null) {
+      return false; // ErrorHandlerUtil redirects to nothing without them either
+    }
+    Optional<ErrorTargetEntry> target = ApplicationRouteRegistry.getInstance(service.getContext())
+        .getErrorNavigationTarget(exception);
+    return target.isPresent()
+        && target.get().getHandledExceptionType().equals(exception.getClass())
+        && InternalServerError.class.isAssignableFrom(target.get().getNavigationTarget());
   }
 
   private String referenceText(UI ui, String reference) {

@@ -28,6 +28,7 @@ import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.io.Serial;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Correlation scope of a Vaadin request (R5, JS-SEC-066, CWE-778): audit events
@@ -53,6 +54,18 @@ import java.io.Serial;
  * <p>
  * One scope per request: a second instance — the class registered twice —
  * finds the scope of the first in the request and leaves it alone.
+ * <p>
+ * <strong>A request whose end is never signalled</strong> (exit review RF01,
+ * CWE-401, CWE-778): Vaadin calls {@code requestStart} outside the
+ * {@code try}/{@code finally} that calls {@code requestEnd}. When an
+ * interceptor that runs after this one throws in {@code requestStart} - an
+ * application's maintenance or tenant check that refuses a request by
+ * throwing - {@code requestEnd} never comes, and the scope stayed on the pooled
+ * thread: later audit events on that thread carried the refused request's id,
+ * and every further refusal stacked one more scope. The scope this interceptor
+ * opened is therefore remembered for the thread; a scope still open when the
+ * next request starts on the thread is closed first, and the first such case
+ * per JVM is reported as {@code audit/correlation-scope-stale}.
  *
  * @since 00.84.00
  */
@@ -66,6 +79,16 @@ public final class VaadinAuditCorrelation
   /** Request attribute holding the scope opened for the request. */
   static final String SCOPE_ATTRIBUTE = VaadinAuditCorrelation.class.getName() + ".scope";
 
+  /**
+   * RF01: the scope this interceptor opened on the thread and has not closed yet. Set in
+   * {@link #requestStart}, removed in {@link #requestEnd}; still set at the next
+   * {@code requestStart} only when the request before never ended.
+   */
+  private static final ThreadLocal<AuditCorrelation.Scope> OPENED_ON_THREAD = new ThreadLocal<>();
+
+  /** RF01: one warning per JVM for a scope left open by a request that never ended. */
+  private static final AtomicBoolean STALE_SCOPE_WARNED = new AtomicBoolean(false);
+
   /** Public for {@code ServiceLoader}. */
   public VaadinAuditCorrelation() {
   }
@@ -76,8 +99,9 @@ public final class VaadinAuditCorrelation
   }
 
   /**
-   * Opens the correlation scope of the request. Never throws: a request whose
-   * scope cannot be opened is handled without a correlation id.
+   * Opens the correlation scope of the request, after closing a scope an earlier
+   * request on this thread left open (RF01). Never throws: a request whose scope
+   * cannot be opened is handled without a correlation id.
    */
   @Override
   public void requestStart(VaadinRequest request, VaadinResponse response) {
@@ -89,8 +113,10 @@ public final class VaadinAuditCorrelation
       if (request.getAttribute(SCOPE_ATTRIBUTE) != null) {
         return;
       }
+      closeStaleScope();
       scope = AuditCorrelation.openFor(VaadinClientAddress.view(request));
       request.setAttribute(SCOPE_ATTRIBUTE, scope);
+      OPENED_ON_THREAD.set(scope);
     } catch (RuntimeException failure) {
       if (scope != null) {
         scope.close();
@@ -117,6 +143,37 @@ public final class VaadinAuditCorrelation
     if (scope instanceof AuditCorrelation.Scope open) {
       request.removeAttribute(SCOPE_ATTRIBUTE);
       open.close();
+      if (OPENED_ON_THREAD.get() == open) {
+        OPENED_ON_THREAD.remove();
+      }
     }
+  }
+
+  /**
+   * RF01: closes the scope an earlier request on this thread opened and never closed - its
+   * {@code requestEnd} did not come. Closing it also ends every scope opened above it and
+   * restores what was current before it.
+   */
+  private void closeStaleScope() {
+    AuditCorrelation.Scope stale = OPENED_ON_THREAD.get();
+    if (stale == null) {
+      return;
+    }
+    OPENED_ON_THREAD.remove();
+    if (!stale.isOpen()) {
+      return; // already ended - by an enclosing scope or JCustosServiceResolver.resetAll()
+    }
+    stale.close();
+    if (STALE_SCOPE_WARNED.compareAndSet(false, true)) {
+      logger().warn("audit/correlation-scope-stale: a correlation scope of an earlier Vaadin "
+          + "request was still open on this thread - a request interceptor that runs after "
+          + "VaadinAuditCorrelation threw in requestStart, so requestEnd never came. The scope "
+          + "is closed before the next request opens its own (reported once per JVM)");
+    }
+  }
+
+  /** Re-arms the once-per-JVM warning; for the tests of this package only. */
+  static void resetStaleScopeWarning() {
+    STALE_SCOPE_WARNED.set(false);
   }
 }
