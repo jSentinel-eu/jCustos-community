@@ -25,9 +25,14 @@ package eu.jsentinel.jcustos.credential.change;
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.credential.compromised.CheckFailurePolicy;
+import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordChecker;
+import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordPolicy;
+import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordScreen;
 import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidationResult;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidator;
+import eu.jsentinel.jcustos.credential.input.PasswordInputViolation;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleDecision;
 import eu.jsentinel.jcustos.credential.lifecycle.CredentialLifecycleService;
 import eu.jsentinel.jcustos.credential.lifecycle.InvalidStatusTransitionException;
@@ -58,13 +63,18 @@ import java.util.Optional;
  *       {@code COMPROMISED -> MUST_CHANGE}) → {@code ResetRequired}: the
  *       leaked password must not authorise its own replacement, the reset
  *       is the only way out (JS-SEC-161, CWE-620, CWE-640).</li>
+ *   <li>Validate the proposed new password through the input policy.
+ *       A rejection here surfaces the structural reason.</li>
+ *   <li>When a compromised-password check is configured
+ *       ({@link #withCompromisedPasswordCheck}), ask it: a listed password →
+ *       {@code NewPasswordRejected(COMPROMISED)}; a check that could not be
+ *       carried out under {@link CheckFailurePolicy#BLOCK} →
+ *       {@code VerificationUnavailable}.</li>
  *   <li>Re-authenticate by verifying the supplied current password
  *       (CWE-620). A verification that could not be carried out - shed by
  *       the KDF limiter - → {@code VerificationUnavailable}: "could not
  *       verify" is not "wrong" (JS-SEC-126, CWE-703). Anything else but
  *       {@code Verified} → {@code CurrentPasswordRejected}.</li>
- *   <li>Validate the proposed new password through the input policy.
- *       A rejection here surfaces the structural reason.</li>
  *   <li>Hash the new password through {@link PasswordHashingService}.</li>
  *   <li>Compare-and-swap the encoded hash with the original envelope as
  *       witness, through {@link CredentialStore#replaceSecretIfCurrent}: the
@@ -81,6 +91,17 @@ import java.util.Optional;
  *   <li>Return {@code Succeeded(INVALIDATE_OTHER_SESSIONS)}.</li>
  * </ol>
  *
+ * <h2>Cheap checks before the KDF</h2>
+ * <p>Since 00.84.00 the new password is checked - structure, then the
+ * compromised-password list - before the current password is verified. Up to
+ * 00.83.00 the verification came first: whoever held a foreign session could
+ * send a guess of the current password with a new password the policy refuses
+ * and tell {@code CurrentPasswordRejected} from {@code NewPasswordRejected} - an
+ * oracle for the current password that changed nothing - and every such call
+ * took a KDF permit (CWE-203, CWE-400). A listed new password would have opened
+ * the same oracle. Now a refused new password is reported without a KDF run,
+ * whatever the current password is.</p>
+ *
  * <h2>One key per account</h2>
  * <p>The {@link CredentialStore} decides which spellings of a user name are
  * the same account (JS-SEC-123, CWE-178). The reset links and the
@@ -90,13 +111,14 @@ import java.util.Optional;
  * retires the links and revokes the tokens of the account {@code alice}.</p>
  *
  * <h2>Optional collaborators</h2>
- * <p>{@link #withResetTokenStore(ResetTokenStore)} and
- * {@link #withCredentialChangeListener(CredentialChangeListener)} return a
- * copy of the service with the collaborator set. Without them the service
- * behaves as before 00.84.00: a reset link issued earlier stays valid after
- * the change, and no session or token is revoked — the returned
+ * <p>{@link #withResetTokenStore(ResetTokenStore)},
+ * {@link #withCredentialChangeListener(CredentialChangeListener)} and
+ * {@link #withCompromisedPasswordCheck(CompromisedPasswordChecker, CompromisedPasswordPolicy)}
+ * return a copy of the service with the collaborator set. Without them the
+ * service behaves as before 00.84.00: a reset link issued earlier stays valid
+ * after the change, no session or token is revoked — the returned
  * {@link SessionHandlingDecision} is then only a recommendation to the
- * adapter.</p>
+ * adapter — and no new password is checked against a list.</p>
  */
 public final class PasswordChangeService implements HasLogger {
 
@@ -110,6 +132,8 @@ public final class PasswordChangeService implements HasLogger {
   private final ResetTokenStore resetTokenStore;
   /** Optional (JS-SEC-128): notified after a change; never {@code null}. */
   private final CredentialChangeListener changeListener;
+  /** Optional: the compromised-password step for the new password; never {@code null}. */
+  private final CompromisedPasswordScreen compromisedScreen;
 
   public PasswordChangeService(
       CredentialStore store,
@@ -119,7 +143,7 @@ public final class PasswordChangeService implements HasLogger {
       CredentialLifecycleService lifecycleService,
       Clock clock) {
     this(store, hashingService, inputValidator, inputPolicy, lifecycleService, clock,
-        null, CredentialChangeListener.noop());
+        null, CredentialChangeListener.noop(), CompromisedPasswordScreen.none());
   }
 
   private PasswordChangeService(
@@ -130,7 +154,8 @@ public final class PasswordChangeService implements HasLogger {
       CredentialLifecycleService lifecycleService,
       Clock clock,
       ResetTokenStore resetTokenStore,
-      CredentialChangeListener changeListener) {
+      CredentialChangeListener changeListener,
+      CompromisedPasswordScreen compromisedScreen) {
     this.store = Objects.requireNonNull(store, "store");
     this.hashingService = Objects.requireNonNull(hashingService, "hashingService");
     this.inputValidator = Objects.requireNonNull(inputValidator, "inputValidator");
@@ -139,6 +164,7 @@ public final class PasswordChangeService implements HasLogger {
     this.clock = Objects.requireNonNull(clock, "clock");
     this.resetTokenStore = resetTokenStore;
     this.changeListener = Objects.requireNonNull(changeListener, "changeListener");
+    this.compromisedScreen = Objects.requireNonNull(compromisedScreen, "compromisedScreen");
   }
 
   /**
@@ -155,7 +181,8 @@ public final class PasswordChangeService implements HasLogger {
   public PasswordChangeService withResetTokenStore(ResetTokenStore resetTokenStore) {
     return new PasswordChangeService(store, hashingService, inputValidator, inputPolicy,
         lifecycleService, clock,
-        Objects.requireNonNull(resetTokenStore, "resetTokenStore"), changeListener);
+        Objects.requireNonNull(resetTokenStore, "resetTokenStore"), changeListener,
+        compromisedScreen);
   }
 
   /**
@@ -172,7 +199,39 @@ public final class PasswordChangeService implements HasLogger {
   public PasswordChangeService withCredentialChangeListener(CredentialChangeListener listener) {
     return new PasswordChangeService(store, hashingService, inputValidator, inputPolicy,
         lifecycleService, clock, resetTokenStore,
-        Objects.requireNonNull(listener, "listener"));
+        Objects.requireNonNull(listener, "listener"), compromisedScreen);
+  }
+
+  /**
+   * Returns a copy of this service that checks every new password against
+   * {@code checker} before it is hashed (NIST SP 800-63B §5.1.1.2, CWE-521).
+   *
+   * <p>The check runs after the structural check and before the current
+   * password is verified, so it costs no KDF run. A listed password is
+   * answered with {@link PasswordChangeResult.NewPasswordRejected} carrying
+   * {@link eu.jsentinel.jcustos.credential.input.PasswordInputViolation#COMPROMISED};
+   * a check that could not be carried out is decided by
+   * {@link CompromisedPasswordPolicy#onFailure()}: {@code ALLOW} and {@code WARN}
+   * let the change proceed, {@code BLOCK} answers
+   * {@link PasswordChangeResult.VerificationUnavailable}. With
+   * {@link CompromisedPasswordPolicy#checkOnSetOrChange()} {@code false} the
+   * checker is not asked. Typical checker: a
+   * {@link eu.jsentinel.jcustos.credential.compromised.CompositeCompromisedPasswordChecker}
+   * over a {@link eu.jsentinel.jcustos.credential.compromised.LocalBlocklistCompromisedPasswordChecker}
+   * and the HaveIBeenPwned range query, built with the policy's
+   * {@link CheckFailurePolicy}.</p>
+   *
+   * @param checker the checker; non-null
+   * @param policy  when it runs and how a failed check counts; non-null
+   * @return a new service; this instance is unchanged
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public PasswordChangeService withCompromisedPasswordCheck(
+      CompromisedPasswordChecker checker, CompromisedPasswordPolicy policy) {
+    return new PasswordChangeService(store, hashingService, inputValidator, inputPolicy,
+        lifecycleService, clock, resetTokenStore, changeListener,
+        new CompromisedPasswordScreen(checker, policy));
   }
 
   public PasswordChangeResult change(PasswordChangeCommand command) {
@@ -198,6 +257,27 @@ public final class PasswordChangeService implements HasLogger {
       return PasswordChangeResult.ResetRequired.INSTANCE;
     }
 
+    // The free checks of the new password run before the KDF (CWE-203, CWE-400):
+    // after the verification, a new password the policy refuses would tell a
+    // caller who holds a foreign session whether the guessed current password
+    // was right - without changing anything - and every such guess would take a
+    // KDF permit. Structure first, so the list is never asked for an overlong or
+    // empty input.
+    PasswordInputValidationResult inputCheck =
+        inputValidator.validate(command.newPassword(), inputPolicy);
+    if (inputCheck instanceof PasswordInputValidationResult.Rejected rejected) {
+      return new PasswordChangeResult.NewPasswordRejected(rejected.violation());
+    }
+    // NIST SP 800-63B §5.1.1.2 (CWE-521): a listed password is refused before it
+    // is hashed. "Could not check" under BLOCK is "try again later", not "listed".
+    CompromisedPasswordScreen.Outcome screened = compromisedScreen.screen(command.newPassword());
+    if (screened == CompromisedPasswordScreen.Outcome.LISTED) {
+      return new PasswordChangeResult.NewPasswordRejected(PasswordInputViolation.COMPROMISED);
+    }
+    if (screened == CompromisedPasswordScreen.Outcome.UNAVAILABLE) {
+      return PasswordChangeResult.VerificationUnavailable.INSTANCE;
+    }
+
     CredentialVerificationResult verifyResult = hashingService.verify(
         command.currentPassword(), record.encodedHash());
     // JS-SEC-126 (CWE-703, CWE-645): a verification the KDF limiter shed says
@@ -209,12 +289,6 @@ public final class PasswordChangeService implements HasLogger {
     }
     if (!(verifyResult instanceof CredentialVerificationResult.Verified)) {
       return PasswordChangeResult.CurrentPasswordRejected.INSTANCE;
-    }
-
-    PasswordInputValidationResult inputCheck =
-        inputValidator.validate(command.newPassword(), inputPolicy);
-    if (inputCheck instanceof PasswordInputValidationResult.Rejected rejected) {
-      return new PasswordChangeResult.NewPasswordRejected(rejected.violation());
     }
 
     PasswordHashResult newHash = hashingService.hash(command.newPassword());

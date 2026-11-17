@@ -1,5 +1,7 @@
 package eu.jsentinel.jcustos.demo.skill.vaadin.security.services;
 
+import eu.jsentinel.jcustos.credential.compromised.CheckFailurePolicy;
+import eu.jsentinel.jcustos.credential.compromised.CompositeCompromisedPasswordChecker;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordChecker;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordResult;
 import eu.jsentinel.jcustos.credential.compromised.LocalBlocklistCompromisedPasswordChecker;
@@ -7,32 +9,42 @@ import eu.jsentinel.jcustos.credential.secret.SecretValue;
 
 import java.net.URI;
 import java.time.Duration;
-import java.util.List;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 /**
  * Password-acceptance check called before any new / changed password
  * is committed.
  *
- * <p>Two layers:
+ * <p>One {@link CompositeCompromisedPasswordChecker} over two layers,
+ * asked in this order:
  *
  * <ol>
  *   <li>A local blocklist for the top-N most-common passwords —
- *       fast, offline, always on.</li>
+ *       fast, offline, always on. A password it lists never reaches
+ *       the network.</li>
  *   <li>(if true=true) an online k-anonymity range
  *       query against the HaveIBeenPwned API — the plain candidate
  *       never leaves the JVM, only the first 5 SHA-1 hex chars.</li>
  * </ol>
  *
- * <p>Both layers return {@link CompromisedPasswordResult} variants.
- * The caller treats {@link CompromisedPasswordResult.Pwned} as
- * reject (generic message, never name the dictionary — CWE-209) and
- * everything else as accept.
+ * <p>The first {@link CompromisedPasswordResult.Pwned} rejects the
+ * password (generic message, never name the dictionary — CWE-209).
  *
- * <p>Network failures on the HIBP path return
- * {@link CompromisedPasswordResult.Indeterminate} — fail-open by
- * design (CWE-359): a corporate firewall blocking the HIBP API
- * should not block legitimate password changes.
+ * <p>A failed HIBP query ({@link CompromisedPasswordResult.CheckFailed})
+ * counts as clean: the composite is built with
+ * {@link CheckFailurePolicy#ALLOW} — fail-open by design (CWE-359), so a
+ * corporate firewall blocking the HIBP API does not block legitimate
+ * password changes. A deployment that would rather refuse while the
+ * check is unavailable builds it with {@link CheckFailurePolicy#BLOCK}
+ * and refuses on {@code CheckFailed} as well.
+ *
+ * <p>The demo list is inline. jCustos ships no list: a deployment loads
+ * its own with
+ * {@link LocalBlocklistCompromisedPasswordChecker#fromFile(java.nio.file.Path)}
+ * (UTF-8, one password per line, {@code #} comments, bounded size).
+ * {@code PasswordChangeService} and {@code PasswordResetService} take the
+ * same composite through {@code withCompromisedPasswordCheck(...)}.
  *
  * <p>Every password the application accepts passes here: new users in
  * {@code AdminRolesView} and the first administrator, whose setup runs
@@ -45,8 +57,8 @@ import java.util.function.Function;
  */
 public final class PasswordPreflight {
 
-  private static final CompromisedPasswordChecker LOCAL =
-      new LocalBlocklistCompromisedPasswordChecker(List.of(
+  private static final LocalBlocklistCompromisedPasswordChecker LOCAL =
+      LocalBlocklistCompromisedPasswordChecker.fromLines(Stream.of(
           "password", "password1", "password123",
           "qwerty", "qwerty123", "letmein",
           "admin", "admin123", "administrator",
@@ -77,15 +89,20 @@ public final class PasswordPreflight {
     if (candidate == null || candidate.isEmpty()) {
       return false;
     }
-    SecretValue secret = SecretValue.ofString(candidate);
-    if (LOCAL.check(secret) instanceof CompromisedPasswordResult.Pwned) {
-      return false;
+    return !(checker().check(SecretValue.ofString(candidate))
+        instanceof CompromisedPasswordResult.Pwned);
+  }
+
+  /**
+   * The local list first, then (if enabled) HIBP at the configured endpoint;
+   * a failed HIBP query counts as clean.
+   */
+  private static CompromisedPasswordChecker checker() {
+    if (HIBP == null) {
+      return LOCAL;
     }
-    if (HIBP != null
-        && HIBP.apply(hibpEndpoint()).check(secret) instanceof CompromisedPasswordResult.Pwned) {
-      return false;
-    }
-    return true;
+    return CompositeCompromisedPasswordChecker.of(CheckFailurePolicy.ALLOW,
+        LOCAL, HIBP.apply(hibpEndpoint()));
   }
 
   /** @return the configured endpoint, or {@code null} for the public one */

@@ -37,6 +37,9 @@ import eu.jsentinel.jcustos.credential.abuse.AbuseDecision;
 import eu.jsentinel.jcustos.credential.abuse.AbuseDetectionService;
 import eu.jsentinel.jcustos.credential.abuse.AttemptOutcome;
 import eu.jsentinel.jcustos.credential.change.CredentialChangeListener;
+import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordChecker;
+import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordPolicy;
+import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordScreen;
 import eu.jsentinel.jcustos.credential.input.PasswordInputPolicy;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidationResult;
 import eu.jsentinel.jcustos.credential.input.PasswordInputValidator;
@@ -114,7 +117,9 @@ import java.util.Optional;
  * looks up the digest record by selector, checks expiry and status,
  * verifies the verifier digest in constant time
  * ({@link TokenDigestService#verifyVerifier}), validates the new
- * password against the input policy, then <em>claims</em> the token by
+ * password against the input policy and - with
+ * {@link #withCompromisedPasswordCheck} - against the compromised-password
+ * check, then <em>claims</em> the token by
  * CAS-marking it CONSUMED and only after a successful claim hashes the
  * password and performs a compare-and-swap on the credential's encoded
  * hash (JS-SEC-128, CWE-367: one token writes at most one password) through
@@ -130,6 +135,14 @@ import java.util.Optional;
  * <p>Every failure variant collapses to the same generic public
  * response at the adapter boundary; the differentiated reason stays
  * inside the audit trail (CWE-209).</p>
+ *
+ * <p>A new password that the input policy or the compromised-password check
+ * refuses fails the consume <em>before</em> the token is claimed and before
+ * anything is hashed: the link stays usable, and the user can choose another
+ * password with it. An adapter that wants to say why it refused runs the same
+ * steps first - {@link PasswordInputValidator} and
+ * {@link CompromisedPasswordScreen} - and the consume answers only
+ * {@link PasswordResetConsumeResult.Failed}.</p>
  */
 public final class PasswordResetService implements HasLogger {
 
@@ -149,6 +162,8 @@ public final class PasswordResetService implements HasLogger {
   private final AbuseDetectionService abuseDetection;
   /** Optional hook after a consumed reset (JS-SEC-128); never {@code null}. */
   private final CredentialChangeListener changeListener;
+  /** Optional compromised-password step for the new password; never {@code null}. */
+  private final CompromisedPasswordScreen compromisedScreen;
 
   public PasswordResetService(
       CredentialStore credentialStore,
@@ -183,7 +198,7 @@ public final class PasswordResetService implements HasLogger {
       JCustosAuditService auditService) {
     this(credentialStore, resetStore, tokens, hashingService, inputValidator,
         inputPolicy, lifecycleService, clock, auditService,
-        null, CredentialChangeListener.noop());
+        null, CredentialChangeListener.noop(), CompromisedPasswordScreen.none());
   }
 
   private PasswordResetService(
@@ -197,7 +212,8 @@ public final class PasswordResetService implements HasLogger {
       Clock clock,
       JCustosAuditService auditService,
       AbuseDetectionService abuseDetection,
-      CredentialChangeListener changeListener) {
+      CredentialChangeListener changeListener,
+      CompromisedPasswordScreen compromisedScreen) {
     this.auditService = auditService;
     this.credentialStore = Objects.requireNonNull(credentialStore, "credentialStore");
     this.resetStore = Objects.requireNonNull(resetStore, "resetStore");
@@ -209,6 +225,7 @@ public final class PasswordResetService implements HasLogger {
     this.clock = Objects.requireNonNull(clock, "clock");
     this.abuseDetection = abuseDetection;
     this.changeListener = Objects.requireNonNull(changeListener, "changeListener");
+    this.compromisedScreen = Objects.requireNonNull(compromisedScreen, "compromisedScreen");
   }
 
   /**
@@ -236,7 +253,8 @@ public final class PasswordResetService implements HasLogger {
   public PasswordResetService withAbuseDetection(AbuseDetectionService abuseDetection) {
     return new PasswordResetService(credentialStore, resetStore, tokens, hashingService,
         inputValidator, inputPolicy, lifecycleService, clock, auditService,
-        Objects.requireNonNull(abuseDetection, "abuseDetection"), changeListener);
+        Objects.requireNonNull(abuseDetection, "abuseDetection"), changeListener,
+        compromisedScreen);
   }
 
   /**
@@ -254,7 +272,35 @@ public final class PasswordResetService implements HasLogger {
   public PasswordResetService withCredentialChangeListener(CredentialChangeListener listener) {
     return new PasswordResetService(credentialStore, resetStore, tokens, hashingService,
         inputValidator, inputPolicy, lifecycleService, clock, auditService,
-        abuseDetection, Objects.requireNonNull(listener, "listener"));
+        abuseDetection, Objects.requireNonNull(listener, "listener"), compromisedScreen);
+  }
+
+  /**
+   * Returns a copy of this service that checks the new password of every
+   * consumed reset against {@code checker} before it is hashed (NIST SP
+   * 800-63B §5.1.1.2, CWE-521).
+   *
+   * <p>The check runs after the token and the structure of the new password
+   * have been checked and before the token is claimed: a listed password, and
+   * a check that could not be carried out under
+   * {@link eu.jsentinel.jcustos.credential.compromised.CheckFailurePolicy#BLOCK},
+   * fail the consume with {@link PasswordResetConsumeResult.Failed}, the link
+   * stays usable and nothing is hashed. {@code ALLOW} and {@code WARN} let a
+   * reset whose check failed proceed. With
+   * {@link CompromisedPasswordPolicy#checkOnSetOrChange()} {@code false} the
+   * checker is not asked.</p>
+   *
+   * @param checker the checker; non-null
+   * @param policy  when it runs and how a failed check counts; non-null
+   * @return a new service; this instance is unchanged
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public PasswordResetService withCompromisedPasswordCheck(
+      CompromisedPasswordChecker checker, CompromisedPasswordPolicy policy) {
+    return new PasswordResetService(credentialStore, resetStore, tokens, hashingService,
+        inputValidator, inputPolicy, lifecycleService, clock, auditService,
+        abuseDetection, changeListener, new CompromisedPasswordScreen(checker, policy));
   }
 
   /**
@@ -468,6 +514,14 @@ public final class PasswordResetService implements HasLogger {
     CredentialRecord credentialRecord = credential.get();
     if (credentialRecord.status() == CredentialStatus.DISABLED
         || credentialRecord.status() == CredentialStatus.COMPROMISED) {
+      return PasswordResetConsumeResult.Failed.INSTANCE;
+    }
+
+    // NIST SP 800-63B §5.1.1.2 (CWE-521): a listed new password is refused like
+    // a structurally invalid one - before the claim, so the link stays usable,
+    // and before the KDF. Asked only for a token that verified, so an
+    // unauthenticated request never reaches the online service.
+    if (compromisedScreen.screen(newPassword) != CompromisedPasswordScreen.Outcome.ACCEPTED) {
       return PasswordResetConsumeResult.Failed.INSTANCE;
     }
 

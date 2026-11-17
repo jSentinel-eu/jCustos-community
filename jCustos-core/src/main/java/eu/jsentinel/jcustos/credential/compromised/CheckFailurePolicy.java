@@ -43,14 +43,22 @@ public enum CheckFailurePolicy {
 
   /**
    * Treat a failed check as {@code Clean} but raise a structured
-   * audit event so operators can review later.
+   * audit event so operators can review later. The library has no
+   * audit event for it yet: {@link CompromisedPasswordScreen} and
+   * {@link CompositeCompromisedPasswordChecker} log
+   * {@code credential/compromised-check-failed} at WARN level with the
+   * failure reason (since 00.84.00).
    */
   WARN,
 
   /**
    * Treat a failed check as a definitive negative outcome — the
    * change is rejected. Suited for high-assurance deployments
-   * where a missing check is worse than a denied change.
+   * where a missing check is worse than a denied change. The
+   * rejection is not a verdict on the password: since 00.84.00
+   * {@code PasswordChangeService} answers
+   * {@code VerificationUnavailable} ("try again later"), not
+   * {@code NewPasswordRejected(COMPROMISED)}.
    */
   BLOCK
 }

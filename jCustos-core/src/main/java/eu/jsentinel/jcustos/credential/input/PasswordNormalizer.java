@@ -22,11 +22,13 @@
  */
 package eu.jsentinel.jcustos.credential.input;
 
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
 
 import java.nio.CharBuffer;
 import java.text.Normalizer;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -48,10 +50,43 @@ import java.util.Objects;
  * here. The Konzept §11 forbids silent pre-hashing without a real
  * pepper service (password shucking risk); the bcrypt provider rejects
  * overlong inputs explicitly.</p>
+ *
+ * <h2>Comparison form</h2>
+ * <p>{@link #comparisonForm(CharSequence)} is the one folding under which a
+ * candidate password and the entries of a local blocklist are compared
+ * (since 00.84.00): NFKC, then lower case under {@link Locale#ROOT}. It is
+ * deliberately coarser than the hashing normalisation, so that the full-width
+ * {@code ＰＡＳＳＷＯＲＤ} or a ligature spelling of a listed password is found
+ * in the list (CWE-176, CWE-521). It is used for comparison only, never for the
+ * secret that is hashed.</p>
  */
 public final class PasswordNormalizer {
 
+  /** Unicode form of {@link #comparisonForm(CharSequence)}. */
+  private static final Normalizer.Form COMPARISON_FORM = Normalizer.Form.NFKC;
+
   public PasswordNormalizer() {
+  }
+
+  /**
+   * Returns the form under which a password is compared with a blocklist
+   * entry: Unicode NFKC, then lower case under {@link Locale#ROOT}. Both sides
+   * of the comparison - every list entry when the list is loaded, and the
+   * candidate when it is checked - pass through this method, so equivalent
+   * spellings meet (CWE-176).
+   *
+   * <p>The result is a {@link String}: callers that compare passwords accept
+   * the JVM-memory caveat documented on the class. Whitespace is not trimmed
+   * here; that is the caller's decision.</p>
+   *
+   * @param value the text to fold; non-null
+   * @return the comparison form
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public static String comparisonForm(CharSequence value) {
+    Objects.requireNonNull(value, "value");
+    return Normalizer.normalize(value, COMPARISON_FORM).toLowerCase(Locale.ROOT);
   }
 
   /**

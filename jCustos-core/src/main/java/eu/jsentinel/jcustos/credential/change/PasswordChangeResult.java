@@ -77,6 +77,12 @@ public sealed interface PasswordChangeResult
    * later" (HTTP 503 or 429). It must not count a failed attempt and must not
    * audit a rejected password for it.
    *
+   * <p>The same answer stands for a new password that could not be checked
+   * against the compromised-password list under
+   * {@link eu.jsentinel.jcustos.credential.compromised.CheckFailurePolicy#BLOCK}
+   * ({@link PasswordChangeService#withCompromisedPasswordCheck}): the change
+   * is refused, but the password is not reported as listed.</p>
+   *
    * @since 00.84.00
    */
   @ExperimentalJCustosApi
@@ -86,7 +92,11 @@ public sealed interface PasswordChangeResult
 
   /**
    * The new password violated the input policy (length, control chars,
-   * etc.) and was rejected before hashing.
+   * etc.) and was rejected before hashing. Since 00.84.00 the violation is
+   * {@link PasswordInputViolation#COMPROMISED} when the configured
+   * compromised-password check lists the password; the check runs before the
+   * current password is verified, so this result is returned whatever the
+   * current password is.
    */
   record NewPasswordRejected(PasswordInputViolation violation)
       implements PasswordChangeResult {

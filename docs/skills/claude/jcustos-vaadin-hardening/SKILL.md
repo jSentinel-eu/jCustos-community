@@ -78,7 +78,7 @@ inherited from the previous skill output.
 | `security/bootstrap/HardeningBootstrapExtension.java` (NEW) | implements `BootstrapExtension` SPI from layer 1; `contributeCredentials(c)` calls `c.hashing(BouncyCastleHashingServices.modern())`; `contributeSessions(s)` wires `securityVersion` + `subjectIdResolver` via `JCustosServiceResolver.find...`. Picked up by `BootstrapBuilder.apply(...)` at runtime — **no overwrite of the layer-1 listener.** |
 | `security/services/SubjectIdResolverImpl.java` | **NEW** — implements `SubjectIdResolver<{{SUBJECT_TYPE}}>`; returns `SubjectId.of(user.id().toString())` |
 | `security/services/VersionBumper.java` | **NEW** — `VersionBumper.bump(user)` increments the per-subject version on role change |
-| `security/services/PasswordPreflight.java` | **NEW** — local blocklist + (optional) HIBP check; called from the role-add dialog and, through `PreflightPasswordPolicy`, from the first-administrator setup. `-Djcustos.demo.hibpEndpoint=<url>` points the range query at a mirror (HTTPS, or HTTP on loopback with `-Djcustos.dev=true`) |
+| `security/services/PasswordPreflight.java` | **NEW** — local blocklist + (optional) HIBP check; called from the role-add dialog and, through `PreflightPasswordPolicy`, from the first-administrator setup. local list and HIBP combined by `CompositeCompromisedPasswordChecker`, local first. `-Djcustos.demo.hibpEndpoint=<url>` points the range query at a mirror (HTTPS, or HTTP on loopback with `-Djcustos.dev=true`) |
 | `security/services/PreflightPasswordPolicy.java` | **NEW** — `PasswordPolicy` for the first-administrator setup: minimum length + `PasswordPreflight` |
 | `META-INF/services/eu.jsentinel.jcustos.bootstrap.PasswordPolicy` | **NEW** — points at `PreflightPasswordPolicy` |
 | `security/bootstrap/JCustosVersionInitListener.java` | **NEW** — `VaadinServiceInitListener` that calls `JCustosVersionEnforcerListener.register(event)`: navigation listener on every UI, UIDL request handler and request interceptor for WebSocket-only push messages (JS-SEC-155). Do not register the handler and the navigation listener by hand — push messages bypass them |
@@ -187,10 +187,12 @@ atomic, but logically odd. Keep the order.
 The HIBP checker makes a `GET https://api.pwnedpasswords.com/range/<5-hex-prefix>`
 on every check. Behind a corporate firewall this hangs without a
 proxy. The template uses `Duration.ofSeconds(5)` as the request
-timeout — failure to reach HIBP returns `Indeterminate`, and the
-preflight treats `Indeterminate` as "allow" (CWE-359 fail-open by
+timeout — failure to reach HIBP returns `CheckFailed`, and the
+preflight's `CompositeCompromisedPasswordChecker` is built with
+`CheckFailurePolicy.ALLOW`, so it counts as "allow" (fail-open by
 design: a network outage should not block legitimate password
-changes).
+changes). Use `CheckFailurePolicy.BLOCK` where an unchecked password
+must not be set; the change service then answers "try again later".
 
 ### Argon2id is intentionally slow
 
