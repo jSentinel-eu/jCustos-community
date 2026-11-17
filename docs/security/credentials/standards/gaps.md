@@ -66,7 +66,7 @@ Even within scope, V00.71.00 has known limitations:
 
 | Area       | Limitation                                                                 | Mitigation |
 |------------|----------------------------------------------------------------------------|------------|
-| Pepper     | `InMemoryPepperService` holds keys in heap                                  | HSM-backed implementation via PKCS#11 — see `pkcs11-hsm-pepper-key.md`. |
+| Pepper     | Every source hands key bytes to the JVM; HMAC on a token is not supported   | `KeyStorePepperService` (PKCS12, PKCS#11 with an extractable key) or `FilePepperService` — see `pkcs11-hsm-pepper-key.md`. |
 | Compromise check | `LocalBlocklist` requires operator-maintained list                    | Pair with `jSentinel-credentials-hibp` for breach-corpus check. |
 | Rate limiting | `InMemoryAbuseDetectionService` does not survive a JVM restart         | Persist counters via a custom `AbuseDetectionService` impl. |
 | Password history | History compares re-derived hashes per attempt; bounded cost via `retainLast`. Since V00.84.00 an entry that cannot be verified — limiter saturated, algorithm retired, pepper key gone — is `PasswordHistoryCheck.Indeterminate`, and `evaluate(...)` rejects the change instead of allowing it (JS-SEC-126) | Tune `retainLast`; disable for low-assurance services. After an algorithm or pepper migration, resolve unverifiable entries; `check(...)` names the reason. |

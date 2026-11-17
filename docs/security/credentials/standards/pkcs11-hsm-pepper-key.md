@@ -1,103 +1,82 @@
 # PKCS#11 / HSM as Pepper Key Source
 
-Status: draft — V00.71.00 — integration guidance only, no integration
-code in this release
+Status: current — V00.84.00
 CWE: CWE-320 (Key Management Errors), CWE-522 (Insufficiently
 Protected Credentials)
 
 ## Why this matters
 
-The `PepperService` SPI in `jSentinel-core` exposes a pepper key as a
-`PepperReference` and an `HmacSHA256` operation. The default
-`InMemoryPepperService` holds the key bytes in a `byte[]` inside the
-JVM heap, which is appropriate for development and small-scale
-production but unacceptable for deployments where pepper compromise
-is the threat model — see `../playbooks/pepper-compromise.md`.
+A pepper is a server-side secret mixed into every stored password hash
+(HMAC-SHA-256 over the KDF output, see `PepperApplicator`). Whoever
+holds the password database but not the pepper cannot test guesses
+offline. The pepper therefore has to live somewhere else than the
+database and its backups — see `../playbooks/pepper-compromise.md`.
 
-## Recommended boundary
+## The SPI as it is
 
-```
-+-------------------+        +---------------------+        +-----+
-| PasswordHashing   |  ----> |  PepperService SPI  |  ----> | HSM |
-| Service           |        |  (PKCS#11 adapter)  |        |     |
-+-------------------+        +---------------------+        +-----+
-                                       ^
-                                       |   never leaves the HSM
-                                  pepper key bytes
-```
+`PepperService` (jCustos-core) has two methods:
 
-- The pepper key is generated **inside** the HSM (`C_GenerateKey`) and
-  is never exported.
-- The application JVM holds a **handle / key id**, not the bytes.
-- HMAC-SHA-256 (`CKM_SHA256_HMAC`) is executed **on** the HSM —
-  inputs are sent in, the 32-byte tag is returned.
+- `activeKeyId()` — the key id new hashes are peppered with;
+- `resolve(keyId)` — the key bytes for a key id, as a copy.
 
-## Building a PKCS#11-backed PepperService
+The HMAC itself is computed **inside the JVM** by `PepperApplicator`.
+Every implementation therefore hands key bytes to the JVM; none of
+them keeps the key on a token while hashing.
 
-Two production paths are common:
+## Key sources shipped since 00.84.00
 
-### Option A — Sun JCE PKCS#11 provider (JDK-bundled)
+| Source | Use | Notes |
+|---|---|---|
+| `KeyStorePepperService.fromPkcs12(path, password)` | a PKCS12 file | Secret-key entries, key id = alias (compared exactly; PKCS12 stores aliases in lower case). The file must belong to the process user, carry no group or other permissions and must not be a symbolic link. |
+| `KeyStorePepperService.fromKeyStore(keyStore, entryPassword)` | a key store the application loaded, e.g. a PKCS#11 token through `SunPKCS11` | The key must be **extractable** (`CKA_SENSITIVE=false`, `CKA_EXTRACTABLE=true`); a key that never leaves the token is refused at `load()` with "not extractable". |
+| `FilePepperService.fromDirectory(dir)` | one Base64 file per key id, e.g. `/run/secrets` | Same file checks as the PKCS12 source. Kubernetes secret volumes (symbolic links, root-owned, group-readable) are refused; copy the key into an owner-only file at start or use PKCS12. |
+| `InMemoryPepperService` | tests, or keys the application obtained itself | Heap only. |
+
+All sources load only the key ids that are named (one active, any
+number retired), refuse keys shorter than 32 bytes, fail closed at
+`load()` and never put key material, file content or a password into a
+message, a log line or `toString()`.
+
+## PKCS#11 with an extractable key
 
 ```java
-PepperService pkcs11Pepper = new PepperService() {
-    private final Provider sunPkcs11 =
-        Security.getProvider("SunPKCS11").configure(
-            "name=corp-hsm\nlibrary=/usr/lib/libsofthsm2.so\nslot=0");
-    @Override public PepperReference activeReference() { ... }
-    @Override public byte[] applyHmac(PepperReference ref, byte[] input) {
-        Mac mac = Mac.getInstance("HmacSHA256", sunPkcs11);
-        mac.init(loadKey(ref));            // SecretKey backed by HSM handle
-        return mac.doFinal(input);
-    }
-};
+Provider p11 = Security.getProvider("SunPKCS11")
+    .configure("name=corp-hsm\nlibrary=/usr/lib/softhsm/libsofthsm2.so\nslot=0");
+KeyStore token = KeyStore.getInstance("PKCS11", p11);
+token.load(null, pin);
+PepperService pepper = KeyStorePepperService.fromKeyStore(token, null)
+    .activeAlias("pepper-2026")
+    .load();
 ```
 
-The Sun PKCS#11 provider is part of the JDK; no extra dependency
-is required. It does **not** affect the global JCA provider order —
-the explicit `Mac.getInstance(..., sunPkcs11)` form scopes the
-provider per call.
+This protects the key at rest (it is stored on the token, not in a file
+next to the application) but not in use: the bytes are read once at
+start and held in memory, as with every other source.
 
-### Option B — Vendor SDK (Thales, Utimaco, AWS CloudHSM, etc.)
+## What 00.84.00 does **not** offer
 
-These vendors ship a JCA provider and / or a native client. Wire
-them the same way Option A wires `SunPKCS11`. Pinning to a vendor
-SDK is **operator choice** — the framework deliberately ships no
-adapter for any specific HSM.
+- HMAC on the token (`CKM_SHA256_HMAC` with a non-extractable key). It
+  needs a different SPI — the service would compute the tag instead of
+  handing out the key — and is a candidate for a later release.
+- Vendor-specific HSM adapters; a vendor JCA provider is wired the same
+  way as `SunPKCS11` above.
+- Key generation. Generate the key with the token's tools or, for
+  PKCS12, with
+  `keytool -genseckey -storetype PKCS12 -keystore pepper.p12 -alias pepper-2026 -keyalg HmacSHA256 -keysize 256`.
+- FIPS-mode bridging — see `fips-profile.md`.
 
 ## Rotation
 
-Both options support rotation via the existing
-`PepperReference` / `PasswordHashingService` rehash mechanics — when
-the active key id changes, verified envelopes are tagged with
-`RehashReason.PEPPER_KEY_ROTATED` and transparently re-encoded under
-the new key.
+Load the new key as active and the old one as retired
+(`.activeAlias("pepper-2027").retiredAlias("pepper-2026")`) and restart.
+Hashes peppered with the old key keep verifying; `needsRehash` reports
+`RehashReason.PEPPER_KEY_ROTATED`, and they are re-encoded under the new
+key at the next successful login. Retire a key only after the
+population has been rehashed or reset.
 
 ## What the framework guarantees
 
-- The `PepperService` SPI is stable across all deployments.
-- A custom HSM-backed implementation can be swapped in by writing a
-  single class.
-- `applyHmac` is invoked inside a try-with-resources around a
-  `SecretValue` so the input buffer is wiped on every call —
-  see `Konzept-V00.71.00.md` §6.
-- Pepper key bytes are **never** logged, persisted by the
-  framework, included in `toString()`, or accepted as input to
-  `AuditEvent` types — that holds whether the key lives in heap or
-  in an HSM.
-
-## What the framework does **not** ship
-
-- No PKCS#11 connector code.
-- No vendor-specific HSM driver wrapper.
-- No automatic key-generation procedure.
-- No FIPS-mode bridging — see `fips-profile.md`.
-
-These are integration-time decisions and stay in the consumer
-project.
-
-## Maintenance
-
-When a future release adds an officially supported HSM connector
-module (e.g. `security-credentials-hsm-pkcs11`), this document is
-demoted to "historic" and the new module's README becomes the
-reference.
+- Key bytes are never logged, persisted by the framework, included in
+  `toString()` or accepted as input to `AuditEvent` types.
+- An unknown key id in a stored envelope is answered like a wrong
+  password, after a dummy KDF run at real cost.

@@ -25,12 +25,13 @@ operator-supplied HSM-backed implementation must (see
 
 ### 1. Contain (minutes)
 
-- Disable the suspected pepper key in the key store / HSM. From this
-  point, `PepperService.applyHmac(ref, ...)` for that key id must
-  start returning a structured failure or throwing — verifications
-  using the old key will fall back to the dummy KDF and audit as
+- Remove the suspected pepper key from the key source (PKCS12 file,
+  key store or key file directory) and restart with a new active key.
+  From this point `PepperService.resolve(keyId)` no longer returns the
+  old key: verifications of hashes peppered with it fall back to the
+  dummy KDF, are answered like a wrong password and are audited as
   `CredentialVerificationFailed` with the matching internal type.
-- Confirm `JSentinelAuditService` is forwarding events to your
+- Confirm `JCustosAuditService` is forwarding events to your
   long-term audit sink. Pepper-compromise response writes a
   significant audit volume; the runbook is unusable without it.
 
