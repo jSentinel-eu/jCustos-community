@@ -430,6 +430,33 @@ Library test totals as of V00.70.00:
 104 — all green. Demo tests: `demo-vaadin` 103, `demo-rest` 48,
 `demo-vaadin-rest-client` 13, `demo-standalone` 34.
 
+**Plain http to a loopback stub needs `-Djcustos.dev=true`.** jCustos
+calls every outgoing endpoint over https: token, PAR, revocation,
+introspection, device, discovery, UserInfo, JWKS, the HIBP range API
+and the propagation token endpoints. Plain http is accepted only to a
+loopback host (`localhost`, `127.0.0.0/8`, `[::1]`, recognised without
+name resolution) and only while the system property `jcustos.dev` is
+`true`. Tests against `StubIdentityProvider` (`jCustos-test-oidc`) or
+any stub on `127.0.0.1` set it per test class
+(`System.setProperty("jcustos.dev", "true")` before the first client is
+built, `System.clearProperty("jcustos.dev")` afterwards) or per module
+in Surefire:
+
+```xml
+<plugin>
+  <artifactId>maven-surefire-plugin</artifactId>
+  <configuration>
+    <systemPropertyVariables>
+      <jcustos.dev>true</jcustos.dev>
+    </systemPropertyVariables>
+  </configuration>
+</plugin>
+```
+
+Since 00.84.00 this includes the JWKS client and the HIBP checker,
+which accepted loopback http without the flag before. Never set it in
+production.
+
 ### Mutation coverage
 
 ```bash
