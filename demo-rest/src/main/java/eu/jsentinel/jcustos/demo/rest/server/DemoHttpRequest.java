@@ -35,6 +35,12 @@ import java.util.Map;
  * of its own. {@link DemoHttpRouter} builds requests with
  * {@link #fromHeaderLines(String, String, Map, Map, byte[], String)} and refuses a request
  * that repeats a credential header before any filter runs.
+ * <p>
+ * JS-SEC-098: the same holds for query parameters. {@link #queryParameterValues()} returns
+ * every value of a repeated parameter, so the OAuth2 callback handler sees a repeated
+ * {@code state}, {@code code} or {@code iss}; {@link #queryParameters()} keeps the last value.
+ * Until the exit review of 00.84.00 the request kept the lossy default of
+ * {@code queryParameterValues()} (RF31).
  */
 public final class DemoHttpRequest implements BodyRestRequest {
 
@@ -43,6 +49,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
   private final Map<String, List<String>> headerLines;
   private final Map<String, String> headers;
   private final Map<String, String> queryParameters;
+  private final Map<String, List<String>> queryParameterValues;
   private final byte[] body;
   private final String remoteAddress;
 
@@ -66,7 +73,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
       Map<String, String> queryParameters,
       byte[] body,
       String remoteAddress) {
-    this(singleLines(headers), method, path, queryParameters, body, remoteAddress);
+    this(singleLines(headers), method, path, singleLines(queryParameters), body, remoteAddress);
   }
 
   public DemoHttpRequest(
@@ -95,14 +102,15 @@ public final class DemoHttpRequest implements BodyRestRequest {
       Map<String, List<String>> headerLines,
       String method,
       String path,
-      Map<String, String> queryParameters,
+      Map<String, List<String>> queryLines,
       byte[] body,
       String remoteAddress) {
     this.method = method;
     this.path = path;
     this.headerLines = copyLines(headerLines);
     this.headers = Map.copyOf(RestHeaderLines.joined(this.headerLines));
-    this.queryParameters = Map.copyOf(queryParameters);
+    this.queryParameterValues = Map.copyOf(copyLines(queryLines));
+    this.queryParameters = Map.copyOf(lastValues(this.queryParameterValues));
     this.body = body == null ? new byte[0] : body.clone();
     this.remoteAddress = remoteAddress;
   }
@@ -113,7 +121,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
    * @param method          HTTP method
    * @param path            request path
    * @param headerLines     every header line, per name in wire order
-   * @param queryParameters decoded query parameters
+   * @param queryLines      every value of every decoded query parameter, in wire order
    * @param body            raw body, or {@code null}
    * @param remoteAddress   connection peer, or {@code null}
    * @return the request
@@ -122,10 +130,10 @@ public final class DemoHttpRequest implements BodyRestRequest {
       String method,
       String path,
       Map<String, List<String>> headerLines,
-      Map<String, String> queryParameters,
+      Map<String, List<String>> queryLines,
       byte[] body,
       String remoteAddress) {
-    return new DemoHttpRequest(headerLines, method, path, queryParameters, body, remoteAddress);
+    return new DemoHttpRequest(headerLines, method, path, queryLines, body, remoteAddress);
   }
 
   @Override
@@ -159,6 +167,12 @@ public final class DemoHttpRequest implements BodyRestRequest {
     return queryParameters;
   }
 
+  /** Every value of every query parameter, in wire order (JS-SEC-098, RF31). */
+  @Override
+  public Map<String, List<String>> queryParameterValues() {
+    return queryParameterValues;
+  }
+
   @Override
   public byte[] bodyBytes() {
     return body.clone();
@@ -172,6 +186,17 @@ public final class DemoHttpRequest implements BodyRestRequest {
       }
     });
     return lines;
+  }
+
+  /** The single-valued view of query parameters: the last value of each. */
+  private static Map<String, String> lastValues(Map<String, List<String>> lines) {
+    Map<String, String> last = new LinkedHashMap<>();
+    lines.forEach((name, values) -> {
+      if (!values.isEmpty()) {
+        last.put(name, values.getLast());
+      }
+    });
+    return last;
   }
 
   private static Map<String, List<String>> copyLines(Map<String, List<String>> headerLines) {

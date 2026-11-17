@@ -58,14 +58,19 @@ import java.util.function.Function;
  * {@link RestOriginGuard#originAccepted(RestRequest)}, the one the opt-in
  * {@code RestOriginGuard} applies to every state-changing request: an origin is compared
  * exactly on scheme, host and port, and a value with a path, user information, query or
- * fragment is refused. The handler does not consult {@code Sec-Fetch-Site}, writes its
- * {@code 403} without a body and audits nothing, as before.
+ * fragment is refused. Compared with {@code Host}, the origin must be {@code https}, or
+ * {@code http} for a loopback host; an application that browsers reach over plain {@code http}
+ * on another host names its origin with {@link #withAllowedOrigins(Set)} (RF24 - until the exit
+ * review of 00.84.00 the scheme was not compared with {@code Host}). The handler does not
+ * consult {@code Sec-Fetch-Site}, writes its {@code 403} without a body and audits nothing, as
+ * before.
  *
  * <p><strong>Where the provider may send the user afterwards (JS-SEC-089, CWE-601).</strong>
  * Until 00.84.00 the two-argument constructor silently forwarded any
  * {@code post_logout_redirect_uri}. It now uses {@code new RpInitiatedLogoutInitiator()},
  * which has no allowlist, refuses every {@code post_logout_redirect_uri} and logs
- * {@code oidc/logout-redirect-unvalidated} once per JVM. A handler whose resolver supplies a
+ * {@code oidc/logout-redirect-unvalidated} at the first refusal in a JVM (not at construction:
+ * a resolver without a target is a correct use, RF32). A handler whose resolver supplies a
  * {@code post_logout_redirect_uri} is built with an initiator that names the targets:
  * <pre>{@code
  *   new OidcLogoutHandler(endSessionEndpoint,
@@ -96,8 +101,8 @@ public final class OidcLogoutHandler implements RestHandler {
 
   /**
    * A handler whose initiator has no redirect allowlist (JS-SEC-089, CWE-601): every
-   * {@code post_logout_redirect_uri} the resolver supplies is refused, and
-   * {@code oidc/logout-redirect-unvalidated} is logged once per JVM. Until 00.84.00 this
+   * {@code post_logout_redirect_uri} the resolver supplies is refused, and the first refusal in
+   * a JVM logs {@code oidc/logout-redirect-unvalidated}. Until 00.84.00 this
    * constructor forwarded any target. Use it for resolvers that supply no
    * {@code post_logout_redirect_uri}; otherwise use
    * {@link #OidcLogoutHandler(URI, LogoutInitiator, LogoutRequestResolver)} with

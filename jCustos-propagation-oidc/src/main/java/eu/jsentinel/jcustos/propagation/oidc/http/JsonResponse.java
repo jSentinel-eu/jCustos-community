@@ -51,11 +51,13 @@ public final class JsonResponse {
   }
 
   /**
-   * @return the top-level {@code expires_in} value in seconds, or empty if absent, not an
-   *     integer within {@code long}, or the body is malformed
+   * @return the top-level {@code expires_in} value in seconds, or empty if absent, negative, not
+   *     an integer within {@code long}, or the body is malformed. A negative value counts as
+   *     absent, as it did up to 00.83.00; until the exit review of 00.84.00 the delegate to
+   *     {@link BoundedJson} returned it (RF27).
    */
   public static Optional<Long> expiresIn(String body) {
-    return BoundedJson.integer(fieldsOf(body), "expires_in");
+    return BoundedJson.integer(fieldsOf(body), "expires_in").filter(seconds -> seconds >= 0);
   }
 
   /**

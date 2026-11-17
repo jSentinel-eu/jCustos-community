@@ -117,6 +117,19 @@ class OidcLogoutHandlerOriginGuardTest {
   }
 
   @Test
+  @DisplayName("RF24: an http Origin for the host of an https site is 403; loopback http and an allowlisted http origin pass")
+  void httpOrigin_needsLoopbackOrTheAllowlist() {
+    assertEquals(HttpStatus.FORBIDDEN.code(), handle(handler(), Map.of("Host", "app.example",
+        "Origin", "http://app.example")).status,
+        "a page served over plain http for the host - by an attacker on the path - is not the application");
+    assertEquals(HttpStatus.FOUND.code(), handle(handler(), Map.of("Host", "localhost:8080",
+        "Origin", "http://localhost:8080")).status, "local development over http still works");
+    assertEquals(HttpStatus.FOUND.code(), handle(handler().withAllowedOrigins(Set.of("http://intranet.example:8080")),
+        Map.of("Host", "intranet.example:8080", "Origin", "http://intranet.example:8080")).status,
+        "a plain-http deployment names its origin");
+  }
+
+  @Test
   @DisplayName("stricter: the allowlist refuses a value with a path; a trailing slash is still an origin")
   void allowlistConfiguration() {
     assertThrows(IllegalArgumentException.class,

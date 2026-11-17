@@ -157,9 +157,13 @@ session into a cookie, every state-changing route becomes reachable
 from any page the user visits. Install the guard -
 `.originGuard(RestOriginGuard.sameOrigin())`, behind a proxy with
 `.withAllowedOrigins(Set.of("https://app.example"))` - and keep the
-`Router`'s first step. Credentialed CORS without a guard is reported as
-`rest/credentialed-cors-without-origin-guard`. Background and the
-interplay with `SameSite`: `docs/security/csrf.md`.
+`Router`'s first step. A same-origin guard expects `https` origins (plain
+`http` only for a loopback host); a deployment that browsers reach over
+plain `http` on another host adds `.withScheme("http")`. Credentialed CORS
+without a guard is reported as `rest/credentialed-cors-without-origin-guard`,
+a credentialed CORS origin the guard refuses as
+`rest/credentialed-cors-origin-not-accepted`. Background and the interplay
+with `SameSite`: `docs/security/csrf.md`.
 
 ### Audit-sink at scale
 

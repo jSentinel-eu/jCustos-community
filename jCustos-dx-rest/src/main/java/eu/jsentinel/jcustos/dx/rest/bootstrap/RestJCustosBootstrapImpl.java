@@ -58,6 +58,20 @@ final class RestJCustosBootstrapImpl
   static final String CODE_CREDENTIALED_CORS_WITHOUT_ORIGIN_GUARD =
       "rest/credentialed-cors-without-origin-guard";
 
+  /**
+   * CORS allows credentials for an origin the installed {@link RestOriginGuard} does not
+   * accept: the browser sends that origin's state-changing requests with the cookie, and the
+   * guard refuses every one of them with {@code 403}. WARNING in every mode.
+   *
+   * @since 00.84.00
+   */
+  static final String CODE_CREDENTIALED_CORS_ORIGIN_NOT_ACCEPTED =
+      "rest/credentialed-cors-origin-not-accepted";
+
+  /** CORS origin values that are no origin; {@code cors/wildcard-with-credentials} reports them. */
+  private static final String CORS_WILDCARD = "*";
+  private static final String CORS_NULL_ORIGIN = "null";
+
   /** Source under which {@code .originGuard(...)} lists the installed guard. */
   static final String SOURCE_ORIGIN_GUARD = "bootstrap-origin-guard";
 
@@ -177,6 +191,44 @@ final class RestJCustosBootstrapImpl
         "Install the guard with .originGuard(RestOriginGuard.sameOrigin().withAllowedOrigins("
             + "Set.of(...))), naming the API's own public origin and the allowed CORS origins; "
             + "with bearer tokens only, drop allowCredentials(true)."));
+  }
+
+  /**
+   * CSRF (CWE-352), RF30: the other side of {@link #reportCredentialedCorsWithoutOriginGuard}.
+   * With a guard installed, every origin of a credentialed CORS configuration has to be one the
+   * guard accepts as a cross-origin caller - in practice, one of its allowed origins. A guard
+   * that compares with {@code Host} ({@code sameOrigin()} without an allowlist) accepts none:
+   * a browser applies CORS only to requests from another origin. Until the exit review of
+   * 00.84.00 such a configuration booted without a word and every state-changing request from
+   * the partner origin got {@code 403}. The wildcard and the {@code null} origin are left to
+   * {@code cors/wildcard-with-credentials}.
+   */
+  private void reportCredentialedCorsOriginsTheGuardRefuses(
+      List<JCustosBootstrapWarning> warnings) {
+    if (!corsConfiguration.allowCredentials()) {
+      return;
+    }
+    RestOriginGuard guard = RestOriginGuard.installed().orElse(null);
+    if (guard == null) {
+      return;
+    }
+    List<String> refused = corsConfiguration.allowedOrigins().stream()
+        .filter(origin -> !CORS_WILDCARD.equals(origin)
+            && !CORS_NULL_ORIGIN.equalsIgnoreCase(origin))
+        .filter(origin -> !guard.acceptsCrossOrigin(origin))
+        .toList();
+    if (refused.isEmpty()) {
+      return;
+    }
+    warnings.add(new JCustosBootstrapWarning(
+        Severity.WARNING,
+        CODE_CREDENTIALED_CORS_ORIGIN_NOT_ACCEPTED,
+        "CORS allows credentials for " + refused + ", but the installed RestOriginGuard does "
+            + "not accept " + (refused.size() == 1 ? "this origin" : "these origins") + " ("
+            + guard + "): every state-changing request from there is refused with 403.",
+        "List the origins in .originGuard(RestOriginGuard.sameOrigin().withAllowedOrigins("
+            + "Set.of(...))) together with the API's own public origin, or remove them from "
+            + "the CORS configuration."));
   }
 
   /**
@@ -416,6 +468,7 @@ final class RestJCustosBootstrapImpl
             "bootstrap-cors", false));
       }
       reportCredentialedCorsWithoutOriginGuard(warnings);
+      reportCredentialedCorsOriginsTheGuardRefuses(warnings);
     }
     // V00.74 (A2.2): publish OpenAPI metadata when configured.
     if (openApiMetadata != null) {

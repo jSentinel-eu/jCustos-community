@@ -168,24 +168,49 @@ class RpInitiatedLogoutRedirectValidationTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-089: default construction writes exactly one oidc/logout-redirect-unvalidated warning")
-  void defaultConstructionWarnsExactlyOnce() {
+  @DisplayName("JS-SEC-089, RF32: the first refused target writes exactly one oidc/logout-redirect-unvalidated warning")
+  void firstRefusedTargetWarnsExactlyOnce() {
     RpInitiatedLogoutInitiator.resetUnvalidatedRedirectWarning();
     try {
-      new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(ALLOWED));
+      RpInitiatedLogoutInitiator withAllowlist =
+          new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(ALLOWED));
+      assertThrows(IllegalArgumentException.class, () -> withAllowlist.buildLogoutUri(END_SESSION,
+          logoutTo(URI.create("https://attacker.test/harvest"))));
       assertEquals(0, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
-          "an initiator with an allowlist does not warn");
+          "an initiator with an allowlist does not warn - the refusal is the configured behaviour");
 
-      new RpInitiatedLogoutInitiator();
+      RpInitiatedLogoutInitiator withoutAllowlist = new RpInitiatedLogoutInitiator();
+      assertThrows(IllegalArgumentException.class,
+          () -> withoutAllowlist.buildLogoutUri(END_SESSION, logoutTo(ALLOWED)));
       assertEquals(1, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
-          "the missing allowlist is announced");
+          "the missing allowlist is announced with the refusal");
 
-      new RpInitiatedLogoutInitiator();
-      new RpInitiatedLogoutInitiator();
+      for (int i = 0; i < 3; i++) {
+        assertThrows(IllegalArgumentException.class,
+            () -> new RpInitiatedLogoutInitiator().buildLogoutUri(END_SESSION, logoutTo(ALLOWED)));
+      }
       assertEquals(1, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
           "once per JVM - a view builds an initiator per logout");
       assertEquals("oidc/logout-redirect-unvalidated",
           RpInitiatedLogoutInitiator.UNVALIDATED_REDIRECT_WARNING);
+    } finally {
+      RpInitiatedLogoutInitiator.resetUnvalidatedRedirectWarning();
+    }
+  }
+
+  @Test
+  @DisplayName("RF32: construction and logouts without a target write no warning - the configuration the WARN calls correct")
+  void correctConfigurationsDoNotWarn() {
+    RpInitiatedLogoutInitiator.resetUnvalidatedRedirectWarning();
+    try {
+      RpInitiatedLogoutInitiator initiator = new RpInitiatedLogoutInitiator();
+      assertEquals(0, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
+          "until the exit review every construction warned, also for a resolver without a target");
+      for (int i = 0; i < 3; i++) {
+        initiator.buildLogoutUri(END_SESSION, new LogoutRequest("hint", Optional.empty(), Optional.empty()));
+      }
+      assertEquals(0, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
+          "a logout without a post_logout_redirect_uri is not refused and not announced");
     } finally {
       RpInitiatedLogoutInitiator.resetUnvalidatedRedirectWarning();
     }

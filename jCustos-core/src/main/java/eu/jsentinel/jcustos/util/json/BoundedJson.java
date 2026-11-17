@@ -264,7 +264,7 @@ public final class BoundedJson {
     }
     int code = 0;
     for (int h = 0; h < 4; h++) {
-      int digit = Character.digit(s.charAt(i + h), 16);
+      int digit = hexDigit(s.charAt(i + h));
       if (digit < 0) {
         throw new Refusal("invalid unicode escape at " + (i - 2));
       }
@@ -272,6 +272,26 @@ public final class BoundedJson {
     }
     i += 4;
     return (char) code;
+  }
+
+  /**
+   * The value of an RFC 8259 {@code HEXDIG}: ASCII {@code 0-9}, {@code a-f}, {@code A-F}. Until
+   * the exit review of 00.84.00 this was {@code Character.digit(c, 16)}, which also accepts the
+   * fullwidth and the other Unicode decimal digits that parsers following the RFC refuse (RF26).
+   *
+   * @return the value, or {@code -1} for any other character
+   */
+  private static int hexDigit(char c) {
+    if (c >= '0' && c <= '9') {
+      return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+      return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+      return c - 'A' + 10;
+    }
+    return -1;
   }
 
   private Object number() {

@@ -77,15 +77,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * adapters used it, so the provider's registration was the only check. The no-argument
  * constructor now refuses every {@code post_logout_redirect_uri} with the same
  * {@link IllegalArgumentException} an allowlist raises for a target it does not contain, and
- * announces that once per JVM with the WARN {@value #UNVALIDATED_REDIRECT_WARNING}. A
- * {@link LogoutRequest} without a {@code post_logout_redirect_uri} is not affected: the
- * provider ends its session and shows its own page.
+ * announces the first such refusal in a JVM with the WARN {@value #UNVALIDATED_REDIRECT_WARNING}.
+ * A {@link LogoutRequest} without a {@code post_logout_redirect_uri} is not affected: the
+ * provider ends its session and shows its own page, and nothing is logged. Until the exit
+ * review of 00.84.00 the WARN was written at construction, also for the configurations it
+ * calls correct - a resolver or a view that names no target (RF32).
  */
 public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
 
   /**
-   * Code of the WARN the no-argument constructor writes once per JVM: the initiator was built
-   * without an allowlist and refuses every {@code post_logout_redirect_uri}.
+   * Code of the WARN an initiator of the no-argument constructor writes once per JVM, when it
+   * refuses its first {@code post_logout_redirect_uri}: it has no allowlist.
    *
    * @since 00.84.00
    */
@@ -102,8 +104,9 @@ public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
   /**
    * An initiator without an allowlist: {@link #buildLogoutUri} refuses every
    * {@code post_logout_redirect_uri} with an {@link IllegalArgumentException} and builds a
-   * logout request without one as before (JS-SEC-089, CWE-601). The first construction
-   * through this constructor in a JVM logs the WARN {@value #UNVALIDATED_REDIRECT_WARNING}.
+   * logout request without one as before (JS-SEC-089, CWE-601). The first refused target in a
+   * JVM logs the WARN {@value #UNVALIDATED_REDIRECT_WARNING}; an initiator that is only asked
+   * for logouts without a target logs nothing.
    *
    * <p>Until 00.84.00 this constructor forwarded any redirect URI. To keep a redirect target,
    * use {@link #RpInitiatedLogoutInitiator(PostLogoutRedirectValidator)} with
@@ -111,16 +114,6 @@ public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
    */
   public RpInitiatedLogoutInitiator() {
     this(NO_ALLOWLIST);
-    // JS-SEC-089 (CWE-601): a logout without a redirect allowlist is possible, never silent.
-    if (UNVALIDATED_REDIRECT_WARNED.compareAndSet(false, true)) {
-      UNVALIDATED_REDIRECT_WARNINGS.incrementAndGet();
-      HasLogger.staticLogger().warn("{}: RpInitiatedLogoutInitiator was built without a "
-          + "PostLogoutRedirectValidator; every post_logout_redirect_uri is refused until an "
-          + "allowlist is configured. Use new RpInitiatedLogoutInitiator("
-          + "PostLogoutRedirectValidator.allowOnly(...)) with the targets registered at the "
-          + "provider (AbstractOidcLogoutView.initiator(), OidcLogoutHandler with an initiator).",
-          UNVALIDATED_REDIRECT_WARNING);
-    }
   }
 
   /**
@@ -141,6 +134,9 @@ public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
     append(query, "id_token_hint", request.idTokenHint());
     request.postLogoutRedirectUri().ifPresent(uri -> {
       if (!redirectValidator.isAllowed(uri)) {
+        if (redirectValidator == NO_ALLOWLIST) {
+          warnUnvalidatedRedirectOnce();
+        }
         // Refuse rather than drop it: a rejected URI means either an attack or a
         // misconfigured allowlist, and silently logging the user out to the
         // provider's default page would hide both. A missing allowlist is the
@@ -161,6 +157,23 @@ public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
 
     String separator = endSessionEndpoint.getRawQuery() == null ? "?" : "&";
     return URI.create(endSessionEndpoint + separator + query);
+  }
+
+  /**
+   * JS-SEC-089 (CWE-601), RF32: a logout without a redirect allowlist is possible, a refused
+   * target is never silent - once per JVM, because a view builds an initiator per logout.
+   */
+  private static void warnUnvalidatedRedirectOnce() {
+    if (UNVALIDATED_REDIRECT_WARNED.compareAndSet(false, true)) {
+      UNVALIDATED_REDIRECT_WARNINGS.incrementAndGet();
+      HasLogger.staticLogger().warn("{}: RpInitiatedLogoutInitiator was built without a "
+          + "PostLogoutRedirectValidator and refused a post_logout_redirect_uri; every such "
+          + "target is refused until an allowlist is configured. Use new "
+          + "RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(...)) with the "
+          + "targets registered at the provider (AbstractOidcLogoutView.initiator(), "
+          + "OidcLogoutHandler with an initiator).",
+          UNVALIDATED_REDIRECT_WARNING);
+    }
   }
 
   /**

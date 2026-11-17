@@ -165,6 +165,9 @@ RestSecurity.bootstrap()
 ```
 
 The allowlist replaces the `Host` comparison; include every credentialed CORS origin as well.
+A same-origin guard expects the `Origin` to be `https` (plain `http` only for a loopback host), which
+fits the TLS-terminating proxy of this page; the bootstrap reports a credentialed CORS origin the guard
+refuses as `rest/credentialed-cors-origin-not-accepted`.
 `docs/security/csrf.md` describes what the guard does and does not cover.
 
 ## 8. Checklist

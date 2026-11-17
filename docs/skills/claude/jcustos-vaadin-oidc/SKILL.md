@@ -168,7 +168,7 @@ No new annotation-processor paths (the AutoService processor from `jcustos-vaadi
    login is undone and the view forwards to `errorTarget()`. A callback that does not extend
    the base view must call `LoginSessionRotation.afterLogin()` itself and pass `iss` into
    `CallbackParams`.
-4. **Logout (`OidcLogoutView` extends `AbstractOidcLogoutView`)**: `endSessionEndpoint()` from `md.endSessionEndpoint().orElseThrow()`; `logoutRequest()` returns `new LogoutRequest(storedIdToken, Optional.of(POST_LOGOUT_URI), Optional.empty())` (`idTokenHint` is non-null — pass `""` if absent). The base view ends the local session in every case — subject, token credential and snapshot cleared, `LogoutPerformed` audited, Vaadin session closed, HTTP session invalidated — and redirects to the provider (JS-SEC-147); no `onBeforeLogout()` override is needed. Navigating to `/logout` alone logs nobody out: every sign-out link or button uses `AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)`, which carries a single-use token bound to the session; without it the view asks for a confirmation click (CWE-352):
+4. **Logout (`OidcLogoutView` extends `AbstractOidcLogoutView`)**: `endSessionEndpoint()` from `md.endSessionEndpoint().orElseThrow()`; `logoutRequest()` returns `new LogoutRequest(storedIdToken, Optional.of(POST_LOGOUT_URI), Optional.empty())` (`idTokenHint` is non-null — pass `""` if absent); `initiator()` returns `new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(URI.create(POST_LOGOUT_URI)))`, the one target the view sends (JS-SEC-089, CWE-601). The override is required: the base class's default initiator has no allowlist and refuses every `post_logout_redirect_uri`, and the view then ends only the local session, sends the browser to `/login` and leaves the IdP session open (CWE-613) — the next "Login with &lt;IdP&gt;" on that browser signs the same user in without a password. The base view ends the local session in every case — subject, token credential and snapshot cleared, `LogoutPerformed` audited, Vaadin session closed, HTTP session invalidated — and, with the allowlisted target, redirects to the provider (JS-SEC-147); no `onBeforeLogout()` override is needed. Navigating to `/logout` alone logs nobody out: every sign-out link or button uses `AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)`, which carries a single-use token bound to the session; without it the view asks for a confirmation click (CWE-352):
    ```java
    Button signOut = new Button("Sign out",
        click -> UI.getCurrent().navigate(AbstractOidcLogoutView.logoutLocation(OidcLogoutView.class)));
@@ -181,7 +181,8 @@ No new annotation-processor paths (the AutoService processor from `jcustos-vaadi
 - [ ] Scopes include `openid`.
 - [ ] Dev run: clicking "Login with &lt;IdP&gt;" redirects to the IdP; after auth the browser lands on `/oauth2/callback` and then `/dashboard` with the subject's display name visible.
 - [ ] Roles from the IdP show up (e.g. an admin-realm-role user sees the admin views) — proves the vendor profile mapped claims → `RoleName`s.
-- [ ] Logout redirects through the IdP `end_session_endpoint` and back to `{{POST_LOGOUT_URI}}`; the session subject is cleared.
+- [ ] The IdP has `{{POST_LOGOUT_URI}}` registered as a post-logout redirect URI (exact match), and `OidcLogoutView` overrides `initiator()` with `PostLogoutRedirectValidator.allowOnly(URI.create(OidcClients.POST_LOGOUT_URI))`.
+- [ ] Logout redirects through the IdP `end_session_endpoint` and back to `{{POST_LOGOUT_URI}}`; the session subject is cleared. Landing on `/login` without passing the IdP means the target was refused (the log has a WARN that the end-session redirect could not be computed, and `oidc/logout-redirect-unvalidated` without the override): the IdP session is still open.
 - [ ] A tampered/expired ID token is rejected (callback reroutes to login, not a 500).
 
 ## Pitfalls
@@ -200,6 +201,13 @@ and use no router layout: a restriction on a layout applies to every view in it
 ### Redirect URI must match exactly
 The IdP compares `redirect_uri` byte-for-byte. `https://app/oauth2/callback` ≠
 `https://app/oauth2/callback/`. Register the exact `{{REDIRECT_URI}}`.
+
+### The post-logout target needs an allowlist
+Since 00.84.00 `AbstractOidcLogoutView.initiator()` defaults to an initiator without an
+allowlist, which refuses every `post_logout_redirect_uri` (JS-SEC-089). The template's
+`initiator()` override names `POST_LOGOUT_URI`; keep it when you edit the view, and add every
+further target you send to `allowOnly(...)`. Without it the logout looks successful locally
+but never reaches the IdP.
 
 ### https / loopback only
 The DX bootstrap rejects a non-https redirect URI unless it's `localhost`/`127.0.0.1`

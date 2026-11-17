@@ -347,6 +347,12 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
   }
 
   /**
+   * Code of the finding for a JWKS URI the JWKS client refuses, or accepts only for local
+   * development; also the error code passed to {@code EndpointSecurity.requireHttps}.
+   */
+  private static final String JWKS_URI_NOT_HTTPS = "jwks/uri-not-https";
+
+  /**
    * V00.76 — consume the {@link eu.jsentinel.jcustos.dx.internal.JwtState}
    * accumulated by {@code .jwt(...)}. The explicit {@code .validator(...)} wins;
    * otherwise a Nimbus validator is assembled from the {@code .jwksUri(...)} path
@@ -406,25 +412,34 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       return;
     }
 
-    if (!"https".equalsIgnoreCase(jwt.jwksUri().getScheme())) {
-      // R11 (V00.76.10): a non-https JWKS URI fetches the entire JWT trust root
-      // over cleartext, where a MITM can substitute its own JWKS and forge
-      // tokens that pass the allow-list + family + signature checks against the
-      // attacker's key. That must not be a mere warning in PRODUCTION — it is an
-      // ERROR there too (was WARNING). Only the local dev modes (DEVELOPMENT /
-      // COMMUNITY_DEFAULTS) keep it at INFO for a local IdP - and since ER31
-      // (JS-SEC-098) only where the JWKS client accepts the URI: plain http to a
-      // loopback host with -Djcustos.dev=true. Everything else is an ERROR here
-      // rather than an exception out of the validator factory.
-      boolean acceptedLocally = "http".equalsIgnoreCase(jwt.jwksUri().getScheme())
-          && EndpointSecurity.devModeEnabled()
-          && EndpointSecurity.isLoopbackHost(jwt.jwksUri().getHost());
+    // R11 (V00.76.10): a non-https JWKS URI fetches the entire JWT trust root over
+    // cleartext, where a MITM can substitute its own JWKS and forge tokens that pass the
+    // allow-list + family + signature checks against the attacker's key. That must not be a
+    // mere warning in PRODUCTION — it is an ERROR there too (was WARNING). Only the local dev
+    // modes (DEVELOPMENT / COMMUNITY_DEFAULTS) keep it at INFO for a local IdP - and since ER31
+    // (JS-SEC-098) only where the JWKS client accepts the URI: plain http to a loopback host
+    // with -Djcustos.dev=true. Everything else is an ERROR here rather than an exception out of
+    // the validator factory. RF28: the decision is EndpointSecurity's, the rule the JWKS client
+    // applies; until the exit review of 00.84.00 this compared the scheme alone, so
+    // "https:///jwks" passed here and the factory threw out of install().
+    String jwksRefusal = null;
+    try {
+      EndpointSecurity.requireHttps(jwt.jwksUri(), JWKS_URI_NOT_HTTPS);
+    } catch (IllegalArgumentException refused) {
+      jwksRefusal = refused.getMessage();
+    }
+    boolean acceptedOnlyForDevelopment =
+        jwksRefusal == null && !EndpointSecurity.isHttpsEndpoint(jwt.jwksUri());
+    if (jwksRefusal != null || acceptedOnlyForDevelopment) {
       Severity severity = switch (state.mode()) {
         case STRICT, PRODUCTION -> Severity.ERROR;
-        default -> acceptedLocally ? Severity.INFO : Severity.ERROR;
+        default -> acceptedOnlyForDevelopment ? Severity.INFO : Severity.ERROR;
       };
-      warnings.add(new JCustosBootstrapWarning(severity, "jwks/uri-not-https",
-          "JWKS URI is not https (" + jwt.jwksUri().getScheme() + ").",
+      warnings.add(new JCustosBootstrapWarning(severity, JWKS_URI_NOT_HTTPS,
+          jwksRefusal != null
+              ? "JWKS URI is refused by the JWKS client: " + jwksRefusal
+              : "JWKS URI is plain http to a loopback host (" + jwt.jwksUri().getHost()
+                  + "), accepted only with -D" + EndpointSecurity.DEV_MODE_PROPERTY + "=true.",
           "Use an https JWKS endpoint. Plain http is accepted only to a loopback host "
               + "and only with -D" + EndpointSecurity.DEV_MODE_PROPERTY + "=true, never in "
               + "production."));

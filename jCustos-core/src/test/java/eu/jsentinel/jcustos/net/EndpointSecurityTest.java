@@ -169,4 +169,36 @@ class EndpointSecurityTest {
   void nullHost() {
     assertFalse(EndpointSecurity.isLoopbackHost(null));
   }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"[::1]junk]", "[::1]]", "[[::1]]", "[127.0.0.1]", "[127.0.0.2]", "::1]",
+      "127.0.0.1]", "[]", "[", " 127.0.0.1", "127.0.0.1 ", "\t127.0.0.1", "127.0.0.1\n", " localhost",
+      "[ ::1]", "[::1 ]", "local host", "127.0.0.1\u00a0", "localhost\u0000"})
+  @DisplayName("RF29: isLoopbackHost refuses text no URI host has - junk after the bracket, a bracketed IPv4 literal, white space")
+  void notUriHostText(String host) {
+    assertFalse(EndpointSecurity.isLoopbackHost(host),
+        "until the exit review the literal parser cut at the first ']' and trimmed: '" + host + "'");
+  }
+
+  @Test
+  @DisplayName("RF29: the hosts java.net.URI reports for loopback endpoints still count")
+  void uriHostsStillCount() {
+    for (String uri : new String[] {"http://[::1]:8080/x", "http://[0:0:0:0:0:0:0:1]/x",
+        "http://[::ffff:127.0.0.1]/x", "http://127.0.0.1/x", "http://LOCALHOST/x"}) {
+      assertTrue(EndpointSecurity.isLoopbackHost(URI.create(uri).getHost()), uri);
+    }
+  }
+
+  @Test
+  @DisplayName("RF28: isHttpsEndpoint is https with a host - what requireHttps accepts without the flag")
+  void isHttpsEndpoint() {
+    assertTrue(EndpointSecurity.isHttpsEndpoint(URI.create("https://idp.example/jwks")));
+    assertTrue(EndpointSecurity.isHttpsEndpoint(URI.create("HTTPS://127.0.0.1:8443/jwks")));
+    devMode();
+    for (String uri : new String[] {"https:///jwks", "https:jwks", "http://localhost/jwks",
+        "http://idp.example/jwks", "ftp://idp.example/jwks"}) {
+      assertFalse(EndpointSecurity.isHttpsEndpoint(URI.create(uri)), uri);
+    }
+    assertThrows(NullPointerException.class, () -> EndpointSecurity.isHttpsEndpoint(null));
+  }
 }

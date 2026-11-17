@@ -81,18 +81,34 @@ public final class EndpointSecurity {
   public static URI requireHttps(URI endpoint, String errorCode) {
     Objects.requireNonNull(endpoint, "endpoint");
     Objects.requireNonNull(errorCode, "errorCode");
-    String scheme = endpoint.getScheme();
-    String host = endpoint.getHost();
-    if (HTTPS.equalsIgnoreCase(scheme) && host != null && !host.isEmpty()) {
+    if (isHttpsEndpoint(endpoint)) {
       return endpoint;
     }
-    if (HTTP.equalsIgnoreCase(scheme) && isLoopbackHost(host) && devModeEnabled()) {
+    String host = endpoint.getHost();
+    if (HTTP.equalsIgnoreCase(endpoint.getScheme()) && isLoopbackHost(host) && devModeEnabled()) {
       return endpoint;
     }
     // Scheme and host only: the path or the query of a misconfigured URI may carry a credential.
     throw new IllegalArgumentException(errorCode + ": the endpoint must use https:// (got: "
-        + scheme + "://" + host + "); plain http is accepted only for a loopback host with -D"
-        + DEV_MODE_PROPERTY + "=true");
+        + endpoint.getScheme() + "://" + host + "); plain http is accepted only for a loopback "
+        + "host with -D" + DEV_MODE_PROPERTY + "=true");
+  }
+
+  /**
+   * Whether {@code endpoint} is accepted by {@link #requireHttps(URI, String)} without the
+   * development carve-out: {@code https} (in any case) with a non-empty host. A caller that
+   * has to tell an endpoint admitted only through {@value #DEV_MODE_PROPERTY} from a real
+   * {@code https} endpoint - the DX bootstrap, which reports the former in PRODUCTION - asks
+   * this instead of comparing the scheme itself.
+   *
+   * @param endpoint the endpoint, non-null
+   * @return {@code true} for {@code https} with a host
+   * @since 00.84.00
+   */
+  public static boolean isHttpsEndpoint(URI endpoint) {
+    Objects.requireNonNull(endpoint, "endpoint");
+    String host = endpoint.getHost();
+    return HTTPS.equalsIgnoreCase(endpoint.getScheme()) && host != null && !host.isEmpty();
   }
 
   /**
@@ -100,26 +116,51 @@ public final class EndpointSecurity {
    * resolution): {@code localhost} in any case, an IPv4 literal in {@code 127.0.0.0/8} or the
    * IPv6 literal {@code ::1}, with or without brackets.
    *
+   * <p>Only the text a URI host can have is considered: printable ASCII without white space,
+   * and brackets only around an IPv6 literal that fills them ({@code [::1]}). Until the exit
+   * review of 00.84.00 {@code "[::1]junk]"}, {@code "[127.0.0.1]"} and {@code " 127.0.0.1"}
+   * counted as loopback hosts, because the literal parser cuts at the first {@code ]} and trims
+   * (RF29).
+   *
    * @param host the host part of a URI, may be {@code null}
    * @return {@code true} for a loopback host
    */
   public static boolean isLoopbackHost(String host) {
-    if (host == null || host.isEmpty()) {
+    if (host == null || host.isEmpty() || !isPrintableAscii(host)) {
       return false;
     }
     if (LOCALHOST.equals(host.toLowerCase(Locale.ROOT))) {
       return true;
     }
-    // A URI host carries no port: IpLiterals also accepts "address:port" and "[address]:port",
-    // which must not pass as a host here.
+    String literal = host;
     if (host.startsWith("[")) {
-      if (!host.endsWith("]")) {
+      // "[" IPv6 "]" and nothing around it: IpLiterals stops at the first "]" and would ignore
+      // what follows, and an IPv4 literal is never bracketed in a URI.
+      if (host.length() < 2 || !host.endsWith("]")) {
         return false;
       }
-    } else if (host.indexOf(':') >= 0 && host.indexOf(':') == host.lastIndexOf(':')) {
+      literal = host.substring(1, host.length() - 1);
+      if (literal.contains("[") || literal.contains("]") || !literal.contains(":")) {
+        return false;
+      }
+    } else if (host.contains("]")
+        || (host.indexOf(':') >= 0 && host.indexOf(':') == host.lastIndexOf(':'))) {
+      // A URI host carries no port: IpLiterals also accepts "address:port", which must not
+      // pass as a host here.
       return false;
     }
-    return IpLiterals.parse(host).map(InetAddress::isLoopbackAddress).orElse(false);
+    return IpLiterals.parse(literal).map(InetAddress::isLoopbackAddress).orElse(false);
+  }
+
+  /** Whether every character is printable ASCII ({@code !} to {@code ~}): no space, no control. */
+  private static boolean isPrintableAscii(String text) {
+    for (int i = 0; i < text.length(); i++) {
+      char c = text.charAt(i);
+      if (c <= ' ' || c > '~') {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**

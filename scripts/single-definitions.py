@@ -34,9 +34,25 @@ checks:
                     a JSON reader; a writer only appends them): BoundedJson.
                     The event wire codec (CanonicalJson, WireJson) is the
                     documented exception until ER59 (V00.85.00) decides it.
+  scheme check      a URI scheme is compared - getScheme() as the receiver or
+                    the argument of equals/equalsIgnoreCase/startsWith/
+                    contentEquals, or one of the literals "http", "https",
+                    "http://", "https://" (any case) compared that way or as a
+                    switch label - in EndpointSecurity only. An inline
+                    "https".equalsIgnoreCase(uri.getScheme()) is a second https
+                    rule that a method-name search cannot see (RF28: the DX
+                    JWKS check let "https:///jwks" pass). Tolerated, with the
+                    number of comparisons each may contain, are the places
+                    whose rule is not the transport rule: the RFC 8252
+                    redirect-URI check of the DX bootstrap (loopback http
+                    without the dev flag), the target normalisation of
+                    PostLogoutRedirectValidator and the htu normalisation of
+                    DpopHttpUri (default ports per scheme).
 
 Comments and the content of string literals are removed before the search, so
-documentation that names a method does not count as a definition.
+documentation that names a method does not count as a definition. Two kinds of
+literal survive: "jcustos.dev" for the dev-flag rule and the scheme literals
+above for the scheme check.
 
 Result:
   0  every rule has exactly its one definition
@@ -59,6 +75,30 @@ EVENT_CODEC = (
     "jCustos-events/src/main/java/eu/jsentinel/jcustos/events/codec/CanonicalJson.java",
     "jCustos-events/src/main/java/eu/jsentinel/jcustos/events/wire/WireJson.java",
 )
+# Scheme comparisons outside EndpointSecurity that follow a rule of their own, and how many
+# comparisons each may contain; one more is reported like a stray file.
+SCHEME_CHECK_EXCEPTIONS = {
+    # RFC 8252 sections 7.3 and 8.3: isHttpsOrLoopback, the redirect-URI check (2)
+    "jCustos-dx/src/main/java/eu/jsentinel/jcustos/dx/internal/AbstractJCustosBootstrap.java": 2,
+    # which URIs are web targets, and their default ports, for the allowlist comparison (4)
+    CORE + "oidc/api/PostLogoutRedirectValidator.java": 4,
+    # RFC 9449 section 4.3: the default port of the htu claim per scheme (2)
+    "jCustos-dpop/src/main/java/eu/jsentinel/jcustos/dpop/DpopHttpUri.java": 2,
+}
+# A literal that names an http(s) scheme; strip() keeps it for the scheme check.
+SCHEME_LITERAL = re.compile(r'"(?i:https?(?:://)?)"')
+_COMPARE = r"\.\s*(?:equals|equalsIgnoreCase|startsWith|contentEquals)\s*\("
+_GET_SCHEME = r"getScheme\s*\(\s*\)"
+_SCHEME_TEXT = r'"(?i:https?(?:://)?)"'
+SCHEME_CHECK = re.compile(
+    # uri.getScheme().equals(...), also after .toLowerCase(...)
+    _GET_SCHEME + r"\s*(?:\.\s*to(?:Lower|Upper)Case\s*\([^()]*\)\s*)?" + _COMPARE
+    # X.equals(uri.getScheme()) and Objects.equals(uri.getScheme(), X)
+    + r"|" + _COMPARE + r"\s*[\w.()]*?" + _GET_SCHEME
+    # "https".equals(x), x.startsWith("https://"), case "https" ->
+    + r"|" + _SCHEME_TEXT + r"\s*" + _COMPARE
+    + r"|" + _COMPARE + r"\s*" + _SCHEME_TEXT
+    + r"|\bcase\s+" + _SCHEME_TEXT)
 
 
 def declaration(name_pattern):
@@ -69,26 +109,31 @@ def declaration(name_pattern):
 
 
 # (label, pattern, the files allowed to match - the first one is required -, whether that file
-# may match once only, explanation)
+# may match once only, explanation, the most matches a tolerated file may have - a file that is
+# not named there may match any number of times)
 RULES = (
     ("https rule", declaration(r"(?:requireHttps|validateHttps)\w*"), (ENDPOINT_SECURITY,), True,
-     "declare no https check of your own; call EndpointSecurity.requireHttps(uri, errorCode)"),
+     "declare no https check of your own; call EndpointSecurity.requireHttps(uri, errorCode)", {}),
     ("loopback rule", declaration(r"isLoopback\w*"), (ENDPOINT_SECURITY,), True,
-     "recognise loopback hosts with EndpointSecurity.isLoopbackHost(host)"),
+     "recognise loopback hosts with EndpointSecurity.isLoopbackHost(host)", {}),
     ("dev flag", re.compile(r'"jcustos\.dev"'), (ENDPOINT_SECURITY,), True,
-     "read the flag through EndpointSecurity.devModeEnabled()"),
+     "read the flag through EndpointSecurity.devModeEnabled()", {}),
     ("segment counter", declaration(r"countSegments"), (JOSE_LIMITS,), True,
-     "count JOSE segments with JoseLimits.countSegments(compact)"),
+     "count JOSE segments with JoseLimits.countSegments(compact)", {}),
     ("JSON reader", re.compile(r"(?<!append\()'[{\[]'"), (BOUNDED_JSON,) + EVENT_CODEC, False,
-     "read JSON with eu.jsentinel.jcustos.util.json.BoundedJson"),
+     "read JSON with eu.jsentinel.jcustos.util.json.BoundedJson", {}),
+    ("scheme check", SCHEME_CHECK, (ENDPOINT_SECURITY,) + tuple(SCHEME_CHECK_EXCEPTIONS), False,
+     "compare no scheme yourself; call EndpointSecurity.requireHttps(uri, errorCode) or "
+     "EndpointSecurity.isHttpsEndpoint(uri)", SCHEME_CHECK_EXCEPTIONS),
 )
 # The definition every rule needs; the event codec is tolerated, not required.
-REQUIRED = {label: allowed[0] for label, _, allowed, _, _ in RULES}
+REQUIRED = {label: allowed[0] for label, _, allowed, *_ in RULES}
 
 
 def strip(source):
     """The code of a Java source without comments; string literals keep their quotes only,
-    except a literal that is exactly "jcustos.dev", which the dev-flag rule looks for."""
+    except a literal that is exactly "jcustos.dev", which the dev-flag rule looks for, and a
+    scheme literal ("http", "https", "http://", "https://"), which the scheme check reads."""
     out = []
     i, n = 0, len(source)
     while i < n:
@@ -108,7 +153,8 @@ def strip(source):
                 j += 2 if source[j] == "\\" else 1
             literal = source[i:j + 1]
             # Character literals stay (the JSON rule reads them); strings are emptied.
-            out.append(literal if quote == "'" or literal == '"jcustos.dev"' else '""')
+            kept = quote == "'" or literal == '"jcustos.dev"' or SCHEME_LITERAL.fullmatch(literal)
+            out.append(literal if kept else '""')
             i = j + 1
         else:
             out.append(source[i])
@@ -141,7 +187,7 @@ def main(argv):
                 found[label].append((relative, hits))
 
     problems = 0
-    for label, _, allowed, once, hint in RULES:
+    for label, _, allowed, once, hint, limits in RULES:
         strays = [(file, hits) for file, hits in found[label] if file not in allowed]
         hits_in_home = sum(hits for file, hits in found[label] if file == REQUIRED[label])
         problem_count = problems
@@ -154,6 +200,11 @@ def main(argv):
         for file, hits in strays:
             problems += 1
             print(f"{label}: second definition in {file} ({hits}x) - {hint}")
+        for file, hits in found[label]:
+            if file in limits and hits > limits[file]:
+                problems += 1
+                print(f"{label}: {file} matches {hits}x, its own rule accounts for "
+                      f"{limits[file]} - {hint}")
         if problems == problem_count:
             print(f"{label}: one definition, {REQUIRED[label]}")
     print(f"{len(sources)} library source files searched, {problems} problem(s)")

@@ -199,6 +199,79 @@ class RestOriginGuardBootstrapTest {
         .install().warnings()), "no CORS at all");
   }
 
+  // ── RF30: rest/credentialed-cors-origin-not-accepted ───────────
+
+  private static final String NOT_ACCEPTED = "rest/credentialed-cors-origin-not-accepted";
+
+  @Test
+  @DisplayName("RF30: a credentialed CORS origin a same-origin guard refuses is a WARNING in every mode, naming the origin")
+  void credentialedCorsOriginTheGuardRefuses_isReported() {
+    for (JCustosBootstrapMode mode : JCustosBootstrapMode.values()) {
+      resetGlobals();
+      JCustosRuntime runtime = bootstrap(mode)
+          .cors(c -> c.allowedOrigins("https://partner.example").allowCredentials(true))
+          .originGuard(RestOriginGuard.sameOrigin())
+          .install();
+
+      List<JCustosBootstrapWarning> found = runtime.warnings().stream()
+          .filter(w -> NOT_ACCEPTED.equals(w.code())).toList();
+      assertEquals(1, found.size(), mode + ": " + runtime.warnings());
+      assertEquals(Severity.WARNING, found.getFirst().severity(), mode.toString());
+      assertTrue(found.getFirst().message().contains("https://partner.example"), found.getFirst().message());
+      assertEquals(Optional.empty(), finding(runtime.warnings()), "a guard is installed");
+    }
+  }
+
+  @Test
+  @DisplayName("RF30: only the origins the allowlist misses are named; a guard the application installed is checked too")
+  void onlyTheMissingOriginsAreNamed() {
+    JCustosRuntime runtime = bootstrap(JCustosBootstrapMode.PRODUCTION)
+        .cors(c -> c.allowedOrigins("https://app.example", "https://partner.example", "https://other.example")
+            .allowCredentials(true))
+        .originGuard(RestOriginGuard.sameOrigin()
+            .withAllowedOrigins(Set.of("https://api.example", "https://App.Example", "https://other.example/")))
+        .install();
+    JCustosBootstrapWarning warning = runtime.warnings().stream()
+        .filter(w -> NOT_ACCEPTED.equals(w.code())).findFirst().orElseThrow();
+    assertTrue(warning.message().contains("[https://partner.example]"), warning.message());
+
+    resetGlobals();
+    RestOriginGuard.install(RestOriginGuard.sameOrigin());
+    assertTrue(bootstrap(JCustosBootstrapMode.DEVELOPMENT)
+        .cors(c -> c.allowedOrigins("https://partner.example").allowCredentials(true))
+        .install().warnings().stream().anyMatch(w -> NOT_ACCEPTED.equals(w.code())),
+        "installed by the application");
+  }
+
+  @Test
+  @DisplayName("RF30: no finding when every origin is accepted, without credentials, without a guard, or for * and null")
+  void noFindingWhenAcceptedOrNotApplicable() {
+    assertTrue(bootstrap(JCustosBootstrapMode.PRODUCTION)
+        .cors(c -> c.allowedOrigins("https://partner.example").allowCredentials(true))
+        .originGuard(RestOriginGuard.sameOrigin()
+            .withAllowedOrigins(Set.of("https://app.example", "https://partner.example")))
+        .install().warnings().stream().noneMatch(w -> NOT_ACCEPTED.equals(w.code())), "accepted");
+
+    resetGlobals();
+    assertTrue(bootstrap(JCustosBootstrapMode.PRODUCTION)
+        .cors(c -> c.allowedOrigins("https://partner.example").allowCredentials(false))
+        .originGuard(RestOriginGuard.sameOrigin())
+        .install().warnings().stream().noneMatch(w -> NOT_ACCEPTED.equals(w.code())), "no credentials");
+
+    resetGlobals();
+    assertTrue(bootstrap(JCustosBootstrapMode.PRODUCTION)
+        .cors(c -> c.allowedOrigins("https://partner.example").allowCredentials(true))
+        .install().warnings().stream().noneMatch(w -> NOT_ACCEPTED.equals(w.code())),
+        "no guard: rest/credentialed-cors-without-origin-guard reports it");
+
+    resetGlobals();
+    assertTrue(bootstrap(JCustosBootstrapMode.DEVELOPMENT)
+        .cors(c -> c.allowedOrigins("*", "null").allowCredentials(true))
+        .originGuard(RestOriginGuard.sameOrigin())
+        .install().warnings().stream().noneMatch(w -> NOT_ACCEPTED.equals(w.code())),
+        "cors/wildcard-with-credentials reports these");
+  }
+
   // ── fixtures ───────────────────────────────────────────────────
 
   /** What the router of a cookie-session application does first, for every route. */

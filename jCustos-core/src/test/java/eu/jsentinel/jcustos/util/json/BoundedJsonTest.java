@@ -117,6 +117,19 @@ class BoundedJsonTest {
   }
 
   @Test
+  @DisplayName("RF26: a unicode escape takes ASCII hex digits only - fullwidth and other Unicode digits are refused")
+  void unicodeEscapeTakesAsciiHexDigitsOnly() {
+    // backslash-u and FULLWIDTH DIGIT ZERO, ZERO, FOUR, ONE: Character.digit read it as "A"
+    refusal("{\"k\":\"\\u\uFF10\uFF10\uFF14\uFF11\"}");
+    // ARABIC-INDIC DIGITS ZERO, ZERO, FOUR, ONE
+    refusal("{\"k\":\"\\u\u0660\u0660\u0664\u0661\"}");
+    // FULLWIDTH LATIN CAPITAL LETTER A as the last hex digit
+    refusal("{\"k\":\"\\u004\uFF21\"}");
+    assertEquals("A", parsed("{\"k\":\"\\u0041\"}").get("k"));
+    assertEquals("\u00ff\u00ff", parsed("{\"k\":\"\\u00ff\\u00FF\"}").get("k"), "both cases of a-f");
+  }
+
+  @Test
   @DisplayName("refuses an unescaped control character inside a string")
   void rejectsControlCharacters() {
     refusal("{\"k\":\"a\nb\"}");

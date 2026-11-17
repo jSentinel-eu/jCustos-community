@@ -37,10 +37,25 @@ PKCE flow are wired for you.
   `config.withExpectedIssuer(metadata.issuer(), metadata.authorizationResponseIssParameterSupported())`
   on the `OAuth2ClientConfig`; one redirect URI per IdP.
 - **Logout:** extend `AbstractOidcLogoutView`; it ends the local session in every case and
-  redirects to the provider (JS-SEC-147). Navigating to the route alone logs nobody out —
-  link to it with `AbstractOidcLogoutView.logoutLocation(MyLogoutView.class)`, which carries
-  a single-use token bound to the session. No `onBeforeLogout()` override is needed to clear
-  the subject.
+  redirects to the provider (JS-SEC-147) — provided the `post_logout_redirect_uri` your
+  `logoutRequest()` sends is allowlisted. Override `initiator()` with the target registered
+  at the provider:
+
+  ```java
+  @Override
+  protected LogoutInitiator initiator() {
+    return new RpInitiatedLogoutInitiator(
+        PostLogoutRedirectValidator.allowOnly(URI.create("https://app.example.com/")));
+  }
+  ```
+
+  The default initiator has no allowlist and refuses every target (JS-SEC-089, CWE-601):
+  the view then ends only the local session and sends the browser to the login route, and
+  the provider's session stays open. A `logoutRequest()` without a
+  `post_logout_redirect_uri` needs no override; the provider then shows its own page.
+  Navigating to the route alone logs nobody out — link to it with
+  `AbstractOidcLogoutView.logoutLocation(MyLogoutView.class)`, which carries a single-use
+  token bound to the session. No `onBeforeLogout()` override is needed to clear the subject.
 - **Deny-by-default:** login, callback and logout views carry `@PublicRoute` and live
   outside any restricted router layout (JS-SEC-154).
 

@@ -57,12 +57,22 @@ browser sets itself and that a page cannot forge.
    not a browser (curl, a server, a mobile app) and passes by default; the strict setting
    `MissingHeaders.REFUSE` refuses it as well.
 
-The application's own origin is taken from the `Host` header, because `RestRequest` does not
-carry the request's scheme: host and port decide, a default port (`80`, `443`) in `Host` counts as
-no port, and the `Origin` must be an `http` or `https` origin. Behind a reverse proxy that
-rewrites `Host`, name the public origins with `withAllowedOrigins(...)`. The allowlist then
-**replaces** the `Host` comparison - list the application's own public origin, too, plus every
-origin that calls the API with credentials (the `allowedOrigins` of your CORS configuration).
+The application's own origin is built from the `Host` header and the scheme the guard expects,
+because `RestRequest` does not carry the request's scheme: host and port come from `Host` (a
+default port, `80` or `443`, in `Host` counts as no port), the scheme from the guard.
+`sameOrigin()` expects `https` and accepts an `http` origin only for a loopback host
+(`localhost`, `127.0.0.0/8`, `[::1]`), where no other machine can answer for the host. An
+application that browsers reach over plain `http` on another host says so with
+`withScheme("http")`. Until the exit review of 00.84.00 the scheme was not compared with `Host`:
+an attacker on the network path who answers plain `http` for the application's host name (no
+HSTS) could serve a page at `http://app.example` whose `POST` to `https://app.example` passed as
+same-origin. Behind a reverse proxy that rewrites `Host`, name the public origins with
+`withAllowedOrigins(...)`. The allowlist then **replaces** the `Host` comparison and the expected
+scheme - every listed origin carries its own scheme - so list the application's own public
+origin, too, plus every origin that calls the API with credentials (the `allowedOrigins` of your
+CORS configuration). The DX bootstrap reports a credentialed CORS origin that the installed guard
+does not accept as `rest/credentialed-cors-origin-not-accepted`: the browser would send its
+state-changing requests with the cookie, and the guard would answer every one of them with `403`.
 
 A refused request is answered with `403` through the decision mapper published to
 `RestDecisionContext` (so `.problemJsonErrors()` applies), audited as `AccessDenied` with the
@@ -82,6 +92,7 @@ RestSecurity.bootstrap()
         .withAllowedOrigins(Set.of("https://api.example", "https://app.example")))
     // .originGuard(RestOriginGuard.sameOrigin()
     //     .withMissingHeaders(RestOriginGuard.MissingHeaders.REFUSE))   // browsers only
+    // .originGuard(RestOriginGuard.sameOrigin().withScheme("http"))     // plain http, not loopback
     .install();
 ```
 
@@ -103,7 +114,8 @@ neither the router step nor a jCustos filter is not protected** - a login handle
 say.
 
 `OidcLogoutHandler` applies the same `Origin` comparison on its own (without `Sec-Fetch-Site` and
-without the strict setting); it does not need the installed guard.
+without the strict setting); it does not need the installed guard. Served over plain `http` on a
+host that is not a loopback host, it needs `withAllowedOrigins(...)` with that origin.
 
 ### Browser support and pitfalls
 

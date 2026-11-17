@@ -262,6 +262,98 @@ class RestOriginGuardTest {
     assertTrue(envelopes().isEmpty());
   }
 
+  // ── RF24: the scheme of the own origin ─────────────────────────
+
+  @Test
+  @DisplayName("RF24: an http origin for the https site's host is refused with 403 and audited as csrf:origin-mismatch")
+  void httpOriginAgainstHttpsSite_isRefused() {
+    Response response = new Response();
+
+    RestOriginGuard.sameOrigin().guard(post(Map.of(
+        "Host", List.of(APP),
+        "Origin", List.of("http://app.example"),
+        "Sec-Fetch-Site", List.of("same-site"),
+        "Cookie", List.of(SESSION_COOKIE))), response, countingHandler());
+
+    assertEquals(HttpStatus.FORBIDDEN.code(), response.status,
+        "until the exit review a page served over plain http for the host passed as same-origin");
+    assertEquals(0, handled.get(), "the handler must not run");
+    AccessDenied denied = assertInstanceOf(AccessDenied.class, singleEnvelope().event());
+    assertEquals(RestOriginGuard.REASON_ORIGIN_MISMATCH, denied.reason());
+
+    Response own = new Response();
+    RestOriginGuard.sameOrigin().guard(post(Map.of("Host", List.of(APP),
+        "Origin", List.of(APP_ORIGIN), "Cookie", List.of(SESSION_COOKIE))), own, countingHandler());
+    assertEquals(HttpStatus.OK.code(), own.status);
+    assertEquals(1, handled.get(), "https://app.example passes");
+  }
+
+  @Test
+  @DisplayName("RF24: the default expects https; http passes for a loopback host only, any port included")
+  void defaultScheme_isHttpsExceptForLoopback() {
+    RestOriginGuard guard = RestOriginGuard.sameOrigin();
+    assertTrue(guard.scheme().isEmpty());
+    assertFalse(guard.originAccepted(post(Map.of("Host", List.of("app.example:8080"),
+        "Origin", List.of("http://app.example:8080")))), "plain http to another host");
+    assertFalse(guard.originAccepted(post(Map.of("Host", List.of("10.0.0.5:8080"),
+        "Origin", List.of("http://10.0.0.5:8080")))), "a private address is no loopback host");
+    for (String host : List.of("localhost:8080", "127.0.0.1:8080", "[::1]:8080", "LOCALHOST:8080")) {
+      String origin = "http://" + host.toLowerCase(java.util.Locale.ROOT);
+      assertTrue(guard.originAccepted(post(Map.of("Host", List.of(host), "Origin", List.of(origin)))),
+          origin + " - no other machine can answer for a loopback host");
+    }
+    assertFalse(guard.originAccepted(post(Map.of("Host", List.of("localhost.example:8080"),
+        "Origin", List.of("http://localhost.example:8080")))), "a lookalike of localhost");
+    assertTrue(guard.originAccepted(post(Map.of("Host", List.of("localhost:8443"),
+        "Origin", List.of("https://localhost:8443")))), "https always");
+    assertFalse(guard.originAccepted(post(Map.of("Host", List.of("app.example"),
+        "Origin", List.of("ftp://app.example")))), "neither http nor https");
+  }
+
+  @Test
+  @DisplayName("RF24: withScheme decides the scheme exactly - http for a plain-http site, https without the loopback exception")
+  void withScheme_comparesExactly() {
+    RestOriginGuard plain = RestOriginGuard.sameOrigin().withScheme("HTTP");
+    assertEquals("http", plain.scheme().orElseThrow());
+    assertTrue(plain.originAccepted(post(Map.of("Host", List.of("intranet.example:8080"),
+        "Origin", List.of("http://intranet.example:8080")))));
+    assertFalse(plain.originAccepted(post(Map.of("Host", List.of("intranet.example:8080"),
+        "Origin", List.of("https://intranet.example:8080")))), "another scheme is another origin");
+
+    RestOriginGuard secure = RestOriginGuard.sameOrigin().withScheme("https");
+    assertFalse(secure.originAccepted(post(Map.of("Host", List.of("localhost:8080"),
+        "Origin", List.of("http://localhost:8080")))), "explicit https has no loopback exception");
+    assertTrue(secure.originAccepted(post(Map.of("Host", List.of(APP), "Origin", List.of(APP_ORIGIN)))));
+
+    assertEquals(Set.of(APP_ORIGIN), plain.withAllowedOrigins(Set.of(APP_ORIGIN)).allowedOrigins());
+    assertTrue(plain.withAllowedOrigins(Set.of(APP_ORIGIN)).originAccepted(post(Map.of(
+        "Host", List.of("internal:8080"), "Origin", List.of(APP_ORIGIN)))),
+        "an allowlist entry carries its own scheme");
+    assertEquals("http", plain.withMissingHeaders(MissingHeaders.REFUSE).withAllowedOrigins(
+        Set.of(APP_ORIGIN)).scheme().orElseThrow(), "settings are kept");
+    for (String notAScheme : List.of("ftp", "", "https://", "ws")) {
+      assertThrows(IllegalArgumentException.class, () -> plain.withScheme(notAScheme), notAScheme);
+    }
+    assertThrows(NullPointerException.class, () -> plain.withScheme(null));
+  }
+
+  // ── RF30: cross-origin acceptance for the DX cross-check ────────
+
+  @Test
+  @DisplayName("RF30: acceptsCrossOrigin is the allowlist membership; a Host-comparing guard accepts no other origin")
+  void acceptsCrossOrigin() {
+    RestOriginGuard listed = RestOriginGuard.sameOrigin()
+        .withAllowedOrigins(Set.of(APP_ORIGIN, "https://partner.example"));
+    assertTrue(listed.acceptsCrossOrigin("https://partner.example"));
+    assertTrue(listed.acceptsCrossOrigin("HTTPS://Partner.Example:443/"), "normalised like the list");
+    assertFalse(listed.acceptsCrossOrigin("http://partner.example"), "another scheme");
+    assertFalse(listed.acceptsCrossOrigin("https://other.example"));
+    assertFalse(listed.acceptsCrossOrigin("*"));
+    assertFalse(listed.acceptsCrossOrigin(null));
+    assertFalse(RestOriginGuard.sameOrigin().acceptsCrossOrigin("https://partner.example"),
+        "the origin of Host is the only one a same-origin guard accepts");
+  }
+
   // ── allowlist ──────────────────────────────────────────────────
 
   @Test

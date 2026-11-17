@@ -52,6 +52,14 @@ class JsonResponseTest {
   }
 
   @Test
+  @DisplayName("RF27: a negative expires_in yields empty, as up to 00.83.00; zero is a value")
+  void negativeYieldsEmpty() {
+    assertTrue(JsonResponse.expiresIn("{\"access_token\":\"a\",\"expires_in\":-5}").isEmpty());
+    assertTrue(JsonResponse.expiresIn("{\"expires_in\":" + Long.MIN_VALUE + "}").isEmpty());
+    assertEquals(Optional.of(0L), JsonResponse.expiresIn("{\"expires_in\":0}"));
+  }
+
+  @Test
   @DisplayName("a missing field yields empty")
   void missingField() {
     assertTrue(JsonResponse.expiresIn("{\"token_type\":\"Bearer\"}").isEmpty());

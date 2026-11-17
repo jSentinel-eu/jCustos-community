@@ -37,6 +37,7 @@ import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -324,18 +325,18 @@ public final class DemoHttpRouter implements HttpHandler {
     return map;
   }
 
-  private static Map<String, String> parseQuery(String rawQuery) {
-    Map<String, String> map = new LinkedHashMap<>();
+  /**
+   * JS-SEC-098 (RF31): every value of a repeated query parameter, in wire order, decoded.
+   * Package-private for its test.
+   */
+  static Map<String, List<String>> parseQuery(String rawQuery) {
+    Map<String, List<String>> map = new LinkedHashMap<>();
     if (rawQuery == null || rawQuery.isEmpty()) return map;
     for (String pair : rawQuery.split("&")) {
       int eq = pair.indexOf('=');
-      if (eq < 0) {
-        map.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
-      } else {
-        String k = URLDecoder.decode(pair.substring(0, eq), StandardCharsets.UTF_8);
-        String v = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
-        map.put(k, v);
-      }
+      String k = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), StandardCharsets.UTF_8);
+      String v = eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+      map.computeIfAbsent(k, name -> new ArrayList<>()).add(v);
     }
     return map;
   }

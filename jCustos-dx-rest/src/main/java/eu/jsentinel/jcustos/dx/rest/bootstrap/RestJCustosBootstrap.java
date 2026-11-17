@@ -132,8 +132,10 @@ public interface RestJCustosBootstrap
    * <p>Only for cookie-based sessions: a bearer token is not sent by the browser on its own.
    * Without the guard, a CORS configuration that allows credentials is reported as
    * {@code rest/credentialed-cors-without-origin-guard} (WARNING in PRODUCTION and STRICT,
-   * INFO otherwise). Without this call nothing is touched: a guard the application installed
-   * itself stays.
+   * INFO otherwise); with a guard, a credentialed CORS origin the guard does not accept is
+   * reported as {@code rest/credentialed-cors-origin-not-accepted} (WARNING) - its
+   * state-changing requests would all be refused. Without this call nothing is touched: a guard
+   * the application installed itself stays.
    *
    * @param guard the guard; non-null
    * @return this builder

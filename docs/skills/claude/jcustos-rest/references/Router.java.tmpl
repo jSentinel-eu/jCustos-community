@@ -29,6 +29,7 @@ import java.lang.reflect.Modifier;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -330,7 +331,9 @@ public final class Router implements HttpHandler, HasLogger {
     URI uri = exchange.getRequestURI();
     // JS-SEC-113: list headers are joined in wire order, never reduced to their first line.
     Map<String, String> headers = RestHeaderLines.joined(headerLines);
-    Map<String, String> query = parseQuery(uri.getQuery());
+    // JS-SEC-098: every value of a repeated query parameter; the single-valued view keeps the last.
+    Map<String, List<String>> queryValues = parseQuery(uri.getQuery());
+    Map<String, String> query = lastValues(queryValues);
     String method = exchange.getRequestMethod();
     String path = uri.getPath();
     var remote = exchange.getRemoteAddress();
@@ -368,20 +371,38 @@ public final class Router implements HttpHandler, HasLogger {
       public Map<String, String> queryParameters() {
         return query;
       }
+
+      /**
+       * JS-SEC-098: every value of every query parameter, in wire order. The OAuth2 callback
+       * handler reads the callback through this view and refuses a repeated {@code state},
+       * {@code code} or {@code iss}; the default derived from {@link #queryParameters()} would
+       * show only the last value.
+       */
+      @Override
+      public Map<String, List<String>> queryParameterValues() {
+        return queryValues;
+      }
     };
   }
 
-  private static Map<String, String> parseQuery(String raw) {
-    Map<String, String> out = new LinkedHashMap<>();
-    if (raw == null || raw.isEmpty()) return out;
+  /** The query parameters with all their values, in wire order; unmodifiable. */
+  private static Map<String, List<String>> parseQuery(String raw) {
+    Map<String, List<String>> out = new LinkedHashMap<>();
+    if (raw == null || raw.isEmpty()) return Collections.unmodifiableMap(out);
     for (String pair : raw.split("&")) {
       int eq = pair.indexOf('=');
-      if (eq < 0) {
-        out.put(pair, "");
-      } else {
-        out.put(pair.substring(0, eq), pair.substring(eq + 1));
-      }
+      String name = eq < 0 ? pair : pair.substring(0, eq);
+      String value = eq < 0 ? "" : pair.substring(eq + 1);
+      out.computeIfAbsent(name, key -> new ArrayList<>()).add(value);
     }
+    out.replaceAll((name, values) -> List.copyOf(values));
+    return Collections.unmodifiableMap(out);
+  }
+
+  /** The single-valued view: the last value of every parameter. */
+  private static Map<String, String> lastValues(Map<String, List<String>> values) {
+    Map<String, String> out = new LinkedHashMap<>();
+    values.forEach((name, all) -> out.put(name, all.getLast()));
     return out;
   }
 

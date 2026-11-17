@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -63,13 +64,21 @@ import java.util.concurrent.atomic.AtomicReference;
  *       comes from a client that is not a browser (curl, a server, a mobile app) and passes by
  *       default; {@link MissingHeaders#REFUSE} refuses it as well.</li>
  * </ol>
- * The application's own origin is taken from the {@code Host} header, because
- * {@link RestRequest} does not carry the request's scheme: host and port decide, a default
- * port ({@code 80}, {@code 443}) in {@code Host} counts as no port, and the {@code Origin} must
- * be an {@code http} or {@code https} origin. Behind a reverse proxy that rewrites {@code Host},
- * name the public origins with {@link #withAllowedOrigins(Set)}; the allowlist then
- * <em>replaces</em> the comparison with {@code Host}, so list the application's own public
- * origin as well.
+ * The application's own origin is taken from the {@code Host} header and the scheme the guard
+ * expects, because {@link RestRequest} does not carry the request's scheme: host and port come
+ * from {@code Host} (a default port, {@code 80} or {@code 443}, in {@code Host} counts as no
+ * port), the scheme from the guard. A {@link #sameOrigin()} guard expects {@code https}; it
+ * accepts an {@code http} origin only for a loopback host ({@code localhost}, {@code 127.0.0.0/8},
+ * {@code [::1]}, recognised by {@link EndpointSecurity#isLoopbackHost(String)}), where no other
+ * machine can answer for the host. An application that browsers reach over plain {@code http}
+ * on another host says so with {@link #withScheme(String) withScheme("http")}. Until the exit
+ * review of 00.84.00 the scheme was not compared with {@code Host} at all, so a page served
+ * over plain {@code http} for the application's host name - by an attacker on the network
+ * path, without HSTS - passed as the application's own origin (RF24). Behind a reverse proxy
+ * that rewrites {@code Host}, name the public origins with {@link #withAllowedOrigins(Set)}; the
+ * allowlist then <em>replaces</em> the comparison with {@code Host} and the expected scheme -
+ * each listed origin carries its own scheme - so list the application's own public origin as
+ * well.
  *
  * <p><strong>What a refusal looks like.</strong> {@code 403} rendered by the decision mapper
  * published to {@link RestDecisionContext} (falling back to {@link HttpStatusDecisionMapper}),
@@ -161,20 +170,28 @@ public final class RestOriginGuard {
   /** Normalised {@code scheme://host[:port]} values; empty means "the origin of {@code Host}". */
   private final Set<String> allowedOrigins;
   private final MissingHeaders missingHeaders;
+  /**
+   * The scheme of the application's own origin, {@code http} or {@code https}; {@code null} for
+   * the default: {@code https}, and {@code http} for a loopback host.
+   */
+  private final String scheme;
 
-  private RestOriginGuard(Set<String> allowedOrigins, MissingHeaders missingHeaders) {
+  private RestOriginGuard(Set<String> allowedOrigins, MissingHeaders missingHeaders,
+                          String scheme) {
     this.allowedOrigins = allowedOrigins;
     this.missingHeaders = missingHeaders;
+    this.scheme = scheme;
   }
 
   /**
-   * A guard that accepts the application's own origin, taken from the {@code Host} header, and
-   * lets requests without {@code Origin} and {@code Sec-Fetch-Site} pass.
+   * A guard that accepts the application's own origin - the host and port of the {@code Host}
+   * header with {@code https}, or with {@code http} for a loopback host - and lets requests
+   * without {@code Origin} and {@code Sec-Fetch-Site} pass.
    *
    * @return the guard
    */
   public static RestOriginGuard sameOrigin() {
-    return new RestOriginGuard(Set.of(), MissingHeaders.ALLOW);
+    return new RestOriginGuard(Set.of(), MissingHeaders.ALLOW, null);
   }
 
   /**
@@ -203,7 +220,30 @@ public final class RestOriginGuard {
     if (normalised.isEmpty()) {
       throw new IllegalArgumentException("origins must not be empty");
     }
-    return new RestOriginGuard(Set.copyOf(normalised), missingHeaders);
+    return new RestOriginGuard(Set.copyOf(normalised), missingHeaders, scheme);
+  }
+
+  /**
+   * Returns a guard that expects the application's own origin with exactly this scheme: the
+   * {@code Origin} must name the host and port of {@code Host} with {@code scheme}, for every
+   * host. Without this setting a guard expects {@code https} and accepts {@code http} for a
+   * loopback host only (RF24). An allowlist ({@link #withAllowedOrigins(Set)}) is not affected:
+   * each listed origin carries its own scheme.
+   *
+   * @param scheme {@code "https"} or {@code "http"} as the browser reaches the application, in
+   *               any case; non-null
+   * @return a new guard with this guard's origins and {@link MissingHeaders} setting; this one
+   *         is unchanged
+   * @throws IllegalArgumentException when the scheme is neither {@code http} nor {@code https}
+   * @since 00.84.00
+   */
+  public RestOriginGuard withScheme(String scheme) {
+    Objects.requireNonNull(scheme, "scheme");
+    String normalised = scheme.trim().toLowerCase(Locale.ROOT);
+    if (!SCHEME_HTTP.equals(normalised) && !SCHEME_HTTPS.equals(normalised)) {
+      throw new IllegalArgumentException("scheme must be http or https: " + scheme);
+    }
+    return new RestOriginGuard(allowedOrigins, missingHeaders, normalised);
   }
 
   /**
@@ -214,7 +254,7 @@ public final class RestOriginGuard {
    * @return a new guard with this guard's origins; this one is unchanged
    */
   public RestOriginGuard withMissingHeaders(MissingHeaders policy) {
-    return new RestOriginGuard(allowedOrigins, Objects.requireNonNull(policy, "policy"));
+    return new RestOriginGuard(allowedOrigins, Objects.requireNonNull(policy, "policy"), scheme);
   }
 
   /**
@@ -227,6 +267,15 @@ public final class RestOriginGuard {
   /** @return what happens to a request without {@code Origin} and {@code Sec-Fetch-Site} */
   public MissingHeaders missingHeaders() {
     return missingHeaders;
+  }
+
+  /**
+   * @return the scheme set with {@link #withScheme(String)}, lower case; empty for the default
+   *         ({@code https}, and {@code http} for a loopback host)
+   * @since 00.84.00
+   */
+  public Optional<String> scheme() {
+    return Optional.ofNullable(scheme);
   }
 
   // ── decision ───────────────────────────────────────────────────
@@ -277,6 +326,28 @@ public final class RestOriginGuard {
       return true;
     }
     return origins.size() == 1 && originMatches(origins.getFirst(), request);
+  }
+
+  /**
+   * Whether a request from {@code origin} to the application passes the {@code Origin} check
+   * when {@code origin} is <em>another</em> origin than the application's own - the case of a
+   * credentialed CORS request. With an allowlist that is the question whether the list contains
+   * {@code origin} after normalisation; a guard that compares with {@code Host} accepts no other
+   * origin. The DX bootstrap asks this for every origin of a credentialed CORS configuration:
+   * a CORS origin the guard does not accept gets {@code 403} for every state-changing request.
+   *
+   * @param origin an origin as the browser sends it, for example {@code https://partner.example};
+   *               a value that is no origin is not accepted
+   * @return whether a cross-origin request from {@code origin} passes this guard
+   * @since 00.84.00
+   */
+  public boolean acceptsCrossOrigin(String origin) {
+    if (allowedOrigins.isEmpty()) {
+      return false;
+    }
+    return parseOrigin(origin, true)
+        .map(parsed -> allowedOrigins.contains(parsed.serialised()))
+        .orElse(false);
   }
 
   // ── filter ─────────────────────────────────────────────────────
@@ -392,7 +463,21 @@ public final class RestOriginGuard {
       return false;
     }
     Optional<RequestHost> host = parseHost(hosts.getFirst());
-    return host.isPresent() && origin.get().isHttp() && origin.get().sameAuthority(host.get());
+    return host.isPresent() && hasExpectedScheme(origin.get())
+        && origin.get().sameAuthority(host.get());
+  }
+
+  /**
+   * RF24: the scheme of an origin compared with {@code Host}. With {@link #withScheme(String)}
+   * exactly that scheme; otherwise {@code https}, or {@code http} for a loopback host - plain
+   * {@code http} for any other host name is what an attacker on the network path can serve.
+   */
+  private boolean hasExpectedScheme(WebOrigin origin) {
+    if (scheme != null) {
+      return scheme.equals(origin.scheme());
+    }
+    return SCHEME_HTTPS.equals(origin.scheme())
+        || (SCHEME_HTTP.equals(origin.scheme()) && EndpointSecurity.isLoopbackHost(origin.host()));
   }
 
   /**
@@ -495,6 +580,7 @@ public final class RestOriginGuard {
   public String toString() {
     return "RestOriginGuard[allowedOrigins="
         + (allowedOrigins.isEmpty() ? "(origin of Host)" : allowedOrigins)
+        + ", scheme=" + (scheme == null ? "https (http for a loopback host)" : scheme)
         + ", missingHeaders=" + missingHeaders + "]";
   }
 
@@ -503,10 +589,6 @@ public final class RestOriginGuard {
 
     String serialised() {
       return scheme + SCHEME_SEPARATOR + host + (port == NO_PORT ? "" : ":" + port);
-    }
-
-    boolean isHttp() {
-      return SCHEME_HTTP.equals(scheme) || SCHEME_HTTPS.equals(scheme);
     }
 
     /**

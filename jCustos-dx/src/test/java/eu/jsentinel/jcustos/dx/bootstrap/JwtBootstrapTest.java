@@ -203,6 +203,64 @@ class JwtBootstrapTest {
   }
 
   @Test
+  @DisplayName("RF28: an https JWKS URI without a host is an ERROR, not an exception out of the validator factory")
+  void hostlessHttpsJwksUriIsError() {
+    for (String uri : List.of("https:///jwks", "https:jwks")) {
+      for (JCustosBootstrapMode mode : JCustosBootstrapMode.values()) {
+        List<JCustosBootstrapWarning> warnings = new TestBootstrap()
+            .mode(mode)
+            .jwt(j -> j.jwksUri(URI.create(uri))
+                .algorithmProfile(AlgorithmProfile.STRICT_MODERN).issuer("https://idp.example/"))
+            .applyJwt();
+        assertTrue(hasError(warnings, "jwks/uri-not-https"), uri + " in " + mode + ": " + warnings);
+        assertFalse(warnings.stream().anyMatch(w -> w.code().equals("jwt/factory-missing")),
+            "the validator must not be built for a URI the JWKS client refuses: " + warnings);
+        JCustosBootstrapWarning finding = warnings.stream()
+            .filter(w -> w.code().equals("jwks/uri-not-https")).findFirst().orElseThrow();
+        assertTrue(finding.message().contains("the endpoint must use https://"), finding.message());
+      }
+    }
+  }
+
+  @Test
+  @DisplayName("RF28: https to a loopback host is no finding with or without the flag")
+  void httpsLoopbackJwksUriIsNoFinding() {
+    System.setProperty("jcustos.dev", "true");
+    try {
+      List<JCustosBootstrapWarning> warnings = new TestBootstrap()
+          .mode(JCustosBootstrapMode.PRODUCTION)
+          .jwt(j -> j.jwksUri(URI.create("https://localhost:8443/jwks"))
+              .algorithmProfile(AlgorithmProfile.STRICT_MODERN).issuer("https://idp.example/"))
+          .applyJwt();
+      assertFalse(warnings.stream().anyMatch(w -> w.code().equals("jwks/uri-not-https")),
+          "the flag must not turn a real https endpoint into a development-only one: " + warnings);
+    } finally {
+      System.clearProperty("jcustos.dev");
+    }
+  }
+
+  @Test
+  @DisplayName("RF28: loopback http with the flag is an ERROR in PRODUCTION and an INFO in DEVELOPMENT")
+  void loopbackHttpJwksUriWithFlagByMode() {
+    System.setProperty("jcustos.dev", "true");
+    try {
+      for (JCustosBootstrapMode mode : JCustosBootstrapMode.values()) {
+        List<JCustosBootstrapWarning> warnings = new TestBootstrap()
+            .mode(mode)
+            .jwt(j -> j.jwksUri(URI.create("http://127.0.0.1:8080/jwks"))
+                .algorithmProfile(AlgorithmProfile.STRICT_MODERN).issuer("https://idp.example/"))
+            .applyJwt();
+        Severity expected = mode == JCustosBootstrapMode.PRODUCTION || mode == JCustosBootstrapMode.STRICT
+            ? Severity.ERROR : Severity.INFO;
+        assertTrue(warnings.stream().anyMatch(w -> w.code().equals("jwks/uri-not-https")
+            && w.severity() == expected), mode + ": " + warnings);
+      }
+    } finally {
+      System.clearProperty("jcustos.dev");
+    }
+  }
+
+  @Test
   @DisplayName("the jwksUri path needs a JwtValidatorFactory — absent in dx itself (Nimbus-free)")
   void factoryMissingWhenJwtModuleAbsent() {
     // jCustos-dx does not depend on jCustos-jwt, so no factory is on the
