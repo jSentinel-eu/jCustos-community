@@ -22,6 +22,7 @@
  */
 package eu.jsentinel.jcustos.credential.compromised.hibp;
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.dependencies.core.net.MediaType;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordChecker;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordResult;
@@ -129,11 +130,12 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
             .build();
         HttpResponse<java.io.InputStream> res = http.send(req,
             HttpResponse.BodyHandlers.ofInputStream());
-        if (res.statusCode() == 429) {
+        int status = res.statusCode();
+        if (status == HttpStatus.TOO_MANY_REQUESTS.code()) {
           return new RangeResponse(null,
               CompromisedPasswordResult.FailureReason.RATE_LIMITED);
         }
-        if (res.statusCode() < 200 || res.statusCode() >= 300) {
+        if (status < HttpStatus.OK.code() || status >= HttpStatus.MULTIPLE_CHOICES.code()) {
           return new RangeResponse(null,
               CompromisedPasswordResult.FailureReason.NETWORK);
         }

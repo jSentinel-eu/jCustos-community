@@ -2,6 +2,7 @@ package eu.jsentinel.jcustos.demo.skill.rest;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import com.svenruppert.dependencies.core.net.HttpStatus;
+import com.svenruppert.dependencies.core.net.MediaType;
 import eu.jsentinel.jcustos.authorization.annotations.PublicRoute;
 import eu.jsentinel.jcustos.authorization.api.AuthorizationDecision;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
@@ -431,7 +432,7 @@ public final class Router implements HttpHandler, HasLogger {
   /** Writes a plain-text body with the given status. */
   public static void respond(HttpExchange exchange, int status, String body) throws IOException {
     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-    exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+    exchange.getResponseHeaders().set("Content-Type", MediaType.TEXT_PLAIN.withCharsetUtf8());
     exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
     if (bytes.length > 0) {
       try (OutputStream os = exchange.getResponseBody()) {
@@ -443,7 +444,7 @@ public final class Router implements HttpHandler, HasLogger {
   /** Writes a JSON body with the given status. */
   public static void respondJson(HttpExchange exchange, int status, String json) throws IOException {
     byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-    exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+    exchange.getResponseHeaders().set("Content-Type", MediaType.APPLICATION_JSON.withCharsetUtf8());
     exchange.sendResponseHeaders(status, bytes.length);
     try (OutputStream os = exchange.getResponseBody()) {
       os.write(bytes);

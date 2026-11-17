@@ -41,6 +41,7 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
@@ -152,7 +153,7 @@ public final class HttpTokenEndpointClient implements TokenEndpointClient {
       // JS-SEC-098: read the body once; a body that is no well-formed JSON object lacks every field.
       Map<String, Object> json = OAuth2Json.object(outcome.body()).orElse(Map.of());
       int status = outcome.status();
-      if (status / 100 == 2) {
+      if (status >= HttpStatus.OK.code() && status < HttpStatus.MULTIPLE_CHOICES.code()) {
         return parseTokenResponse(json);
       }
       // RFC 6749 §5.2: a 4xx error body carries an "error" field

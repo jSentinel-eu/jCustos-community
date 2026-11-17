@@ -41,6 +41,7 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
@@ -94,7 +95,8 @@ public final class HttpDeviceAuthorizationClient implements DeviceAuthorizationC
       form.put("scope", String.join(" ", scopes));
     }
     return OAuth2FormPost.post(http, endpoint, form, clientAuthentication).flatMap(outcome -> {
-      if (outcome.status() / 100 != 2) {
+      if (outcome.status() < HttpStatus.OK.code()
+          || outcome.status() >= HttpStatus.MULTIPLE_CHOICES.code()) {
         return OAuth2Json.string(outcome.body(), "error")
             .<Result<DeviceAuthorizationResponse, OAuth2Error>>map(
                 e -> Result.failure(new OAuth2Error.ProtocolError(e)))

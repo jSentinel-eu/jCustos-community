@@ -31,6 +31,7 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * In-memory {@link LoginAttemptPolicy} suitable for single-node demos
@@ -322,9 +323,9 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       State user = byUsername.get(usernameKey, now);
       State address = addressKey == null ? null : byAddress.get(addressKey, now);
 
-      LoginAttemptDecision locked = firstLockout(now, combined, user, address);
-      if (locked != null) {
-        return locked;
+      Optional<LoginAttemptDecision> locked = firstLockout(now, combined, user, address);
+      if (locked.isPresent()) {
+        return locked.get();
       }
 
       // JS-SEC-123 (CWE-367): the check and the reservation are one step. Requests that arrive
@@ -334,16 +335,16 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       if (addressKey != null) {
         address = prepare(address, now, addressConfig);
       }
-      LoginAttemptDecision saturated = saturation(combined, now, config);
-      if (saturated == null) {
+      Optional<LoginAttemptDecision> saturated = saturation(combined, now, config);
+      if (saturated.isEmpty()) {
         saturated = saturation(user, now, config);
       }
-      if (saturated == null && addressKey != null) {
+      if (saturated.isEmpty() && addressKey != null) {
         // JS-SEC-062 (CWE-307): a spray across many accounts saturates the address
         saturated = saturation(address, now, addressConfig);
       }
-      if (saturated != null) {
-        return saturated;
+      if (saturated.isPresent()) {
+        return saturated.get();
       }
 
       Instant reservedUntil = plus(now, ATTEMPT_RESERVATION_TTL);
@@ -394,10 +395,10 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     CombinedKey combinedKey = combinedKey(context);
     String addressKey = addressKey(combinedKey);
     synchronized (monitor) {
-      LoginAttemptDecision locked = firstLockout(now,
+      return firstLockout(now,
           byCombinedKey.get(combinedKey, now), byUsername.get(combinedKey.username(), now),
-          addressKey == null ? null : byAddress.get(addressKey, now));
-      return locked != null ? locked : LoginAttemptDecision.allowed();
+          addressKey == null ? null : byAddress.get(addressKey, now))
+          .orElseGet(LoginAttemptDecision::allowed);
     }
   }
 
@@ -427,14 +428,14 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       if (address != null) {
         address.release(now);
       }
-      LoginAttemptDecision locked = firstLockout(now, combined, user, address);
-      if (locked != null) {
+      Optional<LoginAttemptDecision> locked = firstLockout(now, combined, user, address);
+      if (locked.isPresent()) {
         // JS-SEC-123 (CWE-307): the key was locked while this attempt was being checked. The
         // lockout stays, and the caller is told to deny the login.
         restore(byCombinedKey, combinedKey, combined, now, config);
         restore(byUsername, usernameKey, user, now, config);
         restore(byAddress, addressKey, address, now, addressConfig);
-        return locked;
+        return locked.get();
       }
       if (combined != null) {
         combined.clear();
@@ -565,33 +566,42 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     return state;
   }
 
-  /** The first lockout in force among {@code states}; {@code null} entries are skipped. */
-  private static LoginAttemptDecision firstLockout(Instant now, State... states) {
+  /**
+   * The first lockout in force among {@code states}; {@code null} entries are skipped.
+   *
+   * @return the lockout, or empty when none of the states is locked
+   */
+  private static Optional<LoginAttemptDecision> firstLockout(Instant now, State... states) {
     for (State state : states) {
-      LoginAttemptDecision decision = lockoutDecision(state, now);
-      if (decision != null) {
+      Optional<LoginAttemptDecision> decision = lockoutDecision(state, now);
+      if (decision.isPresent()) {
         return decision;
       }
     }
-    return null;
+    return Optional.empty();
   }
 
-  private static LoginAttemptDecision lockoutDecision(State state, Instant now) {
+  /** @return the lockout of {@code state}, or empty when it is absent or not locked */
+  private static Optional<LoginAttemptDecision> lockoutDecision(State state, Instant now) {
     if (state == null || !state.isLocked(now)) {
-      return null;
+      return Optional.empty();
     }
-    return LoginAttemptDecision.lockedOut(nonNegative(now, state.lockedUntil),
-        state.totalFailuresObserved);
+    return Optional.of(LoginAttemptDecision.lockedOut(nonNegative(now, state.lockedUntil),
+        state.totalFailuresObserved));
   }
 
-  /** Denies when the failures counted plus the attempts in flight have used up the threshold. */
-  private static LoginAttemptDecision saturation(State state, Instant now,
-                                                 LoginAttemptConfiguration thresholds) {
+  /**
+   * Denies when the failures counted plus the attempts in flight have used up the threshold.
+   *
+   * @return the denial, or empty while the threshold has room
+   */
+  private static Optional<LoginAttemptDecision> saturation(State state, Instant now,
+                                                           LoginAttemptConfiguration thresholds) {
     if (state.failures + state.inFlight() < thresholds.failureThreshold()) {
-      return null;
+      return Optional.empty();
     }
-    return LoginAttemptDecision.lockedOut(
-        nonNegative(now, state.earliestReservationEnd()), state.totalFailuresObserved);
+    return Optional.of(LoginAttemptDecision.lockedOut(
+        nonNegative(now, state.earliestReservationEnd()), state.totalFailuresObserved));
   }
 
   /**

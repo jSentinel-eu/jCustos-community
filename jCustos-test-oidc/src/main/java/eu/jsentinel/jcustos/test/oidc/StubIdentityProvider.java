@@ -25,6 +25,8 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.svenruppert.dependencies.core.net.HttpStatus;
+import com.svenruppert.dependencies.core.net.MediaType;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -184,7 +186,7 @@ public final class StubIdentityProvider implements AutoCloseable {
 
   private void discovery(HttpExchange exchange) throws IOException {
     drain(exchange);
-    respond(exchange, 200, "{"
+    respond(exchange, HttpStatus.OK.code(), "{"
         + "\"issuer\":\"" + issuer + "\","
         + "\"authorization_endpoint\":\"" + issuer + "/authorize\","
         + "\"token_endpoint\":\"" + tokenEndpoint() + "\","
@@ -198,13 +200,14 @@ public final class StubIdentityProvider implements AutoCloseable {
 
   private void jwks(HttpExchange exchange) throws IOException {
     drain(exchange);
-    respond(exchange, 200, "{\"keys\":[" + signingKey.toPublicJWK().toJSONString() + "]}");
+    respond(exchange, HttpStatus.OK.code(),
+        "{\"keys\":[" + signingKey.toPublicJWK().toJSONString() + "]}");
   }
 
   private void token(HttpExchange exchange) throws IOException {
     drain(exchange);
     String idToken = signIdToken(defaultIdTokenClaims());
-    respond(exchange, 200, "{"
+    respond(exchange, HttpStatus.OK.code(), "{"
         + "\"access_token\":\"stub-access-token\","
         + "\"token_type\":\"Bearer\","
         + "\"expires_in\":3600,"
@@ -213,7 +216,7 @@ public final class StubIdentityProvider implements AutoCloseable {
 
   private void userinfo(HttpExchange exchange) throws IOException {
     drain(exchange);
-    respond(exchange, 200, toJson(userInfoClaims));
+    respond(exchange, HttpStatus.OK.code(), toJson(userInfoClaims));
   }
 
   private static String toJson(Map<String, Object> map) {
@@ -260,7 +263,7 @@ public final class StubIdentityProvider implements AutoCloseable {
 
   private static void respond(HttpExchange exchange, int status, String body) throws IOException {
     byte[] out = body.getBytes(StandardCharsets.UTF_8);
-    exchange.getResponseHeaders().add("Content-Type", "application/json");
+    exchange.getResponseHeaders().add("Content-Type", MediaType.APPLICATION_JSON.mime());
     exchange.sendResponseHeaders(status, out.length);
     try (OutputStream os = exchange.getResponseBody()) {
       os.write(out);

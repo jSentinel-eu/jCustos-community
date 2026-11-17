@@ -41,6 +41,7 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
@@ -126,7 +127,8 @@ public final class HttpIntrospectionClient implements IntrospectionClient {
     form.put("token_type_hint", hint.wire());
     Result<IntrospectionResult, OAuth2Error> result =
         OAuth2FormPost.post(http, endpoint, form, clientAuthentication).flatMap(outcome -> {
-          if (outcome.status() < 200 || outcome.status() >= 300) {
+          if (outcome.status() < HttpStatus.OK.code()
+              || outcome.status() >= HttpStatus.MULTIPLE_CHOICES.code()) {
             return Result.failure(new OAuth2Error.EndpointError(outcome.status()));
           }
           return Result.success(parse(outcome.body()));

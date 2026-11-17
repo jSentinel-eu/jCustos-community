@@ -32,6 +32,7 @@ import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.KeyOperation;
 import com.nimbusds.jose.jwk.KeyUse;
 import com.svenruppert.dependencies.core.logger.HasLogger;
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.jwt.api.JwksClient;
 import eu.jsentinel.jcustos.jwt.api.JwksRefreshResult;
@@ -289,8 +290,9 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
       HttpRequest request = HttpRequest.newBuilder(jwksUri).timeout(HTTP_TIMEOUT).GET().build();
       HttpResponse<byte[]> response =
           httpClient.send(request, BoundedHttpBody.ofByteArray(MAX_JWKS_BYTES + 1));
-      if (response.statusCode() / 100 != 2) {
-        logger().warn("jwks/refresh-non-2xx: status={}", response.statusCode());
+      int status = response.statusCode();
+      if (status < HttpStatus.OK.code() || status >= HttpStatus.MULTIPLE_CHOICES.code()) {
+        logger().warn("jwks/refresh-non-2xx: status={}", status);
         return new FetchOutcome(new JwksRefreshResult(0, now, NEGATIVE_TTL,
             Optional.of("Non2xxResponse")), null);
       }

@@ -205,7 +205,7 @@ public final class VaadinJCustosVersionChangeBridge implements JCustosVersionCha
           return;
         }
       }
-      if (key.equals(keyOf(session))) {
+      if (keyOf(session).filter(key::equals).isPresent()) {
         SecuredVisibility.refreshAll(ui);
       }
       remember(ui);
@@ -264,30 +264,34 @@ public final class VaadinJCustosVersionChangeBridge implements JCustosVersionCha
   /** Records the subject key the UI's session shows now; needs the session lock. */
   private void remember(UI ui) {
     VaadinSession session = ui.getSession();
-    JCustosVersionKey key = session == null ? null : keyOf(session);
-    if (key == null) {
+    Optional<JCustosVersionKey> key = session == null ? Optional.empty() : keyOf(session);
+    if (key.isEmpty()) {
       keys.remove(ui);
     } else {
-      keys.put(ui, key);
+      keys.put(ui, key.get());
     }
   }
 
-  /** The snapshot's key; without a snapshot the current subject's key, or {@code null}. */
-  private static JCustosVersionKey keyOf(VaadinSession session) {
+  /**
+   * The snapshot's key; without a snapshot the current subject's key.
+   *
+   * @return the key, or empty when there is no subject, no resolver, or the resolver fails
+   */
+  private static Optional<JCustosVersionKey> keyOf(VaadinSession session) {
     Optional<VaadinJCustosVersionContext.Snapshot> snapshot = VaadinJCustosVersionContext.current(session);
     if (snapshot.isPresent()) {
-      return keyOf(snapshot.get());
+      return Optional.of(keyOf(snapshot.get()));
     }
     try {
       Optional<Object> subject = CurrentSubject.current();
       Optional<SubjectIdResolver<Object>> resolver = JCustosServiceResolver.findSubjectIdResolver();
       if (subject.isEmpty() || resolver.isEmpty()) {
-        return null;
+        return Optional.empty();
       }
-      return new JCustosVersionKey(resolver.get().tenantFor(subject.get()),
-          resolver.get().resolve(subject.get()));
+      return Optional.of(new JCustosVersionKey(resolver.get().tenantFor(subject.get()),
+          resolver.get().resolve(subject.get())));
     } catch (RuntimeException unresolvable) {
-      return null;
+      return Optional.empty();
     }
   }
 

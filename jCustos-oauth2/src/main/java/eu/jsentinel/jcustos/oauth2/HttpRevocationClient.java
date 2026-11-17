@@ -41,6 +41,7 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
@@ -84,7 +85,8 @@ public final class HttpRevocationClient implements RevocationClient {
     form.put("token", token);
     form.put("token_type_hint", hint.wire());
     return OAuth2FormPost.post(http, endpoint, form, clientAuthentication).flatMap(outcome ->
-        (outcome.status() >= 200 && outcome.status() < 300)
+        (outcome.status() >= HttpStatus.OK.code()
+            && outcome.status() < HttpStatus.MULTIPLE_CHOICES.code())
             ? Result.success(Boolean.TRUE)
             : Result.failure(new OAuth2Error.EndpointError(outcome.status())));
   }

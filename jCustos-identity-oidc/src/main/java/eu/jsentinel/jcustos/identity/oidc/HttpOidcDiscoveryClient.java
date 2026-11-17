@@ -41,6 +41,8 @@ package eu.jsentinel.jcustos.identity.oidc;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
+import com.svenruppert.dependencies.core.net.MediaType;
 import eu.jsentinel.jcustos.util.BoundedHttpBody;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
@@ -115,7 +117,7 @@ public final class HttpOidcDiscoveryClient implements OidcDiscoveryClient {
     HttpResponse<byte[]> response;
     try {
       response = http.send(HttpRequest.newBuilder(wellKnown).timeout(TIMEOUT)
-          .header("Accept", "application/json").GET().build(),
+          .header("Accept", MediaType.APPLICATION_JSON.mime()).GET().build(),
           BoundedHttpBody.ofByteArray(MAX_BYTES + 1));
     } catch (java.net.http.HttpTimeoutException e) {
       return Result.failure(new OAuth2Error.NetworkError("timeout"));
@@ -125,8 +127,9 @@ public final class HttpOidcDiscoveryClient implements OidcDiscoveryClient {
       Thread.currentThread().interrupt();
       return Result.failure(new OAuth2Error.NetworkError("interrupted"));
     }
-    if (response.statusCode() / 100 != 2) {
-      return Result.failure(new OAuth2Error.EndpointError(response.statusCode()));
+    int status = response.statusCode();
+    if (status < HttpStatus.OK.code() || status >= HttpStatus.MULTIPLE_CHOICES.code()) {
+      return Result.failure(new OAuth2Error.EndpointError(status));
     }
 
     String body;

@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.demo.rest.server;
 
 import com.svenruppert.dependencies.core.net.HttpStatus;
+import com.svenruppert.dependencies.core.net.MediaType;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.demo.rest.shared.DemoEndpoints;
 import eu.jsentinel.jcustos.policy.api.ResourceRef;
@@ -341,7 +342,7 @@ public final class DemoHttpRouter implements HttpHandler {
 
   private static void writeResponse(HttpExchange exchange, DemoHttpResponse response) throws IOException {
     byte[] payload = response.getBody().getBytes(StandardCharsets.UTF_8);
-    exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
+    exchange.getResponseHeaders().add("Content-Type", MediaType.APPLICATION_JSON.withCharsetUtf8());
     response.getHeaders().forEach((name, value) -> exchange.getResponseHeaders().add(name, value));
     int contentLength = payload.length == 0 ? -1 : payload.length;
     exchange.sendResponseHeaders(response.status(), contentLength);

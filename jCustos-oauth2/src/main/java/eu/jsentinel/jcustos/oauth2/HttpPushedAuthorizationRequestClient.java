@@ -41,6 +41,7 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.net.EndpointSecurity;
@@ -89,7 +90,8 @@ public final class HttpPushedAuthorizationRequestClient implements PushedAuthori
     return OAuth2FormPost.post(http, parEndpoint, authorizationRequestParams, clientAuth).flatMap(outcome -> {
       // JS-SEC-098: read the body once; a body that is no well-formed JSON object lacks every field.
       Map<String, Object> json = OAuth2Json.object(outcome.body()).orElse(Map.of());
-      if (outcome.status() == 200 || outcome.status() == 201) {
+      if (outcome.status() == HttpStatus.OK.code()
+          || outcome.status() == HttpStatus.CREATED.code()) {
         Optional<String> requestUri = OAuth2Json.string(json, "request_uri");
         if (requestUri.isEmpty()) {
           return Result.failure(new OAuth2Error.MalformedResponse("PAR response without request_uri"));
