@@ -14,30 +14,33 @@ import eu.jsentinel.jcustos.credential.propagation.HeaderValue;
 import eu.jsentinel.jcustos.credential.propagation.OutboundCall;
 import eu.jsentinel.jcustos.credential.propagation.OutboundTokenStrategy;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredential;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
+import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 import eu.jsentinel.jcustos.propagation.oidc.cache.InMemoryTokenExchangeCache;
 import eu.jsentinel.jcustos.propagation.oidc.cache.TokenExchangeCache;
-import eu.jsentinel.jcustos.propagation.oidc.http.JsonResponse;
 import com.svenruppert.dependencies.core.logger.HasLogger;
-import com.svenruppert.dependencies.core.net.MediaType;
 
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * RFC 8693 OAuth 2.0 Token Exchange strategy. Exchanges the inbound
  * bearer token for a token minted for the downstream audience.
  *
- * <p>HTTPS-only by default; the constructor accepts plain
- * {@code http://localhost} when the system property
- * {@code jcustos.dev=true} is set (development carve-out).
+ * <p>HTTPS-only by default; the constructor accepts plain {@code http} to a
+ * loopback host when the system property {@code jcustos.dev=true} is set
+ * (development carve-out, {@link EndpointSecurity}). With a client id and a
+ * secret the client authenticates with {@code client_secret_post}, with an id
+ * only as a public client; since 00.84.00 the request goes through the shared
+ * {@link OAuth2FormPost} of {@code jCustos-core} (JS-SEC-098).
  *
  * <p>Hard-fails on 4xx / 5xx via {@link JCustosPropagationException}
  * — there is no silent fallback to the no-header path.
@@ -51,9 +54,10 @@ public final class TokenExchangeStrategy implements OutboundTokenStrategy, HasLo
   /** Stable lookup key. */
   public static final String NAME = "exchange";
 
+  private static final String CODE = "propagation/endpoint-not-https";
+
   private final URI tokenEndpoint;
-  private final String clientId;
-  private final String clientSecret;
+  private final Optional<ClientAuthentication> clientAuth;
   private final HttpClient http;
   private final TokenExchangeCache cache;
 
@@ -66,24 +70,11 @@ public final class TokenExchangeStrategy implements OutboundTokenStrategy, HasLo
   public TokenExchangeStrategy(URI tokenEndpoint, String clientId, String clientSecret,
                                HttpClient http, TokenExchangeCache cache) {
     if (tokenEndpoint == null) throw new IllegalArgumentException("tokenEndpoint");
-    validateHttps(tokenEndpoint);
-    this.tokenEndpoint = tokenEndpoint;
-    this.clientId = clientId;
-    this.clientSecret = clientSecret;
+    // JS-SEC-098: the one https rule of jCustos (loopback http only with -Djcustos.dev=true).
+    this.tokenEndpoint = EndpointSecurity.requireHttps(tokenEndpoint, CODE);
+    this.clientAuth = BoundedTokenHttp.clientAuthentication(clientId, clientSecret);
     this.http = http;
     this.cache = cache;
-  }
-
-  private static void validateHttps(URI endpoint) {
-    String scheme = endpoint.getScheme();
-    if ("https".equalsIgnoreCase(scheme)) return;
-    boolean devMode = Boolean.getBoolean("jcustos.dev");
-    boolean localhost = "localhost".equalsIgnoreCase(endpoint.getHost())
-        || "127.0.0.1".equals(endpoint.getHost());
-    if (devMode && localhost && "http".equalsIgnoreCase(scheme)) return;
-    throw new IllegalArgumentException(
-        "propagation/endpoint-not-https: token endpoint must use https:// "
-            + "(got: " + endpoint + "). Use http://localhost only with -Djcustos.dev=true.");
   }
 
   @Override
@@ -105,31 +96,23 @@ public final class TokenExchangeStrategy implements OutboundTokenStrategy, HasLo
     if (cached.isPresent()) {
       return Optional.of(new HeaderValue(AUTHORIZATION, "Bearer " + cached.get().accessToken()));
     }
-    String body = formBody(subject, call.declaredAudience());
-    HttpRequest request = HttpRequest.newBuilder(tokenEndpoint)
-        .POST(HttpRequest.BodyPublishers.ofString(body))
-        .header("Content-Type", MediaType.APPLICATION_FORM_URLENCODED.mime())
-        .timeout(Duration.ofSeconds(10))
-        .build();
-    // JS-SEC-036 (CWE-770): bounded read — reject an oversized token-endpoint body.
-    BoundedTokenHttp.Response response = BoundedTokenHttp.send(http, request);
-    if (response.statusCode() < 200 || response.statusCode() >= 300) {
+    // JS-SEC-036 (CWE-770), JS-SEC-098: the shared form-POST bounds the response body.
+    OAuth2FormPost.Outcome response = BoundedTokenHttp.post(http, tokenEndpoint,
+        form(subject, call.declaredAudience()), clientAuth);
+    if (!BoundedTokenHttp.isSuccess(response)) {
       // R010: never put the token-endpoint body in the exception message — OAuth
       // error bodies carry error_description and on a misconfig can echo grant
       // material, and this exception propagates into logs. The thrown message
       // carries only the status code; the body is logged truncated at DEBUG.
       logger().debug("Token endpoint returned HTTP {} (body truncated): {}",
-          response.statusCode(), truncateBody(response.body()));
-      throw new JCustosPropagationException(response.statusCode(),
-          "Token endpoint returned HTTP " + response.statusCode());
+          response.status(), truncateBody(response.body()));
+      throw new JCustosPropagationException(response.status(),
+          "Token endpoint returned HTTP " + response.status());
     }
-    String accessToken = JsonResponse.accessToken(response.body())
-        .orElseThrow(() -> new JCustosPropagationException(response.statusCode(),
-            "Token endpoint response missing access_token"));
-    long expiresIn = JsonResponse.expiresIn(response.body()).orElse(60L);
+    BoundedTokenHttp.MintedToken minted = BoundedTokenHttp.mintedToken(response);
     cache.put(key, new TokenExchangeCache.CachedEntry(
-        accessToken, Instant.now().plusSeconds(expiresIn)));
-    return Optional.of(new HeaderValue(AUTHORIZATION, "Bearer " + accessToken));
+        minted.accessToken(), Instant.now().plusSeconds(minted.expiresInSeconds())));
+    return Optional.of(new HeaderValue(AUTHORIZATION, "Bearer " + minted.accessToken()));
   }
 
   /**
@@ -166,21 +149,13 @@ public final class TokenExchangeStrategy implements OutboundTokenStrategy, HasLo
     return body.length() <= 256 ? body : body.substring(0, 256) + "…(truncated)";
   }
 
-  private String formBody(String subject, String audience) {
-    StringBuilder sb = new StringBuilder();
-    append(sb, "grant_type", "urn:ietf:params:oauth:grant-type:token-exchange");
-    append(sb, "subject_token", subject);
-    append(sb, "subject_token_type", "urn:ietf:params:oauth:token-type:access_token");
-    if (!audience.isEmpty()) append(sb, "audience", audience);
-    if (clientId != null) append(sb, "client_id", clientId);
-    if (clientSecret != null) append(sb, "client_secret", clientSecret);
-    return sb.toString();
-  }
-
-  private static void append(StringBuilder sb, String name, String value) {
-    if (sb.length() > 0) sb.append('&');
-    sb.append(URLEncoder.encode(name, StandardCharsets.UTF_8))
-      .append('=')
-      .append(URLEncoder.encode(value, StandardCharsets.UTF_8));
+  /** The grant fields; the client authentication adds {@code client_id} / {@code client_secret}. */
+  private static Map<String, String> form(String subject, String audience) {
+    Map<String, String> form = new LinkedHashMap<>();
+    form.put("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange");
+    form.put("subject_token", subject);
+    form.put("subject_token_type", "urn:ietf:params:oauth:token-type:access_token");
+    if (!audience.isEmpty()) form.put("audience", audience);
+    return form;
   }
 }

@@ -54,7 +54,6 @@ import com.vaadin.flow.router.BeforeEnterObserver;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * Reusable base for the Vaadin OAuth2 redirect-callback route (Konzept §6.5,
@@ -77,6 +76,14 @@ import java.util.Optional;
  * login is undone - subject, snapshot and token credential cleared, {@code SessionInvalidated}
  * audited with the reason {@value #REASON_ROTATION_FAILED}, the session closed and the HTTP
  * session invalidated - and the view forwards to {@link #errorTarget()}.
+ *
+ * <p><strong>Repeated parameters (JS-SEC-098, CWE-1041).</strong> The view reads the callback
+ * with {@link AuthorizationCodeFlow.CallbackParams#fromMultiValued(Map)}, the factory the REST
+ * adapter uses as well: a callback that repeats {@code state}, {@code code}, {@code error},
+ * {@code error_description}, {@code error_uri} or {@code iss} (RFC 6749 §3.1), or carries no
+ * {@code state}, forwards to {@link #errorTarget()} without driving the flow. Up to 00.83.00 the
+ * view refused a repeated {@code iss} only and took the first of several {@code state} or
+ * {@code code} values.
  */
 public abstract class AbstractOAuth2CallbackView extends Div
     implements BeforeEnterObserver, HasLogger {
@@ -130,24 +137,19 @@ public abstract class AbstractOAuth2CallbackView extends Div
   @Override
   public void beforeEnter(BeforeEnterEvent event) {
     Map<String, List<String>> query = event.getLocation().getQueryParameters().getParameters();
-    String state = first(query, "state");
-    if (state == null || state.isBlank()) {
+    // JS-SEC-098 (RFC 6749 §3.1): a repeated state, code or iss - or no state - is refused
+    // before the flow runs. JS-SEC-150 (CWE-346, RFC 9207): the issuer of the response goes to
+    // the flow, which compares it with the expected issuer before it consumes the state or
+    // exchanges the code; a response naming several issuers is not the response of one
+    // authorisation server.
+    Result<AuthorizationCodeFlow.CallbackParams, OAuth2Error> callback =
+        AuthorizationCodeFlow.CallbackParams.fromMultiValued(query);
+    if (callback.isFailure()) {
       event.forwardTo(errorTarget());
       return;
     }
-    // JS-SEC-150 (CWE-346, RFC 9207): the issuer of the response goes to the flow, which
-    // compares it with the expected issuer before it consumes the state or exchanges the
-    // code. A response naming several issuers is not the response of one authorisation server.
-    List<String> issuers = query.getOrDefault("iss", List.of());
-    if (issuers.size() > 1) {
-      event.forwardTo(errorTarget());
-      return;
-    }
-    AuthorizationCodeFlow.CallbackParams params = new AuthorizationCodeFlow.CallbackParams(
-        opt(first(query, "code")), state, opt(first(query, "error")),
-        opt(first(query, "error_description")), opt(first(query, "iss")));
 
-    Result<CallbackResult, OAuth2Error> result = flow().handleCallback(params);
+    Result<CallbackResult, OAuth2Error> result = flow().handleCallback(callback.getOrThrow());
     if (result.isSuccess()) {
       onTokens(result.toOptional().orElseThrow());
       // JS-SEC-146 (CWE-384): a federated login rotates the session id like every other
@@ -166,14 +168,5 @@ public abstract class AbstractOAuth2CallbackView extends Div
     } else {
       event.forwardTo(errorTarget());
     }
-  }
-
-  private static String first(Map<String, List<String>> query, String key) {
-    List<String> values = query.get(key);
-    return (values == null || values.isEmpty()) ? null : values.get(0);
-  }
-
-  private static Optional<String> opt(String value) {
-    return (value == null || value.isBlank()) ? Optional.empty() : Optional.of(value);
   }
 }

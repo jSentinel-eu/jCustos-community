@@ -41,20 +41,29 @@ package eu.jsentinel.jcustos.oauth2.internal;
  * #L%
  */
 
+import eu.jsentinel.jcustos.util.json.BoundedJson;
+
 import java.util.Arrays;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Minimal, depth-aware JSON field extractor for OAuth2 token / introspection /
- * device responses (V00.77) — no third-party JSON library. Mirrors the
- * R09-hardened {@code jCustos-propagation-oidc} scanner: it only matches keys
- * that are direct members of the outermost object, tracking nesting depth and
- * string literals (honouring {@code \\} escapes), so a nested or
- * value-embedded key can never be grabbed. The V00.77.x consolidation (B6)
- * unifies this with the propagation-oidc copy.
+ * Field access for OAuth2 token, PAR, introspection and device responses (V00.77) — no
+ * third-party JSON library. Only members of the top-level object are read, so a nested or
+ * value-embedded key can never be picked (R09).
+ *
+ * <p>Since 00.84.00 (JS-SEC-098, CWE-1041) this class is a facade over
+ * {@link BoundedJson}, the one JSON reader of jCustos, and no longer a scanner of its own. The
+ * signatures are unchanged; what changes is what a response has to be: a well-formed JSON
+ * object of at most {@link BoundedJson#MAX_INPUT_CHARS} characters, nested at most
+ * {@link BoundedJson#MAX_DEPTH} levels, without a repeated key. A body that is not yields empty
+ * for every field. String values are fully decoded, <code>&#92;uXXXX</code> escapes included — the
+ * scanner kept those raw. A response is read once with {@link #object(String)}; the
+ * {@code String}-taking methods parse the body on every call and remain for compatibility.
  */
 public final class OAuth2Json {
 
@@ -62,29 +71,61 @@ public final class OAuth2Json {
     throw new AssertionError("no instances");
   }
 
+  /**
+   * Reads a response body as a JSON object.
+   *
+   * @param body the response body, may be {@code null}
+   * @return the top-level object, or empty when the body is not a well-formed JSON object
+   *     within the bounds of {@link BoundedJson}
+   * @since 00.84.00
+   */
+  public static Optional<Map<String, Object>> object(String body) {
+    return BoundedJson.parseObject(body).toOptional();
+  }
+
   /** @return the top-level string field {@code key}, or empty. */
   public static Optional<String> string(String body, String key) {
-    return topLevelValue(body, key, true);
+    return object(body).flatMap(json -> string(json, key));
+  }
+
+  /**
+   * @param json a parsed response
+   * @param key  the top-level key
+   * @return the string field {@code key}, or empty
+   * @since 00.84.00
+   */
+  public static Optional<String> string(Map<String, ?> json, String key) {
+    return BoundedJson.string(json, key);
   }
 
   /** @return the top-level numeric field {@code key} as a long, or empty (overflow-safe). */
   public static Optional<Long> longValue(String body, String key) {
-    return topLevelValue(body, key, false).flatMap(token -> {
-      try {
-        return Optional.of(Long.parseLong(token));
-      } catch (NumberFormatException overflow) {
-        return Optional.empty();
-      }
-    });
+    return object(body).flatMap(json -> longValue(json, key));
+  }
+
+  /**
+   * @param json a parsed response
+   * @param key  the top-level key
+   * @return the integer field {@code key}, or empty when it is absent or not an integer
+   * @since 00.84.00
+   */
+  public static Optional<Long> longValue(Map<String, ?> json, String key) {
+    return BoundedJson.integer(json, key);
   }
 
   /** @return the top-level boolean field {@code key}, or empty. */
   public static Optional<Boolean> bool(String body, String key) {
-    return topLevelValue(body, key, false).flatMap(token -> switch (token) {
-      case "true" -> Optional.of(Boolean.TRUE);
-      case "false" -> Optional.of(Boolean.FALSE);
-      default -> Optional.empty();
-    });
+    return object(body).flatMap(json -> bool(json, key));
+  }
+
+  /**
+   * @param json a parsed response
+   * @param key  the top-level key
+   * @return the boolean field {@code key}, or empty
+   * @since 00.84.00
+   */
+  public static Optional<Boolean> bool(Map<String, ?> json, String key) {
+    return BoundedJson.bool(json, key);
   }
 
   /**
@@ -120,175 +161,29 @@ public final class OAuth2Json {
    * @return the audience values, never {@code null}
    */
   public static Set<String> stringOrArray(String body, String key) {
-    Optional<String> scalar = string(body, key);
-    if (scalar.isPresent()) {
-      return Set.of(scalar.get());
-    }
-    return arrayStrings(body, key);
+    return object(body).map(json -> stringOrArray(json, key)).orElse(Set.of());
   }
 
-  private static Set<String> arrayStrings(String body, String key) {
-    if (body == null) {
-      return Set.of();
+  /**
+   * @param json a parsed response
+   * @param key  the top-level key
+   * @return the values of a string-or-array field, never {@code null}
+   * @since 00.84.00
+   */
+  public static Set<String> stringOrArray(Map<String, ?> json, String key) {
+    Object value = json.get(key);
+    if (value instanceof String scalar) {
+      return Set.of(scalar);
     }
-    int n = body.length();
-    int i = body.indexOf('{');
-    if (i < 0) {
-      return Set.of();
-    }
-    i++;
-    int depth = 1;
-    int[] end = new int[1];
-    while (i < n && depth >= 1) {
-      char c = body.charAt(i);
-      if (c == '"') {
-        String token = readString(body, i, end);
-        int j = end[0];
-        if (depth == 1) {
-          int k = skipWs(body, j);
-          if (k < n && body.charAt(k) == ':' && token.equals(key)) {
-            int v = skipWs(body, k + 1);
-            return (v < n && body.charAt(v) == '[') ? readStringArray(body, v + 1) : Set.of();
-          }
+    if (value instanceof List<?> list) {
+      Set<String> out = new LinkedHashSet<>();
+      for (Object element : list) {
+        if (element instanceof String text) {
+          out.add(text);
         }
-        i = j;
-        continue;
       }
-      if (c == '{' || c == '[') {
-        depth++;
-      } else if (c == '}' || c == ']') {
-        depth--;
-      }
-      i++;
+      return Set.copyOf(out);
     }
     return Set.of();
-  }
-
-  private static Set<String> readStringArray(String body, int at) {
-    int n = body.length();
-    Set<String> out = new LinkedHashSet<>();
-    int[] end = new int[1];
-    int i = at;
-    while (i < n) {
-      char c = body.charAt(i);
-      if (c == ']') {
-        break;
-      }
-      if (c == '"') {
-        out.add(readString(body, i, end));
-        i = end[0];
-        continue;
-      }
-      i++;
-    }
-    return Set.copyOf(out);
-  }
-
-  private static Optional<String> topLevelValue(String body, String key, boolean wantString) {
-    if (body == null) {
-      return Optional.empty();
-    }
-    int n = body.length();
-    int i = body.indexOf('{');
-    if (i < 0) {
-      return Optional.empty();
-    }
-    i++;
-    int depth = 1;
-    int[] end = new int[1];
-    while (i < n && depth >= 1) {
-      char c = body.charAt(i);
-      if (c == '"') {
-        String token = readString(body, i, end);
-        int j = end[0];
-        if (depth == 1) {
-          int k = skipWs(body, j);
-          if (k < n && body.charAt(k) == ':' && token.equals(key)) {
-            return readValue(body, skipWs(body, k + 1), wantString, end);
-          }
-        }
-        i = j;
-        continue;
-      }
-      if (c == '{' || c == '[') {
-        depth++;
-      } else if (c == '}' || c == ']') {
-        depth--;
-      }
-      i++;
-    }
-    return Optional.empty();
-  }
-
-  private static Optional<String> readValue(String body, int at, boolean wantString, int[] end) {
-    int n = body.length();
-    if (at >= n) {
-      return Optional.empty();
-    }
-    char v = body.charAt(at);
-    if (v == '"') {
-      return wantString ? Optional.of(readString(body, at, end)) : Optional.empty();
-    }
-    if (wantString) {
-      return Optional.empty();
-    }
-    // bare literal: digits, sign, or true/false
-    int start = at;
-    int k = at;
-    while (k < n) {
-      char c = body.charAt(k);
-      if ((c >= '0' && c <= '9') || c == '-' || (c >= 'a' && c <= 'z')) {
-        k++;
-      } else {
-        break;
-      }
-    }
-    return k > start ? Optional.of(body.substring(start, k)) : Optional.empty();
-  }
-
-  private static String readString(String body, int openQuote, int[] endOut) {
-    int n = body.length();
-    StringBuilder sb = new StringBuilder();
-    int i = openQuote + 1;
-    while (i < n) {
-      char c = body.charAt(i);
-      if (c == '\\' && i + 1 < n) {
-        char next = body.charAt(i + 1);
-        // decode the common JSON escapes; keep others raw
-        switch (next) {
-          case '"' -> sb.append('"');
-          case '\\' -> sb.append('\\');
-          case '/' -> sb.append('/');
-          case 'n' -> sb.append('\n');
-          case 't' -> sb.append('\t');
-          case 'r' -> sb.append('\r');
-          default -> sb.append(c).append(next);
-        }
-        i += 2;
-        continue;
-      }
-      if (c == '"') {
-        endOut[0] = i + 1;
-        return sb.toString();
-      }
-      sb.append(c);
-      i++;
-    }
-    endOut[0] = n;
-    return sb.toString();
-  }
-
-  private static int skipWs(String body, int from) {
-    int n = body.length();
-    int i = from;
-    while (i < n) {
-      char c = body.charAt(i);
-      if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-        i++;
-      } else {
-        break;
-      }
-    }
-    return i;
   }
 }

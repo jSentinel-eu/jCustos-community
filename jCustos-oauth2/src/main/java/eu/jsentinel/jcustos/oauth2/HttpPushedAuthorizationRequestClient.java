@@ -43,11 +43,12 @@ package eu.jsentinel.jcustos.oauth2;
 
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
 import eu.jsentinel.jcustos.oauth2.api.PushedAuthorizationRequestClient;
 import eu.jsentinel.jcustos.oauth2.api.PushedAuthorizationResponse;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 import eu.jsentinel.jcustos.oauth2.internal.OAuth2Json;
 
 import java.net.URI;
@@ -76,7 +77,7 @@ public final class HttpPushedAuthorizationRequestClient implements PushedAuthori
   private final ClientAuthentication clientAuth;
 
   public HttpPushedAuthorizationRequestClient(URI parEndpoint, ClientAuthentication clientAuth, HttpClient http) {
-    this.parEndpoint = OAuth2FormPost.requireHttps(
+    this.parEndpoint = EndpointSecurity.requireHttps(
         Objects.requireNonNull(parEndpoint, "parEndpoint"), "oauth2/par-endpoint-not-https");
     this.clientAuth = Objects.requireNonNull(clientAuth, "clientAuth");
     this.http = Objects.requireNonNull(http, "http");
@@ -86,15 +87,17 @@ public final class HttpPushedAuthorizationRequestClient implements PushedAuthori
   public Result<PushedAuthorizationResponse, OAuth2Error> push(Map<String, String> authorizationRequestParams) {
     Objects.requireNonNull(authorizationRequestParams, "authorizationRequestParams");
     return OAuth2FormPost.post(http, parEndpoint, authorizationRequestParams, clientAuth).flatMap(outcome -> {
+      // JS-SEC-098: read the body once; a body that is no well-formed JSON object lacks every field.
+      Map<String, Object> json = OAuth2Json.object(outcome.body()).orElse(Map.of());
       if (outcome.status() == 200 || outcome.status() == 201) {
-        Optional<String> requestUri = OAuth2Json.string(outcome.body(), "request_uri");
+        Optional<String> requestUri = OAuth2Json.string(json, "request_uri");
         if (requestUri.isEmpty()) {
           return Result.failure(new OAuth2Error.MalformedResponse("PAR response without request_uri"));
         }
-        long expiresIn = OAuth2Json.longValue(outcome.body(), "expires_in").orElse(60L);
+        long expiresIn = OAuth2Json.longValue(json, "expires_in").orElse(60L);
         return Result.success(new PushedAuthorizationResponse(requestUri.get(), Duration.ofSeconds(expiresIn)));
       }
-      return Result.failure(OAuth2Json.string(outcome.body(), "error")
+      return Result.failure(OAuth2Json.string(json, "error")
           .map(e -> (OAuth2Error) new OAuth2Error.ProtocolError(e))
           .orElse(new OAuth2Error.EndpointError(outcome.status())));
     });

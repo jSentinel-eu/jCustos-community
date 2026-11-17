@@ -28,6 +28,7 @@ import eu.jsentinel.jcustos.authorization.api.roles.RoleHierarchy;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.audit.CorrelationIdResolver;
 import eu.jsentinel.jcustos.net.ClientAddressResolver;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.logout.LogoutService;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingService;
@@ -400,14 +401,22 @@ public abstract class AbstractJCustosBootstrap<B extends CommonJCustosBootstrap<
       // tokens that pass the allow-list + family + signature checks against the
       // attacker's key. That must not be a mere warning in PRODUCTION — it is an
       // ERROR there too (was WARNING). Only the local dev modes (DEVELOPMENT /
-      // COMMUNITY_DEFAULTS) keep it at INFO so loopback http works for local IdPs.
+      // COMMUNITY_DEFAULTS) keep it at INFO for a local IdP - and since ER31
+      // (JS-SEC-098) only where the JWKS client accepts the URI: plain http to a
+      // loopback host with -Djcustos.dev=true. Everything else is an ERROR here
+      // rather than an exception out of the validator factory.
+      boolean acceptedLocally = "http".equalsIgnoreCase(jwt.jwksUri().getScheme())
+          && EndpointSecurity.devModeEnabled()
+          && EndpointSecurity.isLoopbackHost(jwt.jwksUri().getHost());
       Severity severity = switch (state.mode()) {
         case STRICT, PRODUCTION -> Severity.ERROR;
-        default -> Severity.INFO;
+        default -> acceptedLocally ? Severity.INFO : Severity.ERROR;
       };
       warnings.add(new JCustosBootstrapWarning(severity, "jwks/uri-not-https",
           "JWKS URI is not https (" + jwt.jwksUri().getScheme() + ").",
-          "Use an https JWKS endpoint."));
+          "Use an https JWKS endpoint. Plain http is accepted only to a loopback host "
+              + "and only with -D" + EndpointSecurity.DEV_MODE_PROPERTY + "=true, never in "
+              + "production."));
       if (severity == Severity.ERROR) {
         return;
       }

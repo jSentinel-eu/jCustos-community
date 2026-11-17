@@ -156,15 +156,50 @@ class JwtBootstrapTest {
   }
 
   @Test
-  @DisplayName("R11: a non-https JWKS URI is NOT an error in DEVELOPMENT (loopback http stays allowed)")
+  @DisplayName("R11/ER31: loopback http is NOT an error in DEVELOPMENT when -Djcustos.dev=true is set")
   void nonHttpsJwksUriIsNotErrorInDevelopment() {
+    System.setProperty("jcustos.dev", "true");
+    try {
+      List<JCustosBootstrapWarning> warnings = new TestBootstrap()
+          .mode(JCustosBootstrapMode.DEVELOPMENT)
+          .jwt(j -> j.jwksUri(URI.create("http://localhost/jwks"))
+              .algorithmProfile(AlgorithmProfile.STRICT_MODERN))
+          .applyJwt();
+      assertFalse(hasError(warnings, "jwks/uri-not-https"),
+          "DEVELOPMENT keeps loopback http at INFO with the dev flag, as the JWKS client does");
+    } finally {
+      System.clearProperty("jcustos.dev");
+    }
+  }
+
+  @Test
+  @DisplayName("ER31: loopback http without -Djcustos.dev=true is an ERROR in DEVELOPMENT, not an exception")
+  void loopbackJwksWithoutDevFlagIsErrorInDevelopment() {
+    System.clearProperty("jcustos.dev");
     List<JCustosBootstrapWarning> warnings = new TestBootstrap()
         .mode(JCustosBootstrapMode.DEVELOPMENT)
         .jwt(j -> j.jwksUri(URI.create("http://localhost/jwks"))
             .algorithmProfile(AlgorithmProfile.STRICT_MODERN))
         .applyJwt();
-    assertFalse(hasError(warnings, "jwks/uri-not-https"),
-        "DEVELOPMENT keeps non-https at INFO so local/loopback IdPs work");
+    assertTrue(hasError(warnings, "jwks/uri-not-https"),
+        "the JWKS client refuses loopback http without the flag; the bootstrap must say so");
+  }
+
+  @Test
+  @DisplayName("ER31: http to a non-loopback host is an ERROR in DEVELOPMENT even with the dev flag")
+  void remoteHttpJwksIsErrorInDevelopment() {
+    System.setProperty("jcustos.dev", "true");
+    try {
+      List<JCustosBootstrapWarning> warnings = new TestBootstrap()
+          .mode(JCustosBootstrapMode.DEVELOPMENT)
+          .jwt(j -> j.jwksUri(URI.create("http://idp.example/jwks"))
+              .algorithmProfile(AlgorithmProfile.STRICT_MODERN))
+          .applyJwt();
+      assertTrue(hasError(warnings, "jwks/uri-not-https"),
+          "the dev flag never admits cleartext to a remote JWKS");
+    } finally {
+      System.clearProperty("jcustos.dev");
+    }
   }
 
   @Test

@@ -14,32 +14,7 @@
  * See the Licence for the specific language governing permissions and
  * limitations under the Licence.
  */
-package eu.jsentinel.jcustos.oauth2.internal;
-
-/*-
- * #%L
- * jCustos OAuth2 — RP flows (token endpoint, auth-code, refresh, device)
- * $Id:$
- * $HeadURL:$
- * %%
- * Copyright (C) 2018 - 2026 jCustos by Sven Ruppert
- * %%
- * Licensed under the EUPL, Version 1.2 or – as soon they will be
- * approved by the European Commission - subsequent versions of the
- * EUPL (the "Licence");
- *
- * You may not use this work except in compliance with the Licence.
- * You may obtain a copy of the Licence at:
- *
- * https://joinup.ec.europa.eu/software/page/eupl
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the Licence is distributed on an "AS IS" basis,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the Licence for the specific language governing permissions and
- * limitations under the Licence.
- * #L%
- */
+package eu.jsentinel.jcustos.oauth2.http;
 
 import eu.jsentinel.jcustos.jwt.api.JwtSigner;
 
@@ -47,13 +22,14 @@ import java.util.ServiceLoader;
 
 /**
  * Resolves the {@link JwtSigner} SPI via {@link ServiceLoader} (V00.77) so the
- * {@code jCustos-oauth2} module needs {@code private_key_jwt} signing without
- * ever importing a JOSE library — the Nimbus-backed signer lives in
+ * form-{@code POST} signs a {@code private_key_jwt} assertion without ever
+ * importing a JOSE library — the Nimbus-backed signer lives in
  * {@code jCustos-jwt}. Resolution is memoised; the absence of any provider is
  * an explicit, non-secret failure raised only when {@code private_key_jwt} is
- * actually used.
+ * actually used. Moved from {@code jCustos-oauth2} to {@code jCustos-core} in
+ * 00.84.00 together with {@link OAuth2FormPost}.
  */
-public final class JwtSigners {
+final class JwtSigners {
 
   private static final class Holder {
     private static final JwtSigner INSTANCE = ServiceLoader.load(JwtSigner.class)

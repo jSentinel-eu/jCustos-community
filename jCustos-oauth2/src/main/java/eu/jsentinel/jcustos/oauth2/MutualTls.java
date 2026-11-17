@@ -42,7 +42,7 @@ package eu.jsentinel.jcustos.oauth2;
  */
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 
 import java.net.URI;
 import java.security.KeyStore;
@@ -132,6 +132,6 @@ public final class MutualTls {
     if (alias == null) {
       return fallback;
     }
-    return OAuth2FormPost.requireHttps(alias, "oauth2/mtls-alias-not-https");
+    return EndpointSecurity.requireHttps(alias, "oauth2/mtls-alias-not-https");
   }
 }

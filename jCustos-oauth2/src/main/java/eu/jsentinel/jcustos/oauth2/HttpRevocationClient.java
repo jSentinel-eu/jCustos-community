@@ -42,11 +42,12 @@ package eu.jsentinel.jcustos.oauth2;
  */
 
 import com.svenruppert.functional.result.Result;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
 import eu.jsentinel.jcustos.oauth2.api.RevocationClient;
 import eu.jsentinel.jcustos.oauth2.api.TokenTypeHint;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -71,7 +72,7 @@ public final class HttpRevocationClient implements RevocationClient {
   public HttpRevocationClient(HttpClient http, URI endpoint,
       ClientAuthentication clientAuthentication) {
     this.http = Objects.requireNonNull(http, "http");
-    this.endpoint = OAuth2FormPost.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
+    this.endpoint = EndpointSecurity.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
     this.clientAuthentication = Objects.requireNonNull(clientAuthentication, "clientAuthentication");
   }
 

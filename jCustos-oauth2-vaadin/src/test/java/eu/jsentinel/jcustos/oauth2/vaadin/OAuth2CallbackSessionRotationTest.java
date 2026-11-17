@@ -302,6 +302,40 @@ class OAuth2CallbackSessionRotationTest {
     assertTrue(CallbackView.tokensSeen);
   }
 
+  // ── JS-SEC-098 (RFC 6749 §3.1): the view reads the callback through the shared factory ──
+
+  @Test
+  @DisplayName("JS-SEC-098: a callback with two state values is refused without touching the flow")
+  void duplicatedState_isRejected() {
+    String before = session.getSession().getId();
+    String state = flow.startRequest(AuthorizationCodeFlow.StartRequestParams.empty()).stateKey();
+
+    UI.getCurrent().navigate("sa46/callback?code=auth-code&state=" + state + "&state=attacker-state");
+
+    assertFalse(CallbackView.tokensSeen, "the code must not be exchanged for a polluted callback");
+    assertEquals(before, session.getSession().getId());
+    assertInstanceOf(ErrorLandingView.class, UI.getCurrent().getInternals().getActiveRouterTargetsChain().get(0));
+
+    // The state is still there for the well-formed response.
+    UI.getCurrent().navigate("sa46/callback?code=auth-code&state=" + state);
+    assertTrue(CallbackView.tokensSeen);
+    assertInstanceOf(LandingView.class, UI.getCurrent().getInternals().getActiveRouterTargetsChain().get(0));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a callback with two code values is refused without touching the flow")
+  void duplicatedCode_isRejected() {
+    String state = flow.startRequest(AuthorizationCodeFlow.StartRequestParams.empty()).stateKey();
+
+    UI.getCurrent().navigate("sa46/callback?code=auth-code&code=attacker-code&state=" + state);
+
+    assertFalse(CallbackView.tokensSeen);
+    assertInstanceOf(ErrorLandingView.class, UI.getCurrent().getInternals().getActiveRouterTargetsChain().get(0));
+
+    UI.getCurrent().navigate("sa46/callback?code=auth-code&state=" + state);
+    assertTrue(CallbackView.tokensSeen);
+  }
+
   /** The application's callback route: binds the subject, as the documented recipe does. */
   @Route("sa46/callback")
   public static class CallbackView extends AbstractOAuth2CallbackView {

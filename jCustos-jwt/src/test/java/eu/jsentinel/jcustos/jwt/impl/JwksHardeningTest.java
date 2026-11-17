@@ -108,11 +108,14 @@ class JwksHardeningTest {
     });
     server.start();
     jwksUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/jwks";
+    // JS-SEC-098: since 00.84.00 a JWKS stub on loopback http needs the dev flag as well.
+    System.setProperty("jcustos.dev", "true");
   }
 
   @AfterEach
   void stop() {
     server.stop(0);
+    System.clearProperty("jcustos.dev");
   }
 
   private static RSAKey rsa(String kid) throws Exception {

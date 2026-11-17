@@ -84,7 +84,7 @@ public final class NimbusJweDecoder implements JweDecoder {
     if (jweCompact.length() > JoseLimits.MAX_COMPACT_BYTES) {
       return Result.failure(new JweDecodingError.Malformed("compact JWE exceeds the size cap"));
     }
-    if (countSegments(jweCompact) != 5) {
+    if (JoseLimits.countSegments(jweCompact) != 5) {
       return Result.failure(new JweDecodingError.NotJwe("compact form is not a five-segment JWE"));
     }
 
@@ -117,15 +117,5 @@ public final class NimbusJweDecoder implements JweDecoder {
       return Result.failure(new JweDecodingError.DecryptionFailed("decryption or tag verification failed"));
     }
     return Result.success(jwe.getPayload().toString());
-  }
-
-  private static int countSegments(String compact) {
-    int dots = 0;
-    for (int i = 0; i < compact.length(); i++) {
-      if (compact.charAt(i) == '.') {
-        dots++;
-      }
-    }
-    return dots + 1;
   }
 }

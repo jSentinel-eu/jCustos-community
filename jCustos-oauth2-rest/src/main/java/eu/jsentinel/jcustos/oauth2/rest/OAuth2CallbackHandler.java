@@ -51,9 +51,7 @@ import eu.jsentinel.jcustos.rest.RestHandler;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 
-import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 
 /**
  * The REST-side OAuth2 redirect-callback handler (V00.77). Reads {@code code} +
@@ -86,6 +84,17 @@ import java.util.Optional;
  * built without a binding logs {@code oauth2/state-unbound} at construction.
  * The Vaadin adapter's {@code VaadinSessionStateStore} already binds state to
  * the {@code VaadinSession} and needs no extra step.
+ *
+ * <p><strong>Repeated parameters (JS-SEC-098, CWE-1041).</strong> Since 00.84.00
+ * the handler reads the callback through
+ * {@link RestRequest#queryParameterValues()} and
+ * {@link AuthorizationCodeFlow.CallbackParams#fromMultiValued(java.util.Map)}, the
+ * factory the Vaadin adapter uses as well: a callback that repeats {@code state},
+ * {@code code}, {@code error}, {@code error_description}, {@code error_uri} or
+ * {@code iss} is answered with {@code 400} before the binding is checked or the
+ * flow runs (RFC 6749 §3.1). The check sees what the adapter's
+ * {@code queryParameterValues()} reports; an adapter that kept the lossy
+ * default has collapsed a repetition before the handler runs.
  */
 public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
 
@@ -182,25 +191,29 @@ public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
 
   @Override
   public void handle(RestRequest request, RestResponse response) {
-    Map<String, String> query = request.queryParameters();
-    String state = query.get("state");
-    if (state == null || state.isBlank()) {
+    // JS-SEC-098 (RFC 6749 §3.1): every value of every parameter, so that a repeated state, code
+    // or iss is refused instead of one value winning; a callback without state is refused too.
+    // JS-SEC-150 (CWE-346, RFC 9207): the iss of the response travels to the flow, which
+    // compares it with the expected issuer before it consumes the state or exchanges the code.
+    Result<AuthorizationCodeFlow.CallbackParams, OAuth2Error> callback =
+        AuthorizationCodeFlow.CallbackParams.fromMultiValued(request.queryParameterValues());
+    if (callback.isFailure()) {
+      // The detail names a parameter, never a value the caller sent.
+      String reason = callback.fold(ok -> "",
+          e -> e instanceof OAuth2Error.StateInvalid invalid ? invalid.detail() : e.code());
+      logger().debug("oauth2/callback-refused: {}", reason);
       response.status(HttpStatus.BAD_REQUEST.code());
       response.body(INVALID_CALLBACK_BODY);
       return;
     }
+    AuthorizationCodeFlow.CallbackParams params = callback.getOrThrow();
     // BL01 (CWE-352): reject an unbound callback BEFORE driving the flow — the
     // single-use state stays unconsumed, so the legitimate browser still wins.
-    if (!stateBinding.matches(state, request)) {
+    if (!stateBinding.matches(params.state(), request)) {
       response.status(HttpStatus.BAD_REQUEST.code());
       response.body(INVALID_CALLBACK_BODY);
       return;
     }
-    // JS-SEC-150 (CWE-346, RFC 9207): hand the issuer of the response to the flow, which
-    // compares it with the expected issuer before it consumes the state or exchanges the code.
-    AuthorizationCodeFlow.CallbackParams params = new AuthorizationCodeFlow.CallbackParams(
-        opt(query.get("code")), state, opt(query.get("error")), opt(query.get("error_description")),
-        opt(query.get("iss")));
 
     Result<CallbackResult, OAuth2Error> result = flow.handleCallback(params);
     if (result.isSuccess()) {
@@ -211,10 +224,6 @@ public final class OAuth2CallbackHandler implements RestHandler, HasLogger {
     OAuth2Error error = result.fold(ok -> (OAuth2Error) null, e -> e);
     response.status(statusFor(error));
     response.body(messageFor(error));
-  }
-
-  private static Optional<String> opt(String value) {
-    return (value == null || value.isBlank()) ? Optional.empty() : Optional.of(value);
   }
 
   private static int statusFor(OAuth2Error error) {

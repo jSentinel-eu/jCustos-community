@@ -192,4 +192,48 @@ class HttpTokenEndpointClientTest {
             new ClientAuthentication.NoneAuthentication("svc"), HttpClient.newHttpClient()));
     assertTrue(ex.getMessage().contains("token-endpoint-not-https"));
   }
+
+  // ── JS-SEC-098 (CWE-1041): the response is read with the one bounded JSON reader ──
+
+  @Test
+  @DisplayName("JS-SEC-098: a unicode escape in the token response is decoded (the old scanner kept it raw)")
+  void unicodeEscapeDecoded() {
+    responseBody = "{\"access_token\":\"AT\\u002D3\",\"token_type\":\"Bearer\"}";
+    TokenResponse tr = client(new ClientAuthentication.NoneAuthentication("svc"))
+        .clientCredentials(Set.of()).toOptional().orElseThrow();
+    assertEquals("AT-3", tr.accessToken());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a token response naming access_token twice is malformed, neither value is used")
+  void duplicateAccessTokenMalformed() {
+    responseBody = "{\"access_token\":\"AT-first\",\"token_type\":\"Bearer\",\"access_token\":\"AT-second\"}";
+    Result<TokenResponse, OAuth2Error> r = client(
+        new ClientAuthentication.NoneAuthentication("svc")).clientCredentials(Set.of());
+    assertInstanceOf(OAuth2Error.MalformedResponse.class, r.map(t -> (OAuth2Error) null).getOrElse(e -> e));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: trailing content after the token response makes it malformed")
+  void trailingContentMalformed() {
+    responseBody = "{\"access_token\":\"AT-4\",\"token_type\":\"Bearer\"} trailing";
+    Result<TokenResponse, OAuth2Error> r = client(
+        new ClientAuthentication.NoneAuthentication("svc")).clientCredentials(Set.of());
+    assertInstanceOf(OAuth2Error.MalformedResponse.class, r.map(t -> (OAuth2Error) null).getOrElse(e -> e));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: the token endpoint follows the one https rule — [::1] and 127.0.0.2 with the flag only")
+  void loopbackRule() {
+    for (String uri : java.util.List.of("http://[::1]:8080/token", "http://127.0.0.2:8080/token")) {
+      new HttpTokenEndpointClient(URI.create(uri), new ClientAuthentication.NoneAuthentication("svc"),
+          HttpClient.newHttpClient());
+    }
+    System.clearProperty("jcustos.dev");
+    for (String uri : java.util.List.of("http://[::1]:8080/token", "http://127.0.0.2:8080/token",
+        "http://localhost:8080/token")) {
+      assertThrows(IllegalArgumentException.class, () -> new HttpTokenEndpointClient(URI.create(uri),
+          new ClientAuthentication.NoneAuthentication("svc"), HttpClient.newHttpClient()), uri);
+    }
+  }
 }

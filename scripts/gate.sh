@@ -23,6 +23,10 @@
 #                    is covered by .gitignore. Reports WARN while decisions
 #                    of the maintainer are still open in the published
 #                    documents (contact address, release key and so on)
+#   definitions      the rules consolidated in 00.84.00 (ER31) have one
+#                    definition each in the library sources: the https and
+#                    loopback rule, the dev flag, the JOSE segment counter and
+#                    the JSON reader (scripts/single-definitions.py)
 #   bom              jCustos-bom has the reactor's version and output timestamp
 #                    and manages exactly the publishable modules (the BOM has no
 #                    parent, so Maven itself does not tie it to the reactor)
@@ -176,6 +180,17 @@ elif [ "$open_decisions" != 0 ]; then
   record preflight WARN "$DETAIL; $open_decisions maintainer decision(s) still open, which blocks a release"
 else
   record preflight PASS "$DETAIL"
+fi
+
+# --- definitions -------------------------------------------------------------
+begin definitions
+# ER31 (JS-SEC-098, CWE-1041): a second copy of a security rule drifts from the first; every
+# hardening has to find all of them. Source search only, no build needed.
+python3 scripts/single-definitions.py | tee "$GATE_DIR/definitions.log"
+if [ "${PIPESTATUS[0]}" = 0 ]; then
+  record definitions PASS "$(tail -1 "$GATE_DIR/definitions.log")"
+else
+  record definitions FAIL "$(tail -1 "$GATE_DIR/definitions.log"); see above"
 fi
 
 # --- bom -----------------------------------------------------------------------

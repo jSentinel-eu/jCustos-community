@@ -555,4 +555,95 @@ class OAuth2CallbackHandlerTest {
     assertEquals(400, response.status);
     assertEquals(0, tokenRequests.get());
   }
+
+  // ── JS-SEC-098 (RFC 6749 §3.1): each response parameter at most once ──
+
+  /** A request whose transport reports every value of every query parameter. */
+  private static RestRequest multiValuedRequest(Map<String, List<String>> query, Map<String, String> headers) {
+    return new RestRequest() {
+      @Override public String method() {
+        return "GET";
+      }
+
+      @Override public String path() {
+        return "/oauth2/callback";
+      }
+
+      @Override public Map<String, String> headers() {
+        return headers;
+      }
+
+      @Override public Map<String, String> queryParameters() {
+        // what a lossy adapter would keep: the first value
+        Map<String, String> first = new HashMap<>();
+        query.forEach((name, values) -> first.put(name, values.get(0)));
+        return first;
+      }
+
+      @Override public Map<String, List<String>> queryParameterValues() {
+        return query;
+      }
+    };
+  }
+
+  private void assertRepeatedParameterRefused(String name, String first, String second, boolean withIssuer) {
+    JdkInMemoryStateStore store = new JdkInMemoryStateStore(100, () -> NOW);
+    AuthorizationCodeFlow flow = withIssuer
+        ? flow(store, config().withExpectedIssuer("https://idp.example", false))
+        : flow(store);
+    String state = flow.startRequest(AuthorizationCodeFlow.StartRequestParams.empty()).stateKey();
+    AtomicReference<CallbackResult> captured = new AtomicReference<>();
+    OAuth2CallbackHandler handler = new OAuth2CallbackHandler(flow, (result, req) -> captured.set(result));
+
+    Map<String, List<String>> query = new HashMap<>();
+    query.put("code", List.of("auth-code-xyz"));
+    query.put("state", List.of(state));
+    query.put(name, List.of(first.replace("<state>", state), second.replace("<state>", state)));
+    CapturingResponse refused = new CapturingResponse();
+    handler.handle(multiValuedRequest(query, bindingCookie(state)), refused);
+
+    assertEquals(400, refused.status, name);
+    assertEquals("Invalid callback", refused.body, "generic body — the parameter is not named");
+    assertNull(captured.get(), "the flow must not run for a polluted callback");
+    assertEquals(0, tokenRequests.get(), "no code may reach the token endpoint");
+
+    // The state was not consumed: the well-formed callback still completes.
+    Map<String, List<String>> clean = new HashMap<>();
+    clean.put("code", List.of("auth-code-xyz"));
+    clean.put("state", List.of(state));
+    CapturingResponse accepted = new CapturingResponse();
+    handler.handle(multiValuedRequest(clean, bindingCookie(state)), accepted);
+    assertEquals(204, accepted.status, name);
+    assertNotNull(captured.get());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a repeated state is refused with 400 before the flow runs; the state stays usable")
+  void repeatedStateRefused() {
+    assertRepeatedParameterRefused("state", "<state>", "attacker-state", false);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a repeated code is refused with 400 before the code exchange")
+  void repeatedCodeRefused() {
+    assertRepeatedParameterRefused("code", "auth-code-xyz", "attacker-code", false);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a repeated iss is refused with 400, even when the first one is the expected issuer")
+  void repeatedIssuerRefused() {
+    assertRepeatedParameterRefused("iss", "https://idp.example", "https://attacker.example", true);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: an adapter that keeps the lossy default still completes a well-formed callback")
+  void lossyDefaultStillWorks() {
+    JdkInMemoryStateStore store = new JdkInMemoryStateStore(100, () -> NOW);
+    AuthorizationCodeFlow flow = flow(store);
+    String state = flow.startRequest(AuthorizationCodeFlow.StartRequestParams.empty()).stateKey();
+    OAuth2CallbackHandler handler = new OAuth2CallbackHandler(flow, (t, r) -> { });
+    CapturingResponse response = new CapturingResponse();
+    handler.handle(request(callbackQuery(state), bindingCookie(state)), response);
+    assertEquals(204, response.status);
+  }
 }

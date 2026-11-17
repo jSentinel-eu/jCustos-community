@@ -103,11 +103,14 @@ class HttpJwksClientTest {
     });
     server.start();
     jwksUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/jwks";
+    // JS-SEC-098: since 00.84.00 a JWKS stub on loopback http needs the dev flag as well.
+    System.setProperty("jcustos.dev", "true");
   }
 
   @AfterEach
   void stop() {
     server.stop(0);
+    System.clearProperty("jcustos.dev");
   }
 
   private static String jwks(RSAKey... keys) {
@@ -293,7 +296,7 @@ class HttpJwksClientTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-018: https anywhere and loopback http are accepted")
+  @DisplayName("JS-SEC-018/098: https anywhere and, with -Djcustos.dev=true, loopback http are accepted")
   void httpsAndLoopbackAccepted() {
     new HttpJwksClient(URI.create("https://idp.example.com/jwks"),
         HttpClient.newHttpClient(), () -> NOW);
@@ -301,5 +304,33 @@ class HttpJwksClientTest {
         HttpClient.newHttpClient(), () -> NOW);
     new HttpJwksClient(URI.create("http://localhost:8080/jwks"),
         HttpClient.newHttpClient(), () -> NOW);
+    new HttpJwksClient(URI.create("http://127.0.0.2:8080/jwks"),
+        HttpClient.newHttpClient(), () -> NOW);
+    new HttpJwksClient(URI.create("http://[::1]:8080/jwks"),
+        HttpClient.newHttpClient(), () -> NOW);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: without -Djcustos.dev=true loopback http is refused like any other http")
+  void loopbackHttpWithoutDevFlagRefused() {
+    System.clearProperty("jcustos.dev");
+    for (String uri : List.of("http://127.0.0.1:8080/jwks", "http://localhost:8080/jwks",
+        "http://[::1]:8080/jwks")) {
+      IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+          () -> new HttpJwksClient(URI.create(uri), HttpClient.newHttpClient(), () -> NOW), uri);
+      assertTrue(refused.getMessage().startsWith("jwks/uri-not-https: "), refused.getMessage());
+    }
+    // https needs no flag
+    new HttpJwksClient(URI.create("https://idp.example.com/jwks"), HttpClient.newHttpClient(), () -> NOW);
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a lookalike of a loopback host is refused even with -Djcustos.dev=true")
+  void loopbackLookalikeRefused() {
+    for (String uri : List.of("http://localhost.evil.example/jwks", "http://127.0.0.1.nip.io/jwks",
+        "http://localhost@evil.example/jwks")) {
+      assertThrows(IllegalArgumentException.class,
+          () -> new HttpJwksClient(URI.create(uri), HttpClient.newHttpClient(), () -> NOW), uri);
+    }
   }
 }

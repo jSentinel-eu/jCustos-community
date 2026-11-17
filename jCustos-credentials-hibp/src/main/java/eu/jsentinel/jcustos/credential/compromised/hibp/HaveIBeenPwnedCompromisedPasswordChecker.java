@@ -26,6 +26,7 @@ import com.svenruppert.dependencies.core.net.MediaType;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordChecker;
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordResult;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -88,18 +89,21 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
    * JDK {@link HttpClient}.
    *
    * @param endpoint base URI; the 5-char prefix is appended as a
-   *                 path segment
+   *                 path segment. {@code https}; plain {@code http} only
+   *                 to a loopback host with {@code -Djcustos.dev=true}
+   *                 (since 00.84.00, see {@link EndpointSecurity})
    * @param timeout  per-request timeout
    */
   public static HaveIBeenPwnedCompromisedPasswordChecker usingJdkHttpClient(
       URI endpoint, Duration timeout) {
     Objects.requireNonNull(endpoint, "endpoint");
     Objects.requireNonNull(timeout, "timeout");
-    // JS-SEC-046 (CWE-319): the operator-supplied endpoint must be https (loopback http allowed for
-    // a local mirror / test). A plaintext hop would expose the 5-char SHA-1 prefix of every
-    // candidate password (eroding the documented k-anonymity guarantee) and let a MITM strip the
-    // body to force every breached password to 'Clean'. Mirrors HttpJwksClient.requireHttpsOrLoopback.
-    requireHttpsOrLoopback(endpoint);
+    // JS-SEC-046 (CWE-319): the operator-supplied endpoint must be https. A plaintext hop would
+    // expose the 5-char SHA-1 prefix of every candidate password (eroding the documented
+    // k-anonymity guarantee) and let a MITM strip the body to force every breached password to
+    // 'Clean'. JS-SEC-098: the one https rule of jCustos - loopback http (a local mirror, a test
+    // stub) only with -Djcustos.dev=true; up to 00.83.00 loopback http needed no flag.
+    EndpointSecurity.requireHttps(endpoint, "hibp/endpoint-not-https");
     // R12 (V00.76.10): cap the response body so a hostile / compromised mirror
     // (operators may repoint the endpoint) cannot return a multi-GB body and OOM
     // the verifying JVM. A padded HIBP range response is a few tens of KB; 1 MiB
@@ -157,29 +161,6 @@ public final class HaveIBeenPwnedCompromisedPasswordChecker
       }
     };
     return new HaveIBeenPwnedCompromisedPasswordChecker(lookup);
-  }
-
-  /**
-   * JS-SEC-046 (CWE-319): enforce https for any non-loopback endpoint; loopback http is allowed for
-   * a local mirror / test stub. Mirrors {@code HttpJwksClient.requireHttpsOrLoopback}.
-   */
-  private static void requireHttpsOrLoopback(URI endpoint) {
-    String scheme = endpoint.getScheme();
-    if ("https".equalsIgnoreCase(scheme)) {
-      return;
-    }
-    if ("http".equalsIgnoreCase(scheme) && isLoopback(endpoint.getHost())) {
-      return;
-    }
-    throw new IllegalArgumentException(
-        "hibp/endpoint-not-https: the HIBP endpoint must use https:// (got: " + endpoint + ")");
-  }
-
-  private static boolean isLoopback(String host) {
-    return "localhost".equalsIgnoreCase(host)
-        || "127.0.0.1".equals(host)
-        || "::1".equals(host)
-        || "[::1]".equals(host);
   }
 
   @Override

@@ -43,11 +43,11 @@ package eu.jsentinel.jcustos.identity.oidc;
 
 import eu.jsentinel.jcustos.util.BoundedHttpBody;
 import com.svenruppert.functional.result.Result;
-import eu.jsentinel.jcustos.identity.oidc.internal.OidcJson;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
 import eu.jsentinel.jcustos.oidc.api.UserInfoClient;
 import eu.jsentinel.jcustos.oidc.api.UserInfoResponse;
+import eu.jsentinel.jcustos.util.json.BoundedJson;
 
 import java.io.IOException;
 import java.net.URI;
@@ -62,8 +62,8 @@ import java.util.Objects;
 /**
  * Pulls claims from the OIDC UserInfo endpoint (OIDC Core §5.3, V00.78). Sends a
  * Bearer-authenticated GET over JDK {@link HttpClient}, enforces https (V00.77
- * dev-loopback carve-out), caps the body at 1 MiB and parses the JSON response via
- * the in-tree {@link OidcJson}. The {@code sub} claim is mandatory; the caller MUST
+ * dev-loopback carve-out, see {@link EndpointSecurity}), caps the body at 1 MiB and
+ * parses the JSON response with {@link BoundedJson}. The {@code sub} claim is mandatory; the caller MUST
  * verify it matches the ID token's {@code sub} (OIDC §5.3.2). The access token is
  * sent only in the {@code Authorization} header and never logged.
  *
@@ -81,7 +81,7 @@ public final class HttpUserInfoClient implements UserInfoClient {
 
   public HttpUserInfoClient(HttpClient http, URI endpoint) {
     this.http = Objects.requireNonNull(http, "http");
-    this.endpoint = OAuth2FormPost.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
+    this.endpoint = EndpointSecurity.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
   }
 
   @Override
@@ -112,12 +112,11 @@ public final class HttpUserInfoClient implements UserInfoClient {
     }
     body = new String(bytes, StandardCharsets.UTF_8);
 
-    Map<String, Object> json;
-    try {
-      json = OidcJson.parseObject(body);
-    } catch (OidcJson.JsonException e) {
+    Result<Map<String, Object>, String> parsed = BoundedJson.parseObject(body);
+    if (parsed.isFailure()) {
       return Result.failure(new OAuth2Error.MalformedResponse("invalid userinfo document"));
     }
+    Map<String, Object> json = parsed.getOrThrow();
     if (!(json.get("sub") instanceof String sub) || sub.isBlank()) {
       return Result.failure(new OAuth2Error.MalformedResponse("userinfo response without sub"));
     }

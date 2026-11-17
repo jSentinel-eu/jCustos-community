@@ -54,4 +54,27 @@ public final class JoseLimits {
 
   private JoseLimits() {
   }
+
+  /**
+   * Counts the dot-separated segments of a JOSE compact serialisation without splitting it: three
+   * for a JWS, five for a JWE (RFC 7515 §7.1, RFC 7516 §7.1). The parsers check the count before
+   * they hand the value to the JOSE library, so a value of the wrong shape is refused without
+   * being parsed (JS-SEC-098, CWE-1041: the single copy of what three parsers counted for
+   * themselves).
+   *
+   * <p>Call it after the {@link #MAX_COMPACT_BYTES} check; it reads the whole value.
+   *
+   * @param compact the compact serialisation, non-null
+   * @return the number of segments, at least one
+   * @since 00.84.00
+   */
+  public static int countSegments(String compact) {
+    int dots = 0;
+    for (int i = 0; i < compact.length(); i++) {
+      if (compact.charAt(i) == '.') {
+        dots++;
+      }
+    }
+    return dots + 1;
+  }
 }

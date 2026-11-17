@@ -40,8 +40,8 @@ import java.util.function.Function;
  *
  * <p>The range query goes to the public HIBP endpoint
  * unless {@value #HIBP_ENDPOINT_PROPERTY} names another endpoint (HTTPS,
- * or HTTP on loopback) - a mirror inside the company network, or the
- * loopback server of a test.
+ * or HTTP on loopback with {@code -Djcustos.dev=true}) - a mirror inside the
+ * company network, or the loopback server of a test.
  */
 public final class PasswordPreflight {
 

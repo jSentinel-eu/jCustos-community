@@ -7,27 +7,35 @@
  * compliance with the Licence. You may obtain a copy of the Licence at:
  *
  * https://joinup.ec.europa.eu/software/page/eupl
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the Licence is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the Licence for the specific language governing permissions and
+ * limitations under the Licence.
  */
 package eu.jsentinel.jcustos.propagation.oidc.http;
 
+import eu.jsentinel.jcustos.util.json.BoundedJson;
+
+import java.util.Map;
 import java.util.Optional;
 
 /**
- * Minimal JSON extractor for the Token-Endpoint response shape
- * {@code { "access_token": "...", "token_type": "Bearer",
- * "expires_in": 3600 }}. Avoids pulling in a third-party JSON library
- * — the V00.74 contract limits the parsed surface to these three
- * fields.
- *
- * <p>R09 (V00.76.10): extraction is scoped to the <strong>top-level</strong>
- * fields of the outermost JSON object. A previous version used a free,
- * non-anchored regex that would grab an {@code "access_token"} appearing
- * anywhere — including nested inside another object or an error description.
- * The depth-aware scanner below only matches a key that is a direct member of
- * the outermost object, so a nested field can never be picked.
+ * Reads the top-level fields of a token-endpoint response.
+ * <p>
+ * Until 00.84.00 this class carried its own top-level JSON scanner, one of three readers in the
+ * identity modules (ER31, JS-SEC-098, CWE-1041). It now delegates to {@link BoundedJson}, the
+ * one bounded reader in jCustos-core: a body that is no well-formed JSON object - trailing
+ * content, a repeated key, deeper than 64 levels, larger than 1 MiB - yields no field at all,
+ * and escaped characters arrive decoded. The propagation strategies no longer use this class.
  *
  * @since 00.74.00
+ * @deprecated since 00.84.00, for removal in 00.85.00; parse the body once with
+ *     {@link BoundedJson#parseObject(String)} and read the fields with
+ *     {@link BoundedJson#string(Map, String)} and {@link BoundedJson#integer(Map, String)}.
  */
+@Deprecated(since = "00.84.00", forRemoval = true)
 public final class JsonResponse {
 
   private JsonResponse() {
@@ -35,147 +43,30 @@ public final class JsonResponse {
   }
 
   /**
-   * @return the top-level {@code access_token} value or empty if absent /
-   *         malformed
+   * @return the top-level {@code access_token} value, or empty if absent or the body is
+   *     malformed
    */
   public static Optional<String> accessToken(String body) {
-    return topLevelValue(body, "access_token", true);
+    return BoundedJson.string(fieldsOf(body), "access_token");
   }
 
   /**
-   * @return the top-level {@code expires_in} value in seconds, or empty if
-   *     absent or malformed. A digit run longer than {@code long} would
-   *     otherwise overflow {@link Long#parseLong}; that is treated as "no usable
-   *     value" rather than propagating a {@link NumberFormatException} to the
-   *     caller (V00.75.10, H4).
+   * @return the top-level {@code expires_in} value in seconds, or empty if absent, not an
+   *     integer within {@code long}, or the body is malformed
    */
   public static Optional<Long> expiresIn(String body) {
-    return topLevelValue(body, "expires_in", false).flatMap(token -> {
-      try {
-        return Optional.of(Long.parseLong(token));
-      } catch (NumberFormatException overflow) {
-        return Optional.empty();
-      }
-    });
+    return BoundedJson.integer(fieldsOf(body), "expires_in");
   }
 
   /**
-   * @return the top-level {@code token_type} value (typically {@code "Bearer"})
+   * @return the top-level {@code token_type} value (typically {@code "Bearer"}), or empty if
+   *     absent or the body is malformed
    */
   public static Optional<String> tokenType(String body) {
-    return topLevelValue(body, "token_type", true);
+    return BoundedJson.string(fieldsOf(body), "token_type");
   }
 
-  /**
-   * Extracts the value of {@code key} when it is a direct member of the
-   * outermost JSON object. Tracks nesting depth and string literals (honouring
-   * {@code \\} escapes) so keys inside nested objects/arrays — or strings that
-   * merely contain the key text — are never matched.
-   *
-   * @param body       the JSON body
-   * @param key        the field name to extract
-   * @param wantString {@code true} for a string value, {@code false} for a
-   *                   numeric/literal token
-   * @return the raw value (string content, or the numeric token), or empty
-   */
-  private static Optional<String> topLevelValue(String body, String key, boolean wantString) {
-    if (body == null) {
-      return Optional.empty();
-    }
-    int n = body.length();
-    int i = body.indexOf('{');
-    if (i < 0) {
-      return Optional.empty();
-    }
-    i++;            // step inside the outermost object
-    int depth = 1;  // 1 == directly inside the outermost object
-    int[] end = new int[1];
-    while (i < n && depth >= 1) {
-      char c = body.charAt(i);
-      if (c == '"') {
-        String token = readString(body, i, end);
-        int j = end[0];
-        if (depth == 1) {
-          int k = skipWs(body, j);
-          if (k < n && body.charAt(k) == ':' && token.equals(key)) {
-            // `token` is a matching top-level key
-            return readValue(body, skipWs(body, k + 1), wantString, end);
-          }
-        }
-        i = j;
-        continue;
-      }
-      if (c == '{' || c == '[') {
-        depth++;
-      } else if (c == '}' || c == ']') {
-        depth--;
-      }
-      i++;
-    }
-    return Optional.empty();
-  }
-
-  private static Optional<String> readValue(String body, int at, boolean wantString, int[] end) {
-    int n = body.length();
-    if (at >= n) {
-      return Optional.empty();
-    }
-    char v = body.charAt(at);
-    if (v == '"') {
-      return wantString ? Optional.of(readString(body, at, end)) : Optional.empty();
-    }
-    if (wantString) {
-      return Optional.empty();
-    }
-    // Digits only — matches the prior `\d+` extraction. The single numeric field
-    // (expires_in) is a non-negative seconds count, so a leading sign is not a
-    // valid value here and yields empty (as the old regex did).
-    int start = at;
-    int k = at;
-    while (k < n && body.charAt(k) >= '0' && body.charAt(k) <= '9') {
-      k++;
-    }
-    return k > start ? Optional.of(body.substring(start, k)) : Optional.empty();
-  }
-
-  /**
-   * Reads a JSON string starting at {@code openQuote}. Returns the inner content
-   * (escape sequences kept raw) and writes the index just past the closing quote
-   * into {@code endOut[0]}.
-   */
-  private static String readString(String body, int openQuote, int[] endOut) {
-    int n = body.length();
-    StringBuilder sb = new StringBuilder();
-    int i = openQuote + 1;
-    while (i < n) {
-      char c = body.charAt(i);
-      if (c == '\\' && i + 1 < n) {
-        sb.append(c).append(body.charAt(i + 1));
-        i += 2;
-        continue;
-      }
-      if (c == '"') {
-        endOut[0] = i + 1;
-        return sb.toString();
-      }
-      sb.append(c);
-      i++;
-    }
-    endOut[0] = n; // unterminated string
-    return sb.toString();
-  }
-
-  private static int skipWs(String body, int from) {
-    int n = body.length();
-    int i = from;
-    while (i < n) {
-      char c = body.charAt(i);
-      if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-        i++;
-      } else {
-        break;
-      }
-    }
-    return i;
+  private static Map<String, Object> fieldsOf(String body) {
+    return BoundedJson.parseObject(body).getOrElse(Map.of());
   }
 }

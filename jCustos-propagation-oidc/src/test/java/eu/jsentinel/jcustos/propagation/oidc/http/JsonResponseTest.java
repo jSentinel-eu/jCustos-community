@@ -18,8 +18,31 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@DisplayName("JsonResponse.expiresIn — overflow guard (H4)")
+@DisplayName("JsonResponse — deprecated delegate over BoundedJson (H4, R09, ER31)")
+@SuppressWarnings("removal")
 class JsonResponseTest {
+
+  @Test
+  @DisplayName("ER31: a repeated key makes the body malformed, so no field is read")
+  void repeatedKeyYieldsEmpty() {
+    String body = "{\"access_token\":\"first\",\"access_token\":\"second\"}";
+    assertTrue(JsonResponse.accessToken(body).isEmpty(),
+        "a body with a repeated key must not yield either value");
+  }
+
+  @Test
+  @DisplayName("ER31: escaped characters arrive decoded")
+  void unicodeEscapeDecoded() {
+    assertEquals(Optional.of("Bearer"),
+        JsonResponse.tokenType("{\"token_type\":\"\\u0042earer\"}"));
+  }
+
+  @Test
+  @DisplayName("ER31: a null or non-object body yields empty")
+  void nullOrNonObjectYieldsEmpty() {
+    assertTrue(JsonResponse.accessToken(null).isEmpty());
+    assertTrue(JsonResponse.accessToken("[\"access_token\"]").isEmpty());
+  }
 
   @Test
   @DisplayName("a normal value parses")

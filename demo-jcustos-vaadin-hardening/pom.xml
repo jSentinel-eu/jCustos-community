@@ -129,6 +129,20 @@
                     <skip>true</skip>
                 </configuration>
             </plugin>
+            <!--
+              ER31 (00.84.00, JS-SEC-098): FirstAdministratorBrowserlessTest answers the HIBP
+              range queries from a JDK HttpServer on http://127.0.0.1. jCustos calls plain http
+              only on a loopback host and only with -Djcustos.dev=true; up to 00.83.00 the HIBP
+              checker needed no flag for loopback.
+            -->
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <jcustos.dev>true</jcustos.dev>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>license-maven-plugin</artifactId>

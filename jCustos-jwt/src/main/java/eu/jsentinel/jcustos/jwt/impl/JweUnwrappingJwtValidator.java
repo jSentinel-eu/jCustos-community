@@ -85,7 +85,7 @@ public final class JweUnwrappingJwtValidator implements JwtValidator {
     if (compactJwt.length() > JoseLimits.MAX_COMPACT_BYTES) {
       return Result.failure(new JwtValidationError.MalformedJwt("compact JWT exceeds the size cap"));
     }
-    if (countSegments(compactJwt) != 5) {
+    if (JoseLimits.countSegments(compactJwt) != 5) {
       return delegate.validate(compactJwt);
     }
     Result<String, JweDecodingError> decrypted = jweDecoder.decode(compactJwt, decryptionKey);
@@ -102,15 +102,5 @@ public final class JweUnwrappingJwtValidator implements JwtValidator {
           new JwtValidationError.UnsupportedAlgorithm(e.code(), e.message());
       default -> new JwtValidationError.MalformedJwt(error.code() + ": " + error.message());
     };
-  }
-
-  private static int countSegments(String compact) {
-    int dots = 0;
-    for (int i = 0; i < compact.length(); i++) {
-      if (compact.charAt(i) == '.') {
-        dots++;
-      }
-    }
-    return dots + 1;
   }
 }

@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** SA27 follow-up (JS-SEC-127, CWE-532): cached and received token-endpoint answers do not print their tokens. */
-@DisplayName("JS-SEC-127 — TokenExchangeCache.CachedEntry and BoundedTokenHttp.Response mask their tokens")
+@DisplayName("JS-SEC-127 — TokenExchangeCache.CachedEntry and BoundedTokenHttp.MintedToken mask their tokens")
 class SecretRecordToStringTest {
 
   @Test
@@ -33,12 +33,12 @@ class SecretRecordToStringTest {
   }
 
   @Test
-  @DisplayName("a token-endpoint response shows status and length, not the body")
-  void response() {
-    String body = "{\"access_token\":\"exchanged-at-78\",\"token_type\":\"Bearer\"}";
-    String text = new BoundedTokenHttp.Response(200, body).toString();
+  @DisplayName("a minted token shows its lifetime, not the token")
+  void mintedToken() {
+    // JS-SEC-098: the response record moved to OAuth2FormPost.Outcome in jCustos-core, whose
+    // masking the core tests cover; what the strategies keep of a response is the minted token.
+    String text = new BoundedTokenHttp.MintedToken("exchanged-at-78", 3600L).toString();
     assertFalse(text.contains("exchanged-at-78"), text);
-    assertTrue(text.contains("statusCode=200"), text);
-    assertTrue(text.contains("<" + body.length() + " chars>"), text);
+    assertTrue(text.contains("expiresInSeconds=3600"), text);
   }
 }

@@ -18,8 +18,10 @@ package eu.jsentinel.jcustos.oauth2.api;
 
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.audit.LogFieldScrubber;
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -124,6 +126,57 @@ public interface AuthorizationCodeFlow {
         Optional<String> error,
         Optional<String> errorDescription) {
       this(code, state, error, errorDescription, Optional.empty());
+    }
+
+    /**
+     * Builds the parameters from the query of the redirect, as the transport delivers it: every
+     * value of every parameter, in wire order. This is the one way the jCustos adapters (REST
+     * and Vaadin) read a callback (JS-SEC-098, CWE-1041).
+     *
+     * <p>RFC 6749 §3.1: response parameters must not be included more than once. A query that
+     * repeats {@code code}, {@code state}, {@code error}, {@code error_description},
+     * {@code error_uri} or {@code iss} is refused as a whole — keeping the first
+     * value would let a second {@code state}, {@code code} or {@code iss} reach a component
+     * that reads the last one (parameter pollution). Up to 00.83.00 the REST adapter read a
+     * single-valued map and never saw a repetition; the Vaadin adapter refused a repeated
+     * {@code iss} only. A query without a non-blank {@code state} is refused as well. A blank
+     * {@code code}, {@code error}, {@code error_description} or {@code iss} counts as absent.
+     * Other parameters are ignored.
+     *
+     * @param query the query parameters, each with all its values; may be {@code null}
+     * @return the parameters, or {@link OAuth2Error.StateInvalid} when the query repeats a
+     *     response parameter or carries no {@code state}; the detail names the parameter, never
+     *     a value
+     * @since 00.84.00
+     */
+    @ExperimentalJCustosApi
+    public static Result<CallbackParams, OAuth2Error> fromMultiValued(Map<String, List<String>> query) {
+      Map<String, List<String>> params = query == null ? Map.of() : query;
+      // The parameters of an authorisation response (RFC 6749 §4.1.2 and §4.1.2.1, RFC 9207).
+      for (String name : List.of("code", "state", "error", "error_description", "error_uri", "iss")) {
+        if (values(params, name).size() > 1) {
+          return Result.failure(new OAuth2Error.StateInvalid("callback-parameter-repeated:" + name));
+        }
+      }
+      Optional<String> state = single(params, "state");
+      if (state.isEmpty()) {
+        return Result.failure(new OAuth2Error.StateInvalid("callback-without-state"));
+      }
+      return Result.success(new CallbackParams(single(params, "code"), state.get(),
+          single(params, "error"), single(params, "error_description"), single(params, "iss")));
+    }
+
+    private static List<String> values(Map<String, List<String>> query, String name) {
+      List<String> values = query.get(name);
+      if (values == null) {
+        return List.of();
+      }
+      return values.stream().filter(Objects::nonNull).toList();
+    }
+
+    private static Optional<String> single(Map<String, List<String>> query, String name) {
+      List<String> values = values(query, name);
+      return values.isEmpty() || values.get(0).isBlank() ? Optional.empty() : Optional.of(values.get(0));
     }
 
     /**

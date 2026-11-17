@@ -121,4 +121,37 @@ class HttpUserInfoClientTest {
     assertThrows(IllegalArgumentException.class, () ->
         new HttpUserInfoClient(HttpClient.newHttpClient(), URI.create("http://idp.example/userinfo")));
   }
+
+  // ── JS-SEC-098 (CWE-1041): UserInfo is read with the shared bounded JSON reader ──
+
+  @Test
+  @DisplayName("JS-SEC-098: a UserInfo response that names sub twice is malformed, neither subject is used")
+  void duplicateSubRejected() {
+    body = "{\"sub\":\"alice\",\"email\":\"a@example.com\",\"sub\":\"mallory\"}";
+    Result<UserInfoResponse, OAuth2Error> r =
+        new HttpUserInfoClient(HttpClient.newHttpClient(), endpoint).fetch("AT");
+    assertInstanceOf(OAuth2Error.MalformedResponse.class, r.fold(x -> null, e -> e));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: escaped claims are decoded, nesting beyond the bound is malformed")
+  void escapesAndDepth() {
+    body = "{\"sub\":\"alice\",\"name\":\"Al\\u00EDce\"}";
+    UserInfoResponse r = new HttpUserInfoClient(HttpClient.newHttpClient(), endpoint)
+        .fetch("AT").toOptional().orElseThrow();
+    assertEquals(Optional.of("Alíce"), r.claim("name", String.class));
+
+    body = "{\"sub\":\"alice\",\"deep\":" + "[".repeat(65) + "]".repeat(65) + "}";
+    assertInstanceOf(OAuth2Error.MalformedResponse.class,
+        new HttpUserInfoClient(HttpClient.newHttpClient(), endpoint).fetch("AT").fold(x -> null, e -> e));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: the UserInfo endpoint follows the one https rule ([::1] with the flag only)")
+  void loopbackRule() {
+    new HttpUserInfoClient(HttpClient.newHttpClient(), URI.create("http://[::1]:8080/userinfo"));
+    System.clearProperty("jcustos.dev");
+    assertThrows(IllegalArgumentException.class, () ->
+        new HttpUserInfoClient(HttpClient.newHttpClient(), URI.create("http://[::1]:8080/userinfo")));
+  }
 }

@@ -104,7 +104,7 @@ public final class NimbusJwtValidator implements JwtValidator {
       return Result.failure(new JwtValidationError.MalformedJwt("compact JWT exceeds the size cap"));
     }
     // 1. Format check — three segments for JWS, five for JWE.
-    int segments = countSegments(compactJwt);
+    int segments = JoseLimits.countSegments(compactJwt);
     if (segments == 5) {
       return Result.failure(new JwtValidationError.JweNotSupported(
           "encrypted JWT (JWE) is not supported in V00.76"));
@@ -354,16 +354,6 @@ public final class NimbusJwtValidator implements JwtValidator {
     } catch (GeneralSecurityException e) {
       return false;
     }
-  }
-
-  private static int countSegments(String compact) {
-    int dots = 0;
-    for (int i = 0; i < compact.length(); i++) {
-      if (compact.charAt(i) == '.') {
-        dots++;
-      }
-    }
-    return dots + 1;
   }
 
   private static Map<String, Object> toClaimMap(JWTClaimsSet claims) {

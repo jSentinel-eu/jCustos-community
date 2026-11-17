@@ -158,6 +158,7 @@ class SecretBearingRecordToStringGuardTest {
             "eu.jsentinel.jcustos.bootstrap.BootstrapToken",
             "eu.jsentinel.jcustos.oauth2.api.AuthorizationCodeFlow$CallbackParams",
             "eu.jsentinel.jcustos.oauth2.api.StateEntry",
+            "eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost$Outcome",
             "eu.jsentinel.jcustos.oidc.api.IdTokenExpectations")),
         "the naming rule no longer recognises a known secret-bearing record: " + guarded);
   }

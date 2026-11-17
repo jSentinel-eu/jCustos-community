@@ -42,12 +42,13 @@ package eu.jsentinel.jcustos.oauth2;
  */
 
 import com.svenruppert.functional.result.Result;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
 import eu.jsentinel.jcustos.oauth2.api.IntrospectionClient;
 import eu.jsentinel.jcustos.oauth2.api.IntrospectionResult;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
 import eu.jsentinel.jcustos.oauth2.api.TokenTypeHint;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 import eu.jsentinel.jcustos.oauth2.internal.OAuth2Json;
 
 import java.net.URI;
@@ -92,7 +93,7 @@ public final class HttpIntrospectionClient implements IntrospectionClient {
   public HttpIntrospectionClient(HttpClient http, URI endpoint,
       ClientAuthentication clientAuthentication, long ttlMillis) {
     this.http = Objects.requireNonNull(http, "http");
-    this.endpoint = OAuth2FormPost.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
+    this.endpoint = EndpointSecurity.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
     this.clientAuthentication = Objects.requireNonNull(clientAuthentication, "clientAuthentication");
     if (ttlMillis < 0) {
       throw new IllegalArgumentException("ttlMillis must be >= 0");
@@ -146,22 +147,24 @@ public final class HttpIntrospectionClient implements IntrospectionClient {
   }
 
   private static IntrospectionResult parse(String body) {
-    boolean active = OAuth2Json.bool(body, "active").orElse(false);
+    // JS-SEC-098: read the body once; a body that is no well-formed JSON object is inactive.
+    Map<String, Object> json = OAuth2Json.object(body).orElse(Map.of());
+    boolean active = OAuth2Json.bool(json, "active").orElse(false);
     if (!active) {
       return IntrospectionResult.inactive();
     }
-    Set<String> scopes = OAuth2Json.string(body, "scope")
+    Set<String> scopes = OAuth2Json.string(json, "scope")
         .map(OAuth2Json::parseScopes)
         .orElse(Set.of());
     return new IntrospectionResult(true, scopes,
-        OAuth2Json.string(body, "client_id"),
-        OAuth2Json.string(body, "username"),
-        OAuth2Json.longValue(body, "exp").map(Instant::ofEpochSecond),
-        OAuth2Json.longValue(body, "iat").map(Instant::ofEpochSecond),
-        OAuth2Json.string(body, "token_type"),
-        OAuth2Json.stringOrArray(body, "aud"),
-        OAuth2Json.string(body, "iss"),
-        OAuth2Json.string(body, "jti"));
+        OAuth2Json.string(json, "client_id"),
+        OAuth2Json.string(json, "username"),
+        OAuth2Json.longValue(json, "exp").map(Instant::ofEpochSecond),
+        OAuth2Json.longValue(json, "iat").map(Instant::ofEpochSecond),
+        OAuth2Json.string(json, "token_type"),
+        OAuth2Json.stringOrArray(json, "aud"),
+        OAuth2Json.string(json, "iss"),
+        OAuth2Json.string(json, "jti"));
   }
 
   private static String sha256(String token) {

@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.rest;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -107,6 +108,36 @@ public interface RestRequest {
    * @return query parameters
    */
   Map<String, String> queryParameters();
+
+  /**
+   * All values of every query parameter, in wire order (JS-SEC-098, CWE-1041) — the
+   * multi-valued view, analogous to {@link #headerValues(String)} for headers. The OAuth2
+   * callback handler reads the callback through this method, so that a repeated
+   * {@code state}, {@code code} or {@code iss} is seen and refused (RFC 6749 §3.1) instead of
+   * one of the values winning silently.
+   *
+   * <p>Adapters that know their transport override this and return every value. The default
+   * derives the answer from {@link #queryParameters()} and keeps existing implementations
+   * compiling. It is <strong>lossy</strong>: every parameter has at most the one value the
+   * single-valued map still holds, so a repetition the adapter already collapsed cannot be
+   * seen.
+   *
+   * @return the parameters with all their values; never {@code null}
+   * @since 00.84.00
+   */
+  default Map<String, List<String>> queryParameterValues() {
+    Map<String, String> single = queryParameters();
+    if (single == null) {
+      return Map.of();
+    }
+    Map<String, List<String>> values = new LinkedHashMap<>();
+    single.forEach((name, value) -> {
+      if (name != null && value != null) {
+        values.put(name, List.of(value));
+      }
+    });
+    return values;
+  }
 
   /**
    * Address of the peer that opened the connection, as the transport reports it

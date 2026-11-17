@@ -43,11 +43,11 @@ package eu.jsentinel.jcustos.identity.oidc;
 
 import eu.jsentinel.jcustos.util.BoundedHttpBody;
 import com.svenruppert.functional.result.Result;
-import eu.jsentinel.jcustos.identity.oidc.internal.OidcJson;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
 import eu.jsentinel.jcustos.oidc.api.OidcDiscoveryClient;
 import eu.jsentinel.jcustos.oidc.api.OidcProviderMetadata;
+import eu.jsentinel.jcustos.util.json.BoundedJson;
 
 import java.io.IOException;
 import java.net.URI;
@@ -66,8 +66,8 @@ import java.util.Set;
 /**
  * Fetches OIDC provider metadata from {@code <issuer>/.well-known/openid-configuration}
  * over JDK {@link HttpClient} (OIDC Discovery 1.0 / RFC 8414, V00.78). HTTPS is
- * enforced (the V00.77 dev-loopback carve-out), the response body is capped at
- * 1 MiB and parsed by the in-tree {@link OidcJson}. The returned {@code issuer}
+ * enforced (the V00.77 dev-loopback carve-out, see {@link EndpointSecurity}), the
+ * response body is capped at 1 MiB and parsed with {@link BoundedJson}. The returned {@code issuer}
  * MUST exactly equal the requested issuer (Discovery §4.3 — defeats a rogue
  * metadata document claiming someone else's issuer). Results are TTL-cached.
  */
@@ -101,7 +101,7 @@ public final class HttpOidcDiscoveryClient implements OidcDiscoveryClient {
   @Override
   public Result<OidcProviderMetadata, OAuth2Error> discover(URI issuer) {
     Objects.requireNonNull(issuer, "issuer");
-    OAuth2FormPost.requireHttps(issuer, CODE);
+    EndpointSecurity.requireHttps(issuer, CODE);
     long now = System.currentTimeMillis();
     synchronized (cache) {
       Cached hit = cache.get(issuer);
@@ -136,12 +136,11 @@ public final class HttpOidcDiscoveryClient implements OidcDiscoveryClient {
     }
     body = new String(bytes, StandardCharsets.UTF_8);
 
-    Map<String, Object> json;
-    try {
-      json = OidcJson.parseObject(body);
-    } catch (OidcJson.JsonException e) {
+    Result<Map<String, Object>, String> parsed = BoundedJson.parseObject(body);
+    if (parsed.isFailure()) {
       return Result.failure(new OAuth2Error.MalformedResponse("invalid discovery document"));
     }
+    Map<String, Object> json = parsed.getOrThrow();
 
     String metaIssuer = str(json, "issuer");
     if (metaIssuer == null || !metaIssuer.equals(issuer.toString())) {

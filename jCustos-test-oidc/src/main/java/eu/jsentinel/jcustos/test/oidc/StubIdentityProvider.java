@@ -50,6 +50,20 @@ import java.util.function.Supplier;
  *
  * <p>The issuer is {@code http://127.0.0.1:<port>}, so tests run with
  * {@code -Djcustos.dev=true} (the framework's loopback-http carve-out).
+ *
+ * <p><strong>Since 00.84.00 the flag is needed for the JWKS as well</strong>
+ * (JS-SEC-098). Every endpoint jCustos calls follows one rule,
+ * {@link eu.jsentinel.jcustos.net.EndpointSecurity}: {@code https}, or plain
+ * {@code http} to a loopback host ({@code localhost}, {@code 127.0.0.0/8},
+ * {@code [::1]}) only while {@code jcustos.dev=true}. Up to 00.83.00
+ * {@code HttpJwksClient} accepted {@link #jwksUri()} without the flag; a test
+ * that builds a validator from it now fails at construction with
+ * {@code jwks/uri-not-https} unless the flag is set. Set it per test class —
+ * {@code System.setProperty("jcustos.dev", "true")} before the first client is
+ * built and {@code System.clearProperty("jcustos.dev")} afterwards — or for a
+ * whole module in the Surefire configuration
+ * ({@code <systemPropertyVariables><jcustos.dev>true</jcustos.dev></systemPropertyVariables>}).
+ * Never set it in production: it is what admits cleartext {@code http}.
  */
 public final class StubIdentityProvider implements AutoCloseable {
 

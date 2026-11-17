@@ -41,29 +41,22 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
-import eu.jsentinel.jcustos.util.BoundedHttpBody;
 import com.svenruppert.functional.result.Result;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
 import eu.jsentinel.jcustos.oauth2.api.PkceVerifier;
 import eu.jsentinel.jcustos.oauth2.api.TokenEndpointClient;
 import eu.jsentinel.jcustos.oauth2.api.TokenResponse;
-import eu.jsentinel.jcustos.oauth2.internal.ClientAssertions;
-import eu.jsentinel.jcustos.oauth2.internal.JwtSigners;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 import eu.jsentinel.jcustos.oauth2.internal.OAuth2Json;
 
-import java.io.IOException;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -78,10 +71,15 @@ import java.util.function.Supplier;
  * {@link TokenResponse} or a non-secret {@link OAuth2Error}.
  *
  * <p>Discipline: HTTPS is enforced (loopback {@code http} only with
- * {@code -Djcustos.dev=true}); the response body is capped at 1 MiB and read
- * via the depth-aware {@link OAuth2Json} scanner; a missing {@code access_token}
+ * {@code -Djcustos.dev=true}, see {@link EndpointSecurity}); the response body is
+ * capped at 1 MiB and read with {@link OAuth2Json}; a missing {@code access_token}
  * on a 2xx is a {@code malformed-response}; a 4xx with an {@code error} field is
  * a {@code protocol-error}; any other non-2xx is an {@code endpoint-error}.
+ *
+ * <p>Since 00.84.00 (JS-SEC-098, CWE-1041) the exchange itself — client
+ * authentication, time bound, size cap, transport errors — is
+ * {@link OAuth2FormPost}, which the other OAuth2 clients and the propagation
+ * strategies share; this class kept a copy of its own up to 00.83.00.
  *
  * <p>Signed client assertions ({@code private_key_jwt} / {@code client_secret_jwt})
  * are wired in V00.77 phase 6.
@@ -90,8 +88,7 @@ import java.util.function.Supplier;
  */
 public final class HttpTokenEndpointClient implements TokenEndpointClient {
 
-  private static final Duration TIMEOUT = Duration.ofSeconds(10);
-  private static final int MAX_BYTES = 1024 * 1024;
+  private static final String CODE = "oauth2/token-endpoint-not-https";
   private static final String DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
   private final URI tokenEndpoint;
@@ -105,7 +102,8 @@ public final class HttpTokenEndpointClient implements TokenEndpointClient {
 
   public HttpTokenEndpointClient(URI tokenEndpoint, ClientAuthentication clientAuth,
       HttpClient http, Supplier<Instant> clock) {
-    this.tokenEndpoint = requireHttps(Objects.requireNonNull(tokenEndpoint, "tokenEndpoint"));
+    this.tokenEndpoint = EndpointSecurity.requireHttps(
+        Objects.requireNonNull(tokenEndpoint, "tokenEndpoint"), CODE);
     this.clientAuth = Objects.requireNonNull(clientAuth, "clientAuth");
     this.http = Objects.requireNonNull(http, "http");
     this.clock = Objects.requireNonNull(clock, "clock");
@@ -150,116 +148,35 @@ public final class HttpTokenEndpointClient implements TokenEndpointClient {
   }
 
   private Result<TokenResponse, OAuth2Error> post(Map<String, String> form) {
-    HttpRequest.Builder request = HttpRequest.newBuilder(tokenEndpoint)
-        .timeout(TIMEOUT)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded");
-    applyClientAuth(form, request);
-
-    HttpResponse<byte[]> response;
-    try {
-      response = http.send(request.POST(HttpRequest.BodyPublishers.ofString(encode(form))).build(),
-          BoundedHttpBody.ofByteArray(MAX_BYTES + 1));
-    } catch (java.net.http.HttpTimeoutException e) {
-      return Result.failure(new OAuth2Error.NetworkError("timeout"));
-    } catch (IOException e) {
-      return Result.failure(new OAuth2Error.NetworkError(e.getClass().getSimpleName()));
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      return Result.failure(new OAuth2Error.NetworkError("interrupted"));
-    }
-
-    String body;
-    byte[] bytes = response.body();
-    if (bytes.length > MAX_BYTES) {
-      return Result.failure(new OAuth2Error.MalformedResponse("body exceeds the size cap"));
-    }
-    body = new String(bytes, StandardCharsets.UTF_8);
-
-    int status = response.statusCode();
-    if (status / 100 == 2) {
-      return parseTokenResponse(body);
-    }
-    // RFC 6749 §5.2: a 4xx error body carries an "error" field
-    Optional<String> oauthError = OAuth2Json.string(body, "error");
-    return oauthError.<Result<TokenResponse, OAuth2Error>>map(
-            e -> Result.failure(new OAuth2Error.ProtocolError(e)))
-        .orElseGet(() -> Result.failure(new OAuth2Error.EndpointError(status)));
+    return OAuth2FormPost.post(http, tokenEndpoint, form, clientAuth, clock).flatMap(outcome -> {
+      // JS-SEC-098: read the body once; a body that is no well-formed JSON object lacks every field.
+      Map<String, Object> json = OAuth2Json.object(outcome.body()).orElse(Map.of());
+      int status = outcome.status();
+      if (status / 100 == 2) {
+        return parseTokenResponse(json);
+      }
+      // RFC 6749 §5.2: a 4xx error body carries an "error" field
+      Optional<String> oauthError = OAuth2Json.string(json, "error");
+      return oauthError.<Result<TokenResponse, OAuth2Error>>map(
+              e -> Result.failure(new OAuth2Error.ProtocolError(e)))
+          .orElseGet(() -> Result.failure(new OAuth2Error.EndpointError(status)));
+    });
   }
 
-  private Result<TokenResponse, OAuth2Error> parseTokenResponse(String body) {
-    Optional<String> accessToken = OAuth2Json.string(body, "access_token");
+  private Result<TokenResponse, OAuth2Error> parseTokenResponse(Map<String, Object> json) {
+    Optional<String> accessToken = OAuth2Json.string(json, "access_token");
     if (accessToken.isEmpty()) {
       return Result.failure(new OAuth2Error.MalformedResponse("no access_token"));
     }
-    String tokenType = OAuth2Json.string(body, "token_type").orElse("Bearer");
-    Optional<Instant> expiresAt = OAuth2Json.longValue(body, "expires_in")
+    String tokenType = OAuth2Json.string(json, "token_type").orElse("Bearer");
+    Optional<Instant> expiresAt = OAuth2Json.longValue(json, "expires_in")
         .map(seconds -> clock.get().plusSeconds(seconds));
-    Optional<String> refreshToken = OAuth2Json.string(body, "refresh_token");
-    Optional<String> idToken = OAuth2Json.string(body, "id_token");
-    Set<String> scopes = OAuth2Json.string(body, "scope")
+    Optional<String> refreshToken = OAuth2Json.string(json, "refresh_token");
+    Optional<String> idToken = OAuth2Json.string(json, "id_token");
+    Set<String> scopes = OAuth2Json.string(json, "scope")
         .map(OAuth2Json::parseScopes)
         .orElse(Set.of());
     return Result.success(new TokenResponse(
         accessToken.get(), refreshToken, idToken, tokenType, expiresAt, scopes));
-  }
-
-  private void applyClientAuth(Map<String, String> form, HttpRequest.Builder request) {
-    switch (clientAuth) {
-      case ClientAuthentication.ClientSecretBasic basic ->
-          request.header("Authorization", basicHeader(basic.clientId(), basic.secret()));
-      case ClientAuthentication.ClientSecretPost post -> {
-        form.put("client_id", post.clientId());
-        byte[] secret = post.secret().asUtf8Bytes();
-        form.put("client_secret", new String(secret, StandardCharsets.UTF_8));
-        Arrays.fill(secret, (byte) 0);
-      }
-      case ClientAuthentication.NoneAuthentication none -> form.put("client_id", none.clientId());
-      case ClientAuthentication.PrivateKeyJwt pk ->
-          ClientAssertions.applyPrivateKeyJwt(pk, tokenEndpoint, clock, JwtSigners.require(), form);
-      case ClientAuthentication.ClientSecretJwt cs ->
-          ClientAssertions.applyClientSecretJwt(cs, tokenEndpoint, clock, form);
-    }
-  }
-
-  private static String basicHeader(String clientId, SecretValue secret) {
-    byte[] secretBytes = secret.asUtf8Bytes();
-    byte[] idBytes = clientId.getBytes(StandardCharsets.UTF_8);
-    byte[] userInfo = new byte[idBytes.length + 1 + secretBytes.length];
-    System.arraycopy(idBytes, 0, userInfo, 0, idBytes.length);
-    userInfo[idBytes.length] = ':';
-    System.arraycopy(secretBytes, 0, userInfo, idBytes.length + 1, secretBytes.length);
-    String header = "Basic " + Base64.getEncoder().encodeToString(userInfo);
-    java.util.Arrays.fill(userInfo, (byte) 0);
-    java.util.Arrays.fill(secretBytes, (byte) 0);
-    return header;
-  }
-
-  private static String encode(Map<String, String> form) {
-    StringBuilder sb = new StringBuilder();
-    for (Map.Entry<String, String> e : form.entrySet()) {
-      if (sb.length() > 0) {
-        sb.append('&');
-      }
-      sb.append(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8))
-          .append('=')
-          .append(URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8));
-    }
-    return sb.toString();
-  }
-
-  private static URI requireHttps(URI endpoint) {
-    String scheme = endpoint.getScheme();
-    if ("https".equalsIgnoreCase(scheme)) {
-      return endpoint;
-    }
-    boolean devLoopback = Boolean.getBoolean("jcustos.dev")
-        && "http".equalsIgnoreCase(scheme)
-        && ("localhost".equalsIgnoreCase(endpoint.getHost()) || "127.0.0.1".equals(endpoint.getHost()));
-    if (devLoopback) {
-      return endpoint;
-    }
-    throw new IllegalArgumentException(
-        "oauth2/token-endpoint-not-https: the token endpoint must use https:// (got: " + endpoint + ")");
   }
 }

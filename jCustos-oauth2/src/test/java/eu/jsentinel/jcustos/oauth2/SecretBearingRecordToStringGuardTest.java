@@ -134,7 +134,8 @@ class SecretBearingRecordToStringGuardTest {
 
     // Self-check: the walk saw this module's classes and its records.
     assertTrue(classFiles > 0, "no class files under " + classes);
-    assertTrue(records.size() >= 3,
+    // two since 00.84.00: OAuth2FormPost.Outcome moved to jCustos-core (JS-SEC-098)
+    assertTrue(records.size() >= 2,
         "expected the record types of jCustos-oauth2 under " + classes + ", found " + records);
 
     Set<String> offenders = new TreeSet<>();
@@ -153,7 +154,8 @@ class SecretBearingRecordToStringGuardTest {
         "records with a secret-bearing component must override toString() and mask it "
             + "(JS-SEC-127, CWE-532): " + offenders);
     // Self-check of the naming rule: the known secret-bearing records are recognised.
-    assertTrue(guarded.containsAll(Set.of("eu.jsentinel.jcustos.oauth2.MutualTlsClientConfig", "eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost$Outcome")),
+    // OAuth2FormPost.Outcome moved to jCustos-core in 00.84.00 (JS-SEC-098); the core guard covers it.
+    assertTrue(guarded.containsAll(Set.of("eu.jsentinel.jcustos.oauth2.MutualTlsClientConfig")),
         "the naming rule no longer recognises a known secret-bearing record: " + guarded);
   }
 

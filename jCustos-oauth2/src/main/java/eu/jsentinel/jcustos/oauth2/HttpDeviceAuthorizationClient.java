@@ -42,11 +42,12 @@ package eu.jsentinel.jcustos.oauth2;
  */
 
 import com.svenruppert.functional.result.Result;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 import eu.jsentinel.jcustos.oauth2.api.ClientAuthentication;
 import eu.jsentinel.jcustos.oauth2.api.DeviceAuthorizationClient;
 import eu.jsentinel.jcustos.oauth2.api.DeviceAuthorizationResponse;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 import eu.jsentinel.jcustos.oauth2.internal.OAuth2Json;
 
 import java.net.URI;
@@ -81,7 +82,7 @@ public final class HttpDeviceAuthorizationClient implements DeviceAuthorizationC
   public HttpDeviceAuthorizationClient(HttpClient http, URI endpoint,
       ClientAuthentication clientAuthentication, Supplier<Instant> clock) {
     this.http = Objects.requireNonNull(http, "http");
-    this.endpoint = OAuth2FormPost.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
+    this.endpoint = EndpointSecurity.requireHttps(Objects.requireNonNull(endpoint, "endpoint"), CODE);
     this.clientAuthentication = Objects.requireNonNull(clientAuthentication, "clientAuthentication");
     this.clock = Objects.requireNonNull(clock, "clock");
   }
@@ -104,20 +105,22 @@ public final class HttpDeviceAuthorizationClient implements DeviceAuthorizationC
   }
 
   private Result<DeviceAuthorizationResponse, OAuth2Error> parse(String body) {
-    String deviceCode = OAuth2Json.string(body, "device_code").orElse(null);
-    String userCode = OAuth2Json.string(body, "user_code").orElse(null);
-    String verificationUri = OAuth2Json.string(body, "verification_uri").orElse(null);
+    // JS-SEC-098: read the body once; a body that is no well-formed JSON object lacks every field.
+    Map<String, Object> json = OAuth2Json.object(body).orElse(Map.of());
+    String deviceCode = OAuth2Json.string(json, "device_code").orElse(null);
+    String userCode = OAuth2Json.string(json, "user_code").orElse(null);
+    String verificationUri = OAuth2Json.string(json, "verification_uri").orElse(null);
     if (deviceCode == null || userCode == null || verificationUri == null) {
       return Result.failure(new OAuth2Error.MalformedResponse(
           "device-authorization response missing device_code/user_code/verification_uri"));
     }
-    long interval = OAuth2Json.longValue(body, "interval")
+    long interval = OAuth2Json.longValue(json, "interval")
         .orElse(DeviceAuthorizationResponse.DEFAULT_INTERVAL_SECONDS);
     Instant expiresAt = clock.get().plusSeconds(
-        OAuth2Json.longValue(body, "expires_in").orElse(600L));
+        OAuth2Json.longValue(json, "expires_in").orElse(600L));
     return Result.success(new DeviceAuthorizationResponse(
         deviceCode, userCode, URI.create(verificationUri),
-        OAuth2Json.string(body, "verification_uri_complete").map(URI::create),
+        OAuth2Json.string(json, "verification_uri_complete").map(URI::create),
         expiresAt, interval));
   }
 }

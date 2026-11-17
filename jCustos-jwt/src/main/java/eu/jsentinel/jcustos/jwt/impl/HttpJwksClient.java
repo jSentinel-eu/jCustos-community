@@ -36,6 +36,7 @@ import eu.jsentinel.jcustos.jwt.api.JoseLimits;
 import eu.jsentinel.jcustos.jwt.api.JwksClient;
 import eu.jsentinel.jcustos.jwt.api.JwksRefreshResult;
 import eu.jsentinel.jcustos.jwt.api.JwsAlgorithm;
+import eu.jsentinel.jcustos.net.EndpointSecurity;
 
 import java.io.IOException;
 import java.net.URI;
@@ -72,12 +73,15 @@ import java.util.regex.Pattern;
  * may be delayed up to {@code REFRESH_MIN_INTERVAL} and then loaded — a bounded,
  * self-limiting availability tradeoff, not a correctness or security issue.
  *
- * <p>HTTPS is enforced at construction (JS-SEC-018 / CWE-319): a non-loopback
- * {@code jwks_uri} must use {@code https://} — the JWKS is the public-key trust
- * root, so cleartext transport invites key substitution and token forgery. A
- * loopback host ({@code localhost} / {@code 127.0.0.1} / {@code ::1}) may use
- * {@code http://} so local dev and test stubs work; the DX bootstrap keeps its
- * own STRICT {@code jwks/uri-not-https} rule for defense in depth.
+ * <p>HTTPS is enforced at construction (JS-SEC-018 / CWE-319): the {@code jwks_uri}
+ * must use {@code https://} — the JWKS is the public-key trust root, so cleartext
+ * transport invites key substitution and token forgery. Since 00.84.00 the rule is
+ * the one of every other endpoint of jCustos ({@link EndpointSecurity}, JS-SEC-098):
+ * plain {@code http://} to a loopback host ({@code localhost}, {@code 127.0.0.0/8},
+ * {@code [::1]}) only with {@code -Djcustos.dev=true}. Up to 00.83.00 this client
+ * accepted loopback {@code http} without the flag; a test against a JWKS stub on
+ * {@code 127.0.0.1} now sets it. The DX bootstrap keeps its own STRICT
+ * {@code jwks/uri-not-https} rule for defense in depth.
  *
  * <p><strong>JS-SEC-149 — bounded trust in a stale key set (CWE-672):</strong> while a refresh
  * fails the client keeps serving the keys it already holds, so that a short outage of the issuer
@@ -136,7 +140,7 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
   }
 
   /**
-   * @param jwksUri    the JWKS endpoint (https, or http on loopback)
+   * @param jwksUri    the JWKS endpoint (https, or http on loopback with {@code -Djcustos.dev=true})
    * @param httpClient the HTTP client
    * @param clock      the clock
    * @param maxStale   JS-SEC-149 (CWE-672): how long the last successfully fetched key set stays
@@ -145,36 +149,15 @@ public final class HttpJwksClient implements JwksClient, HasLogger {
    * @since 00.84.00
    */
   public HttpJwksClient(URI jwksUri, HttpClient httpClient, Supplier<Instant> clock, Duration maxStale) {
-    this.jwksUri = requireHttpsOrLoopback(Objects.requireNonNull(jwksUri, "jwksUri"));
+    // JS-SEC-018 (CWE-319), JS-SEC-098: the one https rule of jCustos.
+    this.jwksUri = EndpointSecurity.requireHttps(Objects.requireNonNull(jwksUri, "jwksUri"),
+        "jwks/uri-not-https");
     this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.maxStale = Objects.requireNonNull(maxStale, "maxStale");
     if (maxStale.isZero() || maxStale.isNegative()) {
       throw new IllegalArgumentException("jwks/max-stale-not-positive: maxStale must be positive");
     }
-  }
-
-  // JS-SEC-018 (CWE-319): the JWKS is the public-key trust root; loading it over
-  // cleartext http lets an on-path attacker substitute keys and forge tokens.
-  // Enforce https for any non-loopback endpoint; loopback http is allowed for
-  // local dev / test stubs (the class contract).
-  private static URI requireHttpsOrLoopback(URI uri) {
-    String scheme = uri.getScheme();
-    if ("https".equalsIgnoreCase(scheme)) {
-      return uri;
-    }
-    if ("http".equalsIgnoreCase(scheme) && isLoopback(uri.getHost())) {
-      return uri;
-    }
-    throw new IllegalArgumentException(
-        "jwks/uri-not-https: JWKS endpoint must use https:// (got: " + uri + ")");
-  }
-
-  private static boolean isLoopback(String host) {
-    return "localhost".equalsIgnoreCase(host)
-        || "127.0.0.1".equals(host)
-        || "::1".equals(host)
-        || "[::1]".equals(host);
   }
 
   @Override

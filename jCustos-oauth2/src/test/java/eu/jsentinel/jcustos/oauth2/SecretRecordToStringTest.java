@@ -41,7 +41,7 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
-import eu.jsentinel.jcustos.oauth2.internal.OAuth2FormPost;
+import eu.jsentinel.jcustos.oauth2.http.OAuth2FormPost;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

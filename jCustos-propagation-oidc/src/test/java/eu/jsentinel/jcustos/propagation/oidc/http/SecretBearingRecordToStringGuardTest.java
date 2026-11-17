@@ -10,6 +10,7 @@
  */
 package eu.jsentinel.jcustos.propagation.oidc.http;
 
+import eu.jsentinel.jcustos.propagation.oidc.strategy.TokenExchangeStrategy;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -122,7 +123,7 @@ class SecretBearingRecordToStringGuardTest {
         "records with a secret-bearing component must override toString() and mask it "
             + "(JS-SEC-127, CWE-532): " + offenders);
     // Self-check of the naming rule: the known secret-bearing records are recognised.
-    assertTrue(guarded.containsAll(Set.of("eu.jsentinel.jcustos.propagation.oidc.cache.TokenExchangeCache$CachedEntry", "eu.jsentinel.jcustos.propagation.oidc.strategy.BoundedTokenHttp$Response")),
+    assertTrue(guarded.containsAll(Set.of("eu.jsentinel.jcustos.propagation.oidc.cache.TokenExchangeCache$CachedEntry", "eu.jsentinel.jcustos.propagation.oidc.strategy.BoundedTokenHttp$MintedToken")),
         "the naming rule no longer recognises a known secret-bearing record: " + guarded);
   }
 
@@ -168,7 +169,7 @@ class SecretBearingRecordToStringGuardTest {
   /** Root of the compiled main classes of this module, located through a main class. */
   private static Path mainClasses() throws URISyntaxException {
     Path location = Path.of(
-        JsonResponse.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+        TokenExchangeStrategy.class.getProtectionDomain().getCodeSource().getLocation().toURI());
     assertTrue(Files.isDirectory(location),
         "the guard walks a class directory; the module is on the class path as " + location);
     return location;
@@ -176,7 +177,7 @@ class SecretBearingRecordToStringGuardTest {
 
   /** Adds the records under {@code classes} to {@code records}; returns the number of class files. */
   private static int recordsUnder(Path classes, List<Class<?>> records) throws IOException {
-    ClassLoader loader = JsonResponse.class.getClassLoader();
+    ClassLoader loader = TokenExchangeStrategy.class.getClassLoader();
     int seen = 0;
     try (Stream<Path> files = Files.walk(classes)) {
       for (Path file : (Iterable<Path>) files.filter(f -> f.toString().endsWith(".class"))::iterator) {

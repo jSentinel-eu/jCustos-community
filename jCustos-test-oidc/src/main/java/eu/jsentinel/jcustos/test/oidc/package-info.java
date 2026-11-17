@@ -17,6 +17,13 @@
 /**
  * V00.79 OIDC test infrastructure: StubIdentityProvider, MockClock and integration-test helpers for exercising the OIDC RP end to end without mocks.
  *
+ * <p><strong>Tests need {@code -Djcustos.dev=true}.</strong> The stub listens on
+ * {@code http://127.0.0.1}; jCustos calls plain {@code http} only on a loopback host
+ * and only with the system property {@code jcustos.dev=true}
+ * ({@link eu.jsentinel.jcustos.net.EndpointSecurity}). Since 00.84.00 (JS-SEC-098)
+ * this covers the JWKS endpoint, too, which up to 00.83.00 needed no flag. See
+ * {@link eu.jsentinel.jcustos.test.oidc.StubIdentityProvider} for how to set it.
+ *
  * @since 00.79.00
  */
 package eu.jsentinel.jcustos.test.oidc;

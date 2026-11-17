@@ -24,6 +24,8 @@ package eu.jsentinel.jcustos.credential.compromised.hibp;
 
 import eu.jsentinel.jcustos.credential.compromised.CompromisedPasswordResult;
 import eu.jsentinel.jcustos.credential.secret.SecretValue;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -40,6 +42,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HaveIBeenPwnedCompromisedPasswordCheckerTest {
+
+  /** JS-SEC-098: since 00.84.00 a range-API stub on loopback http needs the dev flag. */
+  @BeforeEach
+  void enableDevFlag() {
+    System.setProperty("jcustos.dev", "true");
+  }
+
+  @AfterEach
+  void clearDevFlag() {
+    System.clearProperty("jcustos.dev");
+  }
 
   /** Records every prefix passed to the range lookup. */
   private static final class CapturingLookup implements
@@ -240,13 +253,40 @@ class HaveIBeenPwnedCompromisedPasswordCheckerTest {
   }
 
   @Test
-  @DisplayName("JS-SEC-046: usingJdkHttpClient accepts https and loopback http")
+  @DisplayName("JS-SEC-046/098: usingJdkHttpClient accepts https and, with -Djcustos.dev=true, loopback http")
   void acceptsHttpsAndLoopbackHttp() {
-    // neither throws at construction
+    // none throws at construction
+    for (String uri : List.of("https://api.pwnedpasswords.com/range/", "http://127.0.0.1:8080/range/",
+        "http://127.0.0.2:8080/range/", "http://[::1]:8080/range/", "http://localhost:8080/range/")) {
+      HaveIBeenPwnedCompromisedPasswordChecker.usingJdkHttpClient(
+          java.net.URI.create(uri), java.time.Duration.ofSeconds(2));
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: without -Djcustos.dev=true loopback http is refused like any other http")
+  void rejectsLoopbackHttpWithoutDevFlag() {
+    System.clearProperty("jcustos.dev");
+    for (String uri : List.of("http://127.0.0.1:8080/range/", "http://localhost:8080/range/",
+        "http://[::1]:8080/range/")) {
+      IllegalArgumentException refused = assertThrows(IllegalArgumentException.class, () ->
+          HaveIBeenPwnedCompromisedPasswordChecker.usingJdkHttpClient(
+              java.net.URI.create(uri), java.time.Duration.ofSeconds(2)), uri);
+      assertTrue(refused.getMessage().startsWith("hibp/endpoint-not-https: "), refused.getMessage());
+    }
     HaveIBeenPwnedCompromisedPasswordChecker.usingJdkHttpClient(
-        java.net.URI.create("https://api.pwnedpasswords.com/range/"), java.time.Duration.ofSeconds(2));
-    HaveIBeenPwnedCompromisedPasswordChecker.usingJdkHttpClient(
-        java.net.URI.create("http://127.0.0.1:8080/range/"), java.time.Duration.ofSeconds(2));
+        HaveIBeenPwnedCompromisedPasswordChecker.DEFAULT_ENDPOINT, java.time.Duration.ofSeconds(2));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-098: a lookalike of a loopback host is refused even with -Djcustos.dev=true")
+  void rejectsLoopbackLookalike() {
+    for (String uri : List.of("http://localhost.evil.example/range/", "http://127.0.0.1.nip.io/range/",
+        "http://localhost@mirror.example/range/")) {
+      assertThrows(IllegalArgumentException.class, () ->
+          HaveIBeenPwnedCompromisedPasswordChecker.usingJdkHttpClient(
+              java.net.URI.create(uri), java.time.Duration.ofSeconds(2)), uri);
+    }
   }
 
   @Test
