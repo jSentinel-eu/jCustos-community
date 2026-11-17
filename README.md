@@ -464,29 +464,26 @@ production.
 
 ### Mutation coverage
 
+The parent POM pins `pitest-prod-classes` and `pitest-test-classes` to `eu.jsentinel.jcustos.*`
+(pitest-maven 1.25.5, two threads); reports land under `<module>/target/pit-reports/index.html`.
+For a module with sibling dependencies, build them in the same reactor with `-am` and narrow
+`pitest-prod-classes` to the module's package, so the siblings finish without mutating anything:
+
 ```bash
-./mvnw -pl :jCustos-core org.pitest:pitest-maven:mutationCoverage
+./mvnw -pl :jCustos-dx-standalone -am test-compile org.pitest:pitest-maven:mutationCoverage \
+  -Dpitest-prod-classes='eu.jsentinel.jcustos.dx.standalone.*' -DfailWhenNoMutations=false
 ```
 
-The parent POM pins `pitest-prod-classes` and `pitest-test-classes` to
-`eu.jsentinel.jcustos.*`. Reports land under
-`<module>/target/pit-reports/index.html`. Last published state per
-library module (V00.70.00; a new baseline follows with 00.84.00):
+Do not add `-DskipTests`: pitest-maven honours it and skips the run. A module whose tests need a system
+property hands it to PIT as `<jvmArgs>` (see `jCustos-processor/pom.xml`); PIT does not read
+Surefire's `systemPropertyVariables`.
 
-| Module | Coverage | Tests |
-|---|---:|---:|
-| `jCustos-core` | **86 %** (1191/1381) | 956 |
-| `jCustos-vaadin` | **79 %** (242/305) | 172 |
-| `jCustos-rest` | **95 %** (86/91) | 71 |
-| `jCustos-standalone` | **97 %** (33/34) | 30 |
-| `jCustos-processor` | **82 %** (23/28) | 11 |
-| `jCustos-persistence-eclipsestore` | **70 %** (231/328) | 104 |
-| `jCustos-test` | n/a (test fixtures) | 44 |
-| `jCustos-persistence-testkit` | n/a (contracts verified through consumers) | 104 |
-
-For the per-module progression across `00.51.00 → 00.60.00 → 00.70.00`
-see the *Mutation coverage* section of each
-[release-notes file](RELEASE-NOTES-00.70.00.md).
+With 00.84.00 every library module was measured again: 32 modules, 8829 of 10736 mutations
+killed (82 %) — among them `jCustos-core` 83 %, `jCustos-vaadin` 84 %, `jCustos-rest` 95 %,
+`jCustos-standalone` 96 %, `jCustos-processor` 97 %, `jCustos-events` 86 %,
+`jCustos-persistence-eclipsestore` 87 %. The table for every module, with line coverage and the
+comparison against 00.81.00, is in the *Mutation coverage* section of
+[RELEASE-NOTES-00.84.00.md](RELEASE-NOTES-00.84.00.md).
 
 ### Add the dependency
 

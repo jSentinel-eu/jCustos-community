@@ -1030,6 +1030,69 @@ Only the OAuth2 REST callback (SA20) and the OIDC logout (SA47) were protected a
 
 The starter profiles set the bootstrap mode and nothing else, although `VaadinJCustosStarter`'s Javadoc promised in-memory defaults, verbose diagnostics and production behaviour: `productionDefaults()` left every unannotated route public, and a `strictDefaults()` application failed at `install()` with `authorization/allow-by-omission` until it called `.denyByDefault(true)` itself. Every application wrote its own `VaadinServiceInitListener`s for the security-version check, the reference error handler and the OIDC session-registry cleanup, and a forgotten one failed open without notice. `SecuredUi` decided what a control shows, never what its click does. `productionDefaults()` and `strictDefaults()` now also set `.denyByDefault(true)` and, when it is unambiguous, `.loginRoute(...)` - the route of the one registered `LoginView` route, or of the one the registered `LoginListener` names when several are registered; without a readable route registry the `@Route` of the `LoginListener`'s view when it names the whole path; otherwise nothing. `developmentDefaults()` sets the mode only, and all Javadoc says what the profiles do. The new `VaadinJCustosStarter.serviceInit(ServiceInitEvent, Class<? extends Component> rerouteTarget)` (with an `Options` overload, implemented by `VaadinJCustosServiceInit`) installs `JCustosVersionEnforcerListener.register(...)` when a `JCustosVersionStore` is registered, `VaadinJCustosVersionChangeBridge` when that store is an `ObservableJCustosVersionStore`, `JCustosErrorHandler.install(...)` unless `withoutErrorHandler()`, and - for a registry passed with `withOidcSessionRegistry(...)` - the OIDC module's `VaadinSessionRegistryCleanup`, loaded by name so the starter does not depend on the OIDC modules; it returns and logs the installed parts and reports each skipped one. `SecuredUi.action(component, onClick)` evaluates the requirement when bound, on attach, from `refreshAll(UI)` and again when the click arrives: a click of a subject that no longer satisfies it does not run `onClick`, re-evaluates the control at once (disabled by default, hidden with `hideWhenDenied()`), is logged as `secured-ui/action-refused` and audited as `ActionDenied`, whose action names the requirement; a check that throws refuses the click. demo-jcustos-vaadin and demo-jcustos-vaadin-hardening call the installer from their bootstrap listener; the hardening demo's `JCustosVersionInitListener` and its skill template are gone. Verified with the real bootstrap on a browserless service: production and strict set deny-by-default and the login route, STRICT with the strict profile no longer reports `authorization/allow-by-omission` while the STRICT mode alone still does, two login views without a listener leave the route alone; the installer registers exactly the parts whose prerequisites are present, the bridge unsubscribes when the service is destroyed, the OIDC cleanup forgets a destroyed session; an action whose permission was withdrawn after rendering refuses the click, disables the button and audits `ActionDenied`. **Consumers:** the production and strict profiles are stricter - an unannotated public route is denied until it carries `@PublicRoute`, and the login route follows the registered `LoginView` unless `.loginRoute(...)` is called after `.use(profile)`. Replace hand-written init listeners for the version check, the error handler and the OIDC cleanup with one `VaadinJCustosStarter.serviceInit(event, LoginView.class)` after the bootstrap's `install()`, or the parts are registered twice; pass `Options.defaults().withoutErrorHandler()` to keep an own session error handler. The proactive reaction needs the opt-in `ObservableJCustosVersionStore` (R8). Use `SecuredUi.action(...)` where a click must be refused once the permission is gone; `SecuredUi.button(...).onClick(...)` still runs whenever Vaadin delivers the click.
 
+## Mutation coverage
+
+From 00.81.10 to 00.83.00 the PIT filter matched nothing: `pitest-prod-classes` and
+`pitest-test-classes` still named the packages from before the rename (`com.svenruppert.*`), so
+`mutationCoverage` found no classes to mutate and those releases carry no measurement. Both
+properties name `eu.jsentinel.jcustos.*` again. This release measures every library module anew with
+the same PIT release as 00.81.00 (pitest-maven 1.25.5, JUnit 5 plugin 1.2.3, default mutators, two
+threads). Three modules were raised by tests alone, without a change to main code:
+`jCustos-dx-standalone` (78 → 100 %), `jCustos-autoservice-processor` (63 → 90 %) and
+`jCustos-processor` (83 → 97 %; merging with an earlier wrapper index and the handling of write failures are now under
+test).
+
+| Module | 00.81.00 | 00.84.00 (killed/generated) | Line coverage | Against 00.81.00 |
+|---|---:|---:|---:|---|
+| `jCustos-core` | 84 % | 83 % (3907/4724) | 90 % | −1 pp |
+| `jCustos-vaadin` | 80 % | 84 % (627/750) | 89 % | +4 pp |
+| `jCustos-rest` | 94 % | 95 % (383/405) | 94 % | +1 pp |
+| `jCustos-standalone` | — | 96 % (52/54) | 96 % | new baseline |
+| `jCustos-processor` | 82 % | 97 % (213/219) | 98 % | +15 pp |
+| `jCustos-persistence-eclipsestore` | — | 87 % (675/776) | 95 % | new baseline |
+| `jCustos-crypto-bc` | — | 67 % (154/229) | 88 % | new baseline |
+| `jCustos-credentials-hibp` | — | 63 % (52/82) | 86 % | new baseline |
+| `jCustos-autoservice-processor` | — | 90 % (63/70) | 94 % | new baseline |
+| `jCustos-dx` | 65 % | 68 % (541/794) | 80 % | +3 pp |
+| `jCustos-dx-vaadin` | — | 85 % (103/121) | 85 % | new baseline |
+| `jCustos-dx-rest` | — | 89 % (95/107) | 90 % | new baseline |
+| `jCustos-dx-standalone` | — | 100 % (58/58) | 91 % | new baseline |
+| `jCustos-jwt` | — | 76 % (160/210) | 83 % | new baseline |
+| `jCustos-propagation` | — | 83 % (15/18) | 87 % | new baseline |
+| `jCustos-oauth2` | — | 79 % (183/232) | 90 % | new baseline |
+| `jCustos-identity-oidc` | — | 83 % (179/216) | 91 % | new baseline |
+| `jCustos-propagation-oidc` | 63 % | 71 % (58/82) | 88 % | +8 pp |
+| `jCustos-oauth2-vaadin` | — | 93 % (25/27) | 96 % | new baseline |
+| `jCustos-identity-oidc-vaadin` | — | 90 % (63/70) | 90 % | new baseline |
+| `jCustos-vaadin-starter` | — | 74 % (206/279) | 80 % | new baseline |
+| `jCustos-propagation-processor` | — | 68 % (48/71) | 93 % | new baseline |
+| `jCustos-events` | — | 86 % (755/877) | 91 % | new baseline |
+| `jCustos-oauth2-rest` | 86 % | 87 % (52/60) | 97 % | +1 pp |
+| `jCustos-identity-oidc-rest` | — | 100 % (10/10) | 100 % | new baseline |
+| `jCustos-identity-vendor-keycloak` | — | 81 % (21/26) | 85 % | new baseline |
+| `jCustos-identity-vendor-entra` | — | 100 % (10/10) | 100 % | new baseline |
+| `jCustos-identity-vendor-auth0` | — | 100 % (9/9) | 100 % | new baseline |
+| `jCustos-identity-vendor-okta` | — | 100 % (5/5) | 100 % | new baseline |
+| `jCustos-identity-vendor-google` | — | 100 % (3/3) | 100 % | new baseline |
+| `jCustos-identity-vendor-github` | — | 88 % (23/26) | 97 % | new baseline |
+| `jCustos-dpop` | — | 70 % (81/116) | 76 % | new baseline |
+
+Across the 32 library modules PIT killed 8829 of 10736 mutations (82 %). Line coverage counts the
+classes PIT mutated. Before the new tests the three raised modules stood at 83 % (182/219,
+processor), 63 % (44/70, autoservice-processor) and 78 % (45/58, dx-standalone).
+
+The test fixtures are measured for information only; their contracts run in the modules that use
+them: `jCustos-test` 90 % (82/91), `jCustos-test-oidc` 62 % (29/47), `jCustos-persistence-testkit`
+35 % (311/888), `jCustos-events-testkit` 28 % (41/144). Not measured: `jCustos-bom` and the parent
+(POMs only), `jCustos-autoservice-annotations` (one annotation type, nothing to mutate) and the
+demos. `jSentinel-events-rest` (69 % in 00.81.00) now belongs to the enterprise edition.
+
+Totals do not compare with 00.81.00, percentages do: `jCustos-core` has grown by about 40 % in
+source lines since then and generates 4724 mutations instead of 2680.
+
+**Acceptance:** no module is more than 3 percentage points below its 00.81.00 value. Only
+`jCustos-core` is lower (84 → 83 %, −1 pp); the other six modules with a 00.81.00 value rose.
+
 ## DPoP: bounded proof and `jti`, and the key binding is part of the validation (SA48, JS-SEC-148, CWE-770, CWE-345)
 
 The DPoP proof parser was the one JOSE parser without a size limit, and a sender-chosen `jti` of any
