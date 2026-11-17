@@ -54,6 +54,9 @@ class ConsumeFailurePolicyTest {
       new JCustosEventVerificationResult.KeyRevoked(KeyId.of("k")),
       new JCustosEventVerificationResult.KeyExpired(KeyId.of("k")),
       new JCustosEventVerificationResult.Expired(Instant.parse("2026-07-19T10:15:30Z")),
+      new JCustosEventVerificationResult.AcceptanceWindowExceeded(EventEnvelopeId.of("e"),
+          Instant.parse("2026-07-19T10:15:30Z"), Instant.parse("2126-07-19T10:15:30Z"),
+          ConsumePipeline.DEFAULT_MAX_ACCEPTANCE_WINDOW),
       new JCustosEventVerificationResult.ReplayDetected(EventEnvelopeId.of("e")),
       new JCustosEventVerificationResult.SequenceViolation(TenantId.DEFAULT,
           EventProducerId.of("p"), EventSequence.of(2), EventSequence.of(5)),
@@ -71,13 +74,14 @@ class ConsumeFailurePolicyTest {
   }
 
   @Test
-  @DisplayName("operationalDefaults() dead-letters sequence violations and expired envelopes only")
+  @DisplayName("operationalDefaults() dead-letters sequence violations and the two time-window failures only")
   void operationalProfile() {
     ConsumeFailurePolicy operational = ConsumeFailurePolicy.operationalDefaults();
     for (JCustosEventVerificationResult failure : ALL_FAILURES) {
       ConsumeFailureAction expected =
           failure instanceof JCustosEventVerificationResult.SequenceViolation
               || failure instanceof JCustosEventVerificationResult.Expired
+              || failure instanceof JCustosEventVerificationResult.AcceptanceWindowExceeded
               ? REJECT_AND_DEAD_LETTER
               : REJECT;
       assertEquals(expected, operational.actionFor(failure),

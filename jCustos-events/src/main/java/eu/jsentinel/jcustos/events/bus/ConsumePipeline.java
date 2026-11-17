@@ -50,6 +50,7 @@ import eu.jsentinel.jcustos.events.signature.SignatureAlgorithm;
 import eu.jsentinel.jcustos.events.signature.SignatureAlgorithms;
 
 import java.security.PublicKey;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
@@ -89,6 +90,17 @@ import java.util.concurrent.atomic.AtomicLong;
  * compares the fields it repeats — event type, event id, tenant, subject,
  * time — with the signed envelope, so the producer policy, which is decided
  * on the envelope, also holds for the payload a consumer acts on.
+ *
+ * <p>The <em>acceptance-window bound</em> (ER27, CWE-770) is part of the time
+ * window check. The producer chooses {@code expiresAt}, and the replay store
+ * remembers an accepted envelope id until then. An envelope whose declared
+ * window ({@code expiresAt - issuedAt}) or remaining window
+ * ({@code expiresAt - now}) is longer than {@link #maxAcceptanceWindow()} is
+ * rejected as {@link JCustosEventVerificationResult.AcceptanceWindowExceeded}
+ * before any side effect, so the pipeline never asks the replay store to keep
+ * an id longer than that maximum. The default is
+ * {@link #DEFAULT_MAX_ACCEPTANCE_WINDOW}; it must cover the time to live the
+ * producers sign with.
  *
  * @since 00.75.00
  */
@@ -153,6 +165,23 @@ public final class ConsumePipeline implements HasLogger {
    */
   public static final String FIELD_OCCURRED_AT = "occurredAt";
 
+  /**
+   * Default for the longest acceptance window this consumer accepts (ER27):
+   * one hour. Both the window an envelope declares
+   * ({@code expiresAt - issuedAt}) and the window left at verification
+   * ({@code expiresAt - now}) must fit into it, and it is the longest time
+   * the pipeline asks the replay store to remember an envelope id. It is
+   * twelve times the five-minute time to live of the documented publish
+   * set-up; a consumer of producers that sign with a longer time to live
+   * raises it through
+   * {@link #ConsumePipeline(JCustosEventVerificationKeyResolver, SignatureAlgorithms,
+   * JCustosEventReplayStore, JCustosEventSequenceStore, SequenceValidator,
+   * SequenceViolationStrategy, JCustosEventProducerPolicy, Collection, Duration)}.
+   *
+   * @since 00.84.00
+   */
+  public static final Duration DEFAULT_MAX_ACCEPTANCE_WINDOW = Duration.ofHours(1);
+
   private record PayloadCheck(CanonicalJCustosEventPayload payload, String mismatch) {
   }
 
@@ -164,12 +193,15 @@ public final class ConsumePipeline implements HasLogger {
   private final SequenceViolationStrategy sequenceStrategy;
   private final JCustosEventProducerPolicy producerPolicy;
   private final Map<PayloadContentType, PayloadCodec> payloadCodecs;
+  private final Duration maxAcceptanceWindow;
   private final AtomicLong acceptedSequenceAnomalies = new AtomicLong();
 
   /**
    * Creates a pipeline that decodes payloads with the
    * {@link CanonicalJsonPayloadCodec} — the codec the publish side uses by
-   * default. An envelope with any other payload content type is rejected.
+   * default. An envelope with any other payload content type is rejected, and
+   * so is an envelope whose acceptance window exceeds
+   * {@link #DEFAULT_MAX_ACCEPTANCE_WINDOW}.
    */
   public ConsumePipeline(JCustosEventVerificationKeyResolver keyResolver,
       SignatureAlgorithms signatureAlgorithms, JCustosEventReplayStore replayStore,
@@ -180,6 +212,9 @@ public final class ConsumePipeline implements HasLogger {
   }
 
   /**
+   * Creates a pipeline that rejects an envelope whose acceptance window
+   * exceeds {@link #DEFAULT_MAX_ACCEPTANCE_WINDOW}.
+   *
    * @param payloadCodecs the codecs this consumer decodes payloads with, keyed
    *     by their {@link PayloadCodec#contentType()}; an envelope whose content
    *     type has no codec here is rejected (JS-SEC-107)
@@ -191,6 +226,37 @@ public final class ConsumePipeline implements HasLogger {
       JCustosEventSequenceStore sequenceStore, SequenceValidator sequenceValidator,
       SequenceViolationStrategy sequenceStrategy, JCustosEventProducerPolicy producerPolicy,
       Collection<? extends PayloadCodec> payloadCodecs) {
+    this(keyResolver, signatureAlgorithms, replayStore, sequenceStore, sequenceValidator,
+        sequenceStrategy, producerPolicy, payloadCodecs, DEFAULT_MAX_ACCEPTANCE_WINDOW);
+  }
+
+  /**
+   * @param payloadCodecs the codecs this consumer decodes payloads with, keyed
+   *     by their {@link PayloadCodec#contentType()}; an envelope whose content
+   *     type has no codec here is rejected (JS-SEC-107)
+   * @param maxAcceptanceWindow the longest acceptance window this consumer
+   *     accepts (ER27): an envelope whose declared window
+   *     ({@code expiresAt - issuedAt}) or remaining window
+   *     ({@code expiresAt - now}) is longer is rejected as
+   *     {@link JCustosEventVerificationResult.AcceptanceWindowExceeded}. It
+   *     must cover the time to live the producers sign with plus the clock
+   *     drift between producer and consumer, and it is the longest time the
+   *     replay store is asked to remember an envelope id; positive
+   * @throws IllegalArgumentException if two codecs claim the same content
+   *     type, or if {@code maxAcceptanceWindow} is zero or negative
+   * @since 00.84.00
+   */
+  public ConsumePipeline(JCustosEventVerificationKeyResolver keyResolver,
+      SignatureAlgorithms signatureAlgorithms, JCustosEventReplayStore replayStore,
+      JCustosEventSequenceStore sequenceStore, SequenceValidator sequenceValidator,
+      SequenceViolationStrategy sequenceStrategy, JCustosEventProducerPolicy producerPolicy,
+      Collection<? extends PayloadCodec> payloadCodecs, Duration maxAcceptanceWindow) {
+    Objects.requireNonNull(maxAcceptanceWindow, "maxAcceptanceWindow");
+    if (maxAcceptanceWindow.isZero() || maxAcceptanceWindow.isNegative()) {
+      throw new IllegalArgumentException("maxAcceptanceWindow must be positive, was "
+          + maxAcceptanceWindow);
+    }
+    this.maxAcceptanceWindow = maxAcceptanceWindow;
     this.keyResolver = Objects.requireNonNull(keyResolver, "keyResolver");
     this.signatureAlgorithms = Objects.requireNonNull(signatureAlgorithms, "signatureAlgorithms");
     this.replayStore = Objects.requireNonNull(replayStore, "replayStore");
@@ -222,10 +288,21 @@ public final class ConsumePipeline implements HasLogger {
   }
 
   /**
+   * @return the longest acceptance window this consumer accepts — and with it
+   *     the longest time this pipeline asks the replay store to remember an
+   *     envelope id (ER27)
+   * @since 00.84.00
+   */
+  public Duration maxAcceptanceWindow() {
+    return maxAcceptanceWindow;
+  }
+
+  /**
    * Verifies an incoming envelope.
    *
    * @param envelope the envelope to verify
-   * @param now the current instant (for the expiry check)
+   * @param now the current instant (for the expiry check and the
+   *     acceptance-window bound)
    * @return the verification result
    */
   public JCustosEventVerificationResult verify(SignedJCustosEventEnvelope envelope,
@@ -304,6 +381,18 @@ public final class ConsumePipeline implements HasLogger {
       return new JCustosEventVerificationResult.Expired(envelope.expiresAt());
     }
 
+    // ER27 (CWE-770): the signer chooses expiresAt, and markSeen below keeps
+    // the id until then. Without a bound of the consumer's own, one signing
+    // key — compromised or misconfigured — could pin the replay store with
+    // ids valid until the year 9999, beyond the key's revocation, and the
+    // store's capacity eviction would then drop legitimate ids instead.
+    // Read-only like every gate before the commit.
+    if (exceedsAcceptanceWindow(envelope, now)) {
+      return new JCustosEventVerificationResult.AcceptanceWindowExceeded(
+          envelope.envelopeId(), envelope.issuedAt(), envelope.expiresAt(),
+          maxAcceptanceWindow);
+    }
+
     // Replay: read-only check first, so a genuine duplicate is reported as
     // ReplayDetected even when a stricter sequence policy would also reject it.
     if (replayStore.hasSeen(envelope.envelopeId())) {
@@ -370,6 +459,17 @@ public final class ConsumePipeline implements HasLogger {
       reportAcceptedAnomaly(envelope, decision, expectedAfter(last));
     }
     return new JCustosEventVerificationResult.Valid(envelope, payloadCheck.payload());
+  }
+
+  // The declared window catches a producer that signs with too long a time to
+  // live whenever its envelope arrives; the remaining window catches an
+  // issuedAt in the future, which would keep the declared window short and
+  // the replay entry long. Duration.between does not overflow for any two
+  // instants, so the check stays total (JS-SEC-054).
+  private boolean exceedsAcceptanceWindow(SignedJCustosEventEnvelope envelope, Instant now) {
+    return Duration.between(envelope.issuedAt(), envelope.expiresAt())
+        .compareTo(maxAcceptanceWindow) > 0
+        || Duration.between(now, envelope.expiresAt()).compareTo(maxAcceptanceWindow) > 0;
   }
 
   // JS-SEC-105 (CWE-190): EventSequence#next throws at Long.MAX_VALUE, and

@@ -398,6 +398,15 @@ public final class ConsumeFailureHandler implements HasLogger {
           logger().warn("events/envelope-expired: envelope {} rejected — it expired at {}."
                   + " Check producer/consumer clock drift and the acceptance window.",
               envelopeId, expired.expiresAt());
+      case JCustosEventVerificationResult.AcceptanceWindowExceeded exceeded ->
+          logger().warn("events/acceptance-window-exceeded: envelope {} from producer {}"
+                  + " (tenant {}) rejected — issued at {} and valid until {}: its acceptance"
+                  + " window, or the part still ahead of it, is longer than the {} this"
+                  + " consumer accepts. Align the producer's time to live with the consumer's"
+                  + " maximum and check producer/consumer clock drift; if the producer did"
+                  + " not choose this window, its signing key may be in other hands.",
+              envelopeId, producer, tenant, exceeded.issuedAt(), exceeded.expiresAt(),
+              exceeded.maxAcceptanceWindow());
       case JCustosEventVerificationResult.ReplayDetected ignored ->
           logger().warn("events/replay-detected: envelope {} was already consumed —"
                   + " possible replay attack or duplicate delivery. Investigate producer"
@@ -448,6 +457,11 @@ public final class ConsumeFailureHandler implements HasLogger {
       case JCustosEventVerificationResult.KeyExpired ignored ->
           RejectionReason.KEY_REVOKED;
       case JCustosEventVerificationResult.Expired ignored ->
+          RejectionReason.EXPIRED;
+      // The reason enum is not extended (see below): an acceptance window
+      // longer than the consumer allows is a rejection on the time window,
+      // like an expired one. The log line keeps the precise cause.
+      case JCustosEventVerificationResult.AcceptanceWindowExceeded ignored ->
           RejectionReason.EXPIRED;
       case JCustosEventVerificationResult.ReplayDetected ignored ->
           RejectionReason.REPLAY_DETECTED;

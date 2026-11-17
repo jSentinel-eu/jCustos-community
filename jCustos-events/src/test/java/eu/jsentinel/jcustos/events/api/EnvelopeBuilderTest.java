@@ -29,6 +29,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -103,6 +104,22 @@ class EnvelopeBuilderTest {
         () -> EnvelopeFixtures.validBuilder().issuedAt(null).build());
     assertThrows(NullPointerException.class,
         () -> EnvelopeFixtures.validBuilder().expiresAt(null).build());
+  }
+
+  @Test
+  @DisplayName("ER27: an expiresAt before issuedAt throws on build and names no value; equal instants are allowed")
+  void acceptanceWindowMustNotEndBeforeItBegins() {
+    Instant before = EnvelopeFixtures.ISSUED.minusMillis(1);
+    IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+        () -> EnvelopeFixtures.validBuilder().expiresAt(before).build());
+    assertTrue(refused.getMessage().contains("'expiresAt'"), refused.getMessage());
+    assertTrue(refused.getMessage().contains("'issuedAt'"), refused.getMessage());
+    assertFalse(refused.getMessage().contains(before.toString()),
+        "the message must not echo the value");
+
+    SignedJCustosEventEnvelope zeroWindow = EnvelopeFixtures.validBuilder()
+        .expiresAt(EnvelopeFixtures.ISSUED).build();
+    assertEquals(zeroWindow.issuedAt(), zeroWindow.expiresAt());
   }
 
   @Test

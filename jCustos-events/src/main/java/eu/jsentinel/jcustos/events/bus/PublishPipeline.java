@@ -78,11 +78,25 @@ public final class PublishPipeline {
   private final Duration ttl;
   private final Supplier<Instant> clock;
 
+  /**
+   * @param ttl the time to live every envelope is signed with
+   *     ({@code expiresAt = issuedAt + ttl}); must not be negative. A consumer
+   *     rejects an envelope whose window exceeds its maximum acceptance window
+   *     ({@link ConsumePipeline#DEFAULT_MAX_ACCEPTANCE_WINDOW} unless
+   *     configured, ER27), so keep it within the consumers' maximum
+   * @throws IllegalArgumentException if {@code ttl} is negative (since
+   *     00.84.00 — such an envelope would end its acceptance window before it
+   *     begins)
+   */
   public PublishPipeline(JCustosEventSigningKeyProvider signingKeyProvider,
       JCustosEventCanonicalizer canonicalizer, PayloadCodec codec,
       PayloadHashAlgorithm hashAlgorithm, EventProducerId producerId,
       JCustosEventSequenceStore sequenceStore, JCustosEventReplayStore replayStore,
       JCustosEventProducerPolicy producerPolicy, Duration ttl, Supplier<Instant> clock) {
+    Objects.requireNonNull(ttl, "ttl");
+    if (ttl.isNegative()) {
+      throw new IllegalArgumentException("ttl must not be negative, was " + ttl);
+    }
     this.signingKeyProvider = Objects.requireNonNull(signingKeyProvider, "signingKeyProvider");
     this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
     this.codec = Objects.requireNonNull(codec, "codec");

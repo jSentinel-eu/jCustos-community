@@ -38,6 +38,13 @@ import java.time.Instant;
  * concurrent processing, exactly one consumer may mark a given envelope as seen
  * (Konzept §646).
  *
+ * <p>A store keeps an id until the expiry it is given. That expiry is the
+ * envelope's {@code expiresAt}, which the producer chooses; the
+ * {@code ConsumePipeline} bounds it before it calls
+ * {@link #markSeen(EventEnvelopeId, Instant)}, so no id it marks expires later
+ * than its maximum acceptance window after verification (ER27, CWE-770). Code
+ * that marks ids itself has to apply the same bound.
+ *
  * @since 00.75.00
  */
 @ExperimentalJCustosApi

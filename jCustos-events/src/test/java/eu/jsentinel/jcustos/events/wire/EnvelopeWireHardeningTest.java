@@ -153,6 +153,20 @@ class EnvelopeWireHardeningTest {
   }
 
   @Test
+  @DisplayName("ER27: an expiresAt before issuedAt is a decode error that names no value")
+  void windowEndingBeforeItBeginsIsADecodeError() {
+    String wire = codec.encode(fx.signedEnvelope());
+    String before = WireFixtures.T0.minusSeconds(1).toString();
+    String reversed = wire.replaceFirst("\"expiresAt\":\"[^\"]*\"",
+        "\"expiresAt\":\"" + before + "\"");
+
+    String error = codec.decode(reversed).fold(ok -> "", failure -> failure);
+    assertTrue(error.contains("expiresAt"), error);
+    assertFalse(error.contains(before), "the error must not echo the value");
+    assertTrue(codec.decode(wire).isSuccess());
+  }
+
+  @Test
   @DisplayName("JS-SEC-104: the bound is inclusive, applies to every textual field and is configurable")
   void boundIsInclusiveAndConfigurable() {
     String wire = codec.encode(fx.signedEnvelope());

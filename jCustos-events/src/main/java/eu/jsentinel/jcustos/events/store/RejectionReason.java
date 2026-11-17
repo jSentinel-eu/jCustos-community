@@ -59,6 +59,9 @@ public enum RejectionReason {
   /** A listener failed and the configuration routes such failures here. */
   LISTENER_FAILED,
 
-  /** The envelope was past its acceptance window. */
+  /**
+   * The envelope was past its acceptance window — or, since 00.84.00, its
+   * acceptance window was longer than the consumer accepts (ER27).
+   */
   EXPIRED
 }

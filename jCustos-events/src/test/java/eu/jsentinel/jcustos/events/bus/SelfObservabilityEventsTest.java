@@ -63,6 +63,12 @@ class SelfObservabilityEventsTest {
   private static final SignedJCustosEventEnvelope ENVELOPE =
       new BusFixtures().publishPipeline().toEnvelope(BusFixtures.event());
 
+  private static JCustosEventVerificationResult windowExceeded(
+      SignedJCustosEventEnvelope envelope) {
+    return new JCustosEventVerificationResult.AcceptanceWindowExceeded(envelope.envelopeId(),
+        envelope.issuedAt(), envelope.expiresAt(), ConsumePipeline.DEFAULT_MAX_ACCEPTANCE_WINDOW);
+  }
+
   @Test
   @DisplayName("Valid maps to no event at all")
   void validMapsToEmpty() {
@@ -78,6 +84,8 @@ class SelfObservabilityEventsTest {
     assertEquals("key-revoked", SelfObservabilityEvents.REASON_KEY_REVOKED);
     assertEquals("key-expired", SelfObservabilityEvents.REASON_KEY_EXPIRED);
     assertEquals("expired", SelfObservabilityEvents.REASON_EXPIRED);
+    assertEquals("acceptance-window-exceeded",
+        SelfObservabilityEvents.REASON_ACCEPTANCE_WINDOW_EXCEEDED);
     assertEquals("producer-not-allowed", SelfObservabilityEvents.REASON_PRODUCER_NOT_ALLOWED);
     assertEquals("key-not-authorized-for-producer",
         SelfObservabilityEvents.REASON_KEY_NOT_AUTHORIZED);
@@ -111,6 +119,8 @@ class SelfObservabilityEventsTest {
             EnvelopeRejectedEvent.class, JCustosEventSeverity.ERROR),
         arguments("Expired",
             new JCustosEventVerificationResult.Expired(ENVELOPE.expiresAt()),
+            EnvelopeRejectedEvent.class, JCustosEventSeverity.ERROR),
+        arguments("AcceptanceWindowExceeded", windowExceeded(ENVELOPE),
             EnvelopeRejectedEvent.class, JCustosEventSeverity.ERROR),
         arguments("ProducerNotAllowed",
             new JCustosEventVerificationResult.ProducerNotAllowed(ENVELOPE.producerId(),
@@ -156,6 +166,8 @@ class SelfObservabilityEventsTest {
             new JCustosEventVerificationResult.KeyExpired(ENVELOPE.keyId()), "key-expired"),
         arguments("Expired",
             new JCustosEventVerificationResult.Expired(ENVELOPE.expiresAt()), "expired"),
+        arguments("AcceptanceWindowExceeded", windowExceeded(ENVELOPE),
+            "acceptance-window-exceeded"),
         arguments("ProducerNotAllowed",
             new JCustosEventVerificationResult.ProducerNotAllowed(ENVELOPE.producerId(),
                 ENVELOPE.eventType(), ENVELOPE.tenantId()), "producer-not-allowed"),
@@ -286,6 +298,7 @@ class SelfObservabilityEventsTest {
     return Stream.of(
         arguments("Expired",
             new JCustosEventVerificationResult.Expired(tenantEnvelope.expiresAt())),
+        arguments("AcceptanceWindowExceeded", windowExceeded(tenantEnvelope)),
         arguments("ReplayDetected",
             new JCustosEventVerificationResult.ReplayDetected(tenantEnvelope.envelopeId())),
         arguments("SequenceViolation",

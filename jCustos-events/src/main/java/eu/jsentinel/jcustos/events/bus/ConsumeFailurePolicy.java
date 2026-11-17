@@ -42,10 +42,12 @@ import java.util.Objects;
  *   <li>{@link #strict()} — everything {@code REJECT}, fail-closed: zero
  *       attacker-controlled payloads are retained; dead-lettering is an
  *       explicit operator opt-in.</li>
- *   <li>{@link #operationalDefaults()} — sequence violations and expired
- *       envelopes are additionally dead-lettered (they are the two kinds an
- *       operator typically must review: loss/reordering and clock drift);
- *       cryptographic failures stay reject-only.</li>
+ *   <li>{@link #operationalDefaults()} — sequence violations, expired
+ *       envelopes and envelopes whose acceptance window exceeds the
+ *       consumer's maximum are additionally dead-lettered (they are the
+ *       kinds an operator typically must review: loss/reordering, and clock
+ *       drift or a producer's time to live); cryptographic failures stay
+ *       reject-only.</li>
  * </ul>
  *
  * @since 00.80.00
@@ -70,7 +72,9 @@ public final class ConsumeFailurePolicy {
     /** @since 00.84.00 */
     KEY_NOT_AUTHORIZED_FOR_PRODUCER,
     /** @since 00.84.00 */
-    PAYLOAD_METADATA_MISMATCH;
+    PAYLOAD_METADATA_MISMATCH,
+    /** @since 00.84.00 */
+    ACCEPTANCE_WINDOW_EXCEEDED;
 
     static FailureKind of(JCustosEventVerificationResult failure) {
       return switch (failure) {
@@ -89,6 +93,8 @@ public final class ConsumeFailurePolicy {
             KEY_NOT_AUTHORIZED_FOR_PRODUCER;
         case JCustosEventVerificationResult.PayloadMetadataMismatch ignored ->
             PAYLOAD_METADATA_MISMATCH;
+        case JCustosEventVerificationResult.AcceptanceWindowExceeded ignored ->
+            ACCEPTANCE_WINDOW_EXCEEDED;
       };
     }
   }
@@ -109,9 +115,10 @@ public final class ConsumeFailurePolicy {
   }
 
   /**
-   * @return the operational profile: {@code SEQUENCE_VIOLATION} and
-   *     {@code EXPIRED} dead-letter for operator review, everything else
-   *     rejects only
+   * @return the operational profile: {@code SEQUENCE_VIOLATION},
+   *     {@code EXPIRED} and {@code ACCEPTANCE_WINDOW_EXCEEDED} (since
+   *     00.84.00) dead-letter for operator review, everything else rejects
+   *     only
    */
   public static ConsumeFailurePolicy operationalDefaults() {
     EnumMap<FailureKind, ConsumeFailureAction> actions = new EnumMap<>(FailureKind.class);
@@ -120,6 +127,11 @@ public final class ConsumeFailurePolicy {
     }
     actions.put(FailureKind.SEQUENCE_VIOLATION, ConsumeFailureAction.REJECT_AND_DEAD_LETTER);
     actions.put(FailureKind.EXPIRED, ConsumeFailureAction.REJECT_AND_DEAD_LETTER);
+    // ER27: the other time-window rejection. Like EXPIRED it points at clock
+    // drift or a producer's time to live — or at a signing key in hands that
+    // chose the window themselves; the record is the trace.
+    actions.put(FailureKind.ACCEPTANCE_WINDOW_EXCEEDED,
+        ConsumeFailureAction.REJECT_AND_DEAD_LETTER);
     return new ConsumeFailurePolicy(actions);
   }
 

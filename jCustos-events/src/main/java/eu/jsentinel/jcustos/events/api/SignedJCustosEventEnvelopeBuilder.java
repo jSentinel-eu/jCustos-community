@@ -177,7 +177,9 @@ public final class SignedJCustosEventEnvelopeBuilder {
    *
    * @return the validated envelope
    * @throws NullPointerException if any mandatory field is null
-   * @throws IllegalArgumentException if {@code canonicalPayloadHash} is blank
+   * @throws IllegalArgumentException if {@code canonicalPayloadHash} is blank,
+   *     a textual field is not well-formed UTF-16, or {@code expiresAt} lies
+   *     before {@code issuedAt}
    */
   public SignedJCustosEventEnvelope build() {
     return new SignedJCustosEventEnvelope(

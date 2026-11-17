@@ -35,6 +35,7 @@ import eu.jsentinel.jcustos.events.api.KeyId;
 import eu.jsentinel.jcustos.events.api.SignedJCustosEventEnvelope;
 import eu.jsentinel.jcustos.events.codec.CanonicalJCustosEventPayload;
 
+import java.time.Duration;
 import java.time.Instant;
 
 /**
@@ -79,6 +80,7 @@ public sealed interface JCustosEventVerificationResult {
       case KeyNotAuthorizedForProducer ignored -> false;
       case Valid ignored -> true;
       case Expired ignored -> true;
+      case AcceptanceWindowExceeded ignored -> true;
       case ReplayDetected ignored -> true;
       case SequenceViolation ignored -> true;
       case ProducerNotAllowed ignored -> true;
@@ -134,6 +136,28 @@ public sealed interface JCustosEventVerificationResult {
 
   /** The envelope is past its acceptance window. */
   record Expired(Instant expiresAt) implements JCustosEventVerificationResult {
+  }
+
+  /**
+   * The envelope's acceptance window is longer than this consumer accepts
+   * (ER27, CWE-770): the window it declares ({@code expiresAt - issuedAt})
+   * or the window still left at verification ({@code expiresAt - now})
+   * exceeds the consumer's maximum. The producer chooses {@code expiresAt},
+   * and a consumer remembers an accepted envelope id until then, so without
+   * this bound one signing key could occupy the replay store for as long as
+   * it liked.
+   *
+   * @param envelopeId the rejected envelope
+   * @param issuedAt the envelope's signed issue time
+   * @param expiresAt the envelope's signed end of the acceptance window
+   * @param maxAcceptanceWindow the longest window this consumer accepts
+   * @since 00.84.00
+   */
+  record AcceptanceWindowExceeded(
+      EventEnvelopeId envelopeId,
+      Instant issuedAt,
+      Instant expiresAt,
+      Duration maxAcceptanceWindow) implements JCustosEventVerificationResult {
   }
 
   /** The recomputed payload hash did not match the envelope's. */

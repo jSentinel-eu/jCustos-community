@@ -51,6 +51,12 @@ import java.util.Objects;
  * UTF-8 encoding — it would be signed and transported as {@code '?'}, so two
  * different field values would share one signature.
  *
+ * <p>{@link #expiresAt()} must not lie before {@link #issuedAt()}: an
+ * acceptance window that ends before it begins is rejected on construction
+ * (ER27). How long a consumer accepts a window at all is the consumer's
+ * decision ({@code ConsumePipeline#maxAcceptanceWindow()}), not the
+ * producer's.
+ *
  * <p>All fields except {@link #causationId()} are mandatory. The two
  * {@code byte[]} components are defensively copied on construction and on
  * access, and {@link #equals(Object)} / {@link #hashCode()} use value
@@ -91,6 +97,12 @@ public record SignedJCustosEventEnvelope(
     Objects.requireNonNull(occurredAt, "occurredAt");
     Objects.requireNonNull(issuedAt, "issuedAt");
     Objects.requireNonNull(expiresAt, "expiresAt");
+    // ER27: the acceptance window must not end before it begins. The message
+    // names the fields only, like the well-formedness check below.
+    if (expiresAt.isBefore(issuedAt)) {
+      throw new IllegalArgumentException(
+          "envelope field 'expiresAt' must not be before 'issuedAt'");
+    }
     Objects.requireNonNull(correlationId, "correlationId");
     // causationId is optional (root events have no cause)
     Objects.requireNonNull(sequence, "sequence");

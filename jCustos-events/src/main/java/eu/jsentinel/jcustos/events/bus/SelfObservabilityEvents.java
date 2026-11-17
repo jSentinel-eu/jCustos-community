@@ -63,9 +63,10 @@ import java.util.Set;
  *   <li>{@link JCustosEventVerificationResult.SequenceViolation} maps to
  *       {@link SequenceViolationEvent}.</li>
  *   <li>Every remaining failure (unknown / revoked / expired key, key not
- *       bound to the producer, expired envelope, producer not allowed,
- *       payload metadata mismatch) maps to {@link EnvelopeRejectedEvent} with
- *       one of the {@code REASON_*} constants.</li>
+ *       bound to the producer, expired envelope, acceptance window longer
+ *       than the consumer accepts, producer not allowed, payload metadata
+ *       mismatch) maps to {@link EnvelopeRejectedEvent} with one of the
+ *       {@code REASON_*} constants.</li>
  * </ul>
  *
  * <p>Severity: every failure carries {@link JCustosEventSeverity#ERROR},
@@ -109,6 +110,14 @@ public final class SelfObservabilityEvents {
 
   /** Rejection reason: the envelope is past its acceptance window. */
   public static final String REASON_EXPIRED = "expired";
+
+  /**
+   * Rejection reason: the envelope's acceptance window is longer than the
+   * consumer accepts (ER27).
+   *
+   * @since 00.84.00
+   */
+  public static final String REASON_ACCEPTANCE_WINDOW_EXCEEDED = "acceptance-window-exceeded";
 
   /** Rejection reason: the producer may not publish this event type. */
   public static final String REASON_PRODUCER_NOT_ALLOWED = "producer-not-allowed";
@@ -223,6 +232,8 @@ public final class SelfObservabilityEvents {
               REASON_KEY_NOT_AUTHORIZED, unbound.keyId().value()));
       case JCustosEventVerificationResult.Expired ignored ->
           rejected(envelope, now, REASON_EXPIRED, authenticated);
+      case JCustosEventVerificationResult.AcceptanceWindowExceeded ignored ->
+          rejected(envelope, now, REASON_ACCEPTANCE_WINDOW_EXCEEDED, authenticated);
       case JCustosEventVerificationResult.ProducerNotAllowed ignored ->
           rejected(envelope, now, REASON_PRODUCER_NOT_ALLOWED, authenticated);
       case JCustosEventVerificationResult.PayloadMetadataMismatch ignored ->
