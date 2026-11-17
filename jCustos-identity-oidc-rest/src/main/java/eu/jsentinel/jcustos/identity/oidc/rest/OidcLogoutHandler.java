@@ -57,6 +57,21 @@ import java.util.stream.Collectors;
  * </ul>
  * Map the route as {@code POST} and trigger it from a form or {@code fetch} of the
  * application itself.
+ *
+ * <p><strong>Where the provider may send the user afterwards (JS-SEC-089, CWE-601).</strong>
+ * Until 00.84.00 the two-argument constructor silently forwarded any
+ * {@code post_logout_redirect_uri}. It now uses {@code new RpInitiatedLogoutInitiator()},
+ * which has no allowlist, refuses every {@code post_logout_redirect_uri} and logs
+ * {@code oidc/logout-redirect-unvalidated} once per JVM. A handler whose resolver supplies a
+ * {@code post_logout_redirect_uri} is built with an initiator that names the targets:
+ * <pre>{@code
+ *   new OidcLogoutHandler(endSessionEndpoint,
+ *       new RpInitiatedLogoutInitiator(
+ *           PostLogoutRedirectValidator.allowOnly(URI.create("https://app.example/signed-out"))),
+ *       OidcLogoutHandler.hintFrom(idTokenHint, URI.create("https://app.example/signed-out")));
+ * }</pre>
+ * A refused target is an {@link IllegalArgumentException} from {@link #handle}; no
+ * {@code Location} is set.
  */
 public final class OidcLogoutHandler implements RestHandler {
 
@@ -78,10 +93,30 @@ public final class OidcLogoutHandler implements RestHandler {
   /** Normalised {@code scheme://host[:port]} values; empty means "same host as the request". */
   private final Set<String> allowedOrigins;
 
+  /**
+   * A handler whose initiator has no redirect allowlist (JS-SEC-089, CWE-601): every
+   * {@code post_logout_redirect_uri} the resolver supplies is refused, and
+   * {@code oidc/logout-redirect-unvalidated} is logged once per JVM. Until 00.84.00 this
+   * constructor forwarded any target. Use it for resolvers that supply no
+   * {@code post_logout_redirect_uri}; otherwise use
+   * {@link #OidcLogoutHandler(URI, LogoutInitiator, LogoutRequestResolver)} with
+   * {@code new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(...))}.
+   *
+   * @param endSessionEndpoint the provider's {@code end_session_endpoint}, from discovery
+   * @param resolver           resolves the logout parameters of the current request
+   */
   public OidcLogoutHandler(URI endSessionEndpoint, LogoutRequestResolver resolver) {
     this(endSessionEndpoint, new RpInitiatedLogoutInitiator(), resolver);
   }
 
+  /**
+   * @param endSessionEndpoint the provider's {@code end_session_endpoint}, from discovery
+   * @param initiator          builds the end-session URL and decides which
+   *                           {@code post_logout_redirect_uri} may be sent - for instance
+   *                           {@code new RpInitiatedLogoutInitiator(
+   *                           PostLogoutRedirectValidator.allowOnly(...))} (JS-SEC-089)
+   * @param resolver           resolves the logout parameters of the current request
+   */
   public OidcLogoutHandler(URI endSessionEndpoint, LogoutInitiator initiator,
       LogoutRequestResolver resolver) {
     this(endSessionEndpoint, initiator, resolver, Set.of());
@@ -209,7 +244,15 @@ public final class OidcLogoutHandler implements RestHandler {
     return host;
   }
 
-  /** Convenience resolver: a constant id_token_hint source from the request. */
+  /**
+   * Convenience resolver: a constant id_token_hint source from the request.
+   *
+   * @param idTokenHint           reads the {@code id_token_hint} from the request
+   * @param postLogoutRedirectUri the target after logout, or {@code null} for none; it must be
+   *                              allowed by the handler's initiator (JS-SEC-089), which the
+   *                              two-argument constructor's initiator never does
+   * @return the resolver
+   */
   public static LogoutRequestResolver hintFrom(Function<RestRequest, String> idTokenHint,
       URI postLogoutRedirectUri) {
     Objects.requireNonNull(idTokenHint, "idTokenHint");

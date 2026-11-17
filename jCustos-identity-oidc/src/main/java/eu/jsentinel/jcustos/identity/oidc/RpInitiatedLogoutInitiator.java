@@ -41,6 +41,8 @@ package eu.jsentinel.jcustos.identity.oidc;
  * #L%
  */
 
+import com.svenruppert.dependencies.core.logger.HasLogger;
+import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.oidc.api.LogoutInitiator;
 import eu.jsentinel.jcustos.oidc.api.LogoutRequest;
 import eu.jsentinel.jcustos.oidc.api.PostLogoutRedirectValidator;
@@ -49,6 +51,8 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Builds the OIDC RP-Initiated Logout 1.0 redirect URL (V00.78): the
@@ -62,16 +66,61 @@ import java.util.Objects;
  * that check happens somewhere this code cannot see, and if the URI came from
  * the incoming request, an attacker chooses where the user lands after logout
  * (CWE-601). Pass a {@link PostLogoutRedirectValidator} to state locally where
- * logout may lead; the default keeps the pre-00.82 behaviour of forwarding
- * whatever it is given.
+ * logout may lead:
+ * <pre>{@code
+ *   new RpInitiatedLogoutInitiator(
+ *       PostLogoutRedirectValidator.allowOnly(URI.create("https://app.example/signed-out")))
+ * }</pre>
+ *
+ * <p><strong>Without an allowlist nothing is forwarded (JS-SEC-089, CWE-601).</strong> Until
+ * 00.84.00 the no-argument constructor forwarded whatever it was given, and both OIDC logout
+ * adapters used it, so the provider's registration was the only check. The no-argument
+ * constructor now refuses every {@code post_logout_redirect_uri} with the same
+ * {@link IllegalArgumentException} an allowlist raises for a target it does not contain, and
+ * announces that once per JVM with the WARN {@value #UNVALIDATED_REDIRECT_WARNING}. A
+ * {@link LogoutRequest} without a {@code post_logout_redirect_uri} is not affected: the
+ * provider ends its session and shows its own page.
  */
 public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
 
+  /**
+   * Code of the WARN the no-argument constructor writes once per JVM: the initiator was built
+   * without an allowlist and refuses every {@code post_logout_redirect_uri}.
+   *
+   * @since 00.84.00
+   */
+  public static final String UNVALIDATED_REDIRECT_WARNING = "oidc/logout-redirect-unvalidated";
+
+  /** JS-SEC-089: the validator of the no-argument constructor - no target is allowed. */
+  private static final PostLogoutRedirectValidator NO_ALLOWLIST = candidate -> false;
+
+  private static final AtomicBoolean UNVALIDATED_REDIRECT_WARNED = new AtomicBoolean(false);
+  private static final AtomicInteger UNVALIDATED_REDIRECT_WARNINGS = new AtomicInteger();
+
   private final PostLogoutRedirectValidator redirectValidator;
 
-  /** Forwards any redirect URI — the behaviour of releases before 00.82.00. */
+  /**
+   * An initiator without an allowlist: {@link #buildLogoutUri} refuses every
+   * {@code post_logout_redirect_uri} with an {@link IllegalArgumentException} and builds a
+   * logout request without one as before (JS-SEC-089, CWE-601). The first construction
+   * through this constructor in a JVM logs the WARN {@value #UNVALIDATED_REDIRECT_WARNING}.
+   *
+   * <p>Until 00.84.00 this constructor forwarded any redirect URI. To keep a redirect target,
+   * use {@link #RpInitiatedLogoutInitiator(PostLogoutRedirectValidator)} with
+   * {@link PostLogoutRedirectValidator#allowOnly(URI...)}.
+   */
   public RpInitiatedLogoutInitiator() {
-    this(PostLogoutRedirectValidator.permitAll());
+    this(NO_ALLOWLIST);
+    // JS-SEC-089 (CWE-601): a logout without a redirect allowlist is possible, never silent.
+    if (UNVALIDATED_REDIRECT_WARNED.compareAndSet(false, true)) {
+      UNVALIDATED_REDIRECT_WARNINGS.incrementAndGet();
+      HasLogger.staticLogger().warn("{}: RpInitiatedLogoutInitiator was built without a "
+          + "PostLogoutRedirectValidator; every post_logout_redirect_uri is refused until an "
+          + "allowlist is configured. Use new RpInitiatedLogoutInitiator("
+          + "PostLogoutRedirectValidator.allowOnly(...)) with the targets registered at the "
+          + "provider (AbstractOidcLogoutView.initiator(), OidcLogoutHandler with an initiator).",
+          UNVALIDATED_REDIRECT_WARNING);
+    }
   }
 
   /**
@@ -94,10 +143,17 @@ public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
       if (!redirectValidator.isAllowed(uri)) {
         // Refuse rather than drop it: a rejected URI means either an attack or a
         // misconfigured allowlist, and silently logging the user out to the
-        // provider's default page would hide both.
+        // provider's default page would hide both. A missing allowlist is the
+        // second case (JS-SEC-089). The target may come from the request and the
+        // message ends up in logs: java.net.URI admits format characters such as
+        // U+202E, so the text is scrubbed (CWE-117).
         throw new IllegalArgumentException(
-            "post_logout_redirect_uri is not allowed: " + uri
-                + " — add it to the validator's allowlist if this target is intended");
+            "post_logout_redirect_uri is not allowed: "
+                + LogFieldScrubber.scrubMessage(uri.toString())
+                + (redirectValidator == NO_ALLOWLIST
+                    ? " — no allowlist is configured; build the initiator with "
+                        + "PostLogoutRedirectValidator.allowOnly(...) if this target is intended"
+                    : " — add it to the validator's allowlist if this target is intended"));
       }
       append(query, "post_logout_redirect_uri", uri.toString());
     });
@@ -105,6 +161,21 @@ public final class RpInitiatedLogoutInitiator implements LogoutInitiator {
 
     String separator = endSessionEndpoint.getRawQuery() == null ? "?" : "&";
     return URI.create(endSessionEndpoint + separator + query);
+  }
+
+  /**
+   * Diagnostics hook: how often the {@value #UNVALIDATED_REDIRECT_WARNING} warning was written.
+   *
+   * @return the number of warnings since start-up or the last re-arm
+   */
+  static int unvalidatedRedirectWarnings() {
+    return UNVALIDATED_REDIRECT_WARNINGS.get();
+  }
+
+  /** Test hook: re-arms the one-time {@value #UNVALIDATED_REDIRECT_WARNING} warning. */
+  static void resetUnvalidatedRedirectWarning() {
+    UNVALIDATED_REDIRECT_WARNED.set(false);
+    UNVALIDATED_REDIRECT_WARNINGS.set(0);
   }
 
   private static void append(StringBuilder query, String key, String value) {

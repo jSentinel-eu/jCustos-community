@@ -23,6 +23,13 @@ import java.util.Set;
  * dependency on someone else's configuration into an explicit statement of
  * where logout may lead.
  *
+ * <p>JS-SEC-089 (CWE-601): since 00.84.00 an allowlist is the only intended
+ * way to permit a redirect. {@code RpInitiatedLogoutInitiator} without a
+ * validator refuses every {@code post_logout_redirect_uri}, and
+ * {@link #permitAll()} is deprecated. Name the targets with
+ * {@link #allowOnly(URI...)} - the same URIs you register for the client at
+ * the provider.
+ *
  * @since 00.82.00
  */
 @FunctionalInterface
@@ -35,15 +42,24 @@ public interface PostLogoutRedirectValidator {
   boolean isAllowed(URI candidate);
 
   /**
-   * Accepts every URI — the behaviour of releases before 00.82.00, kept as the
-   * default so existing callers are unaffected.
+   * Accepts every URI — the behaviour of releases before 00.82.00.
    *
-   * <p>Choose this only when the provider's registered-URI check is known to be
-   * strict, or when the redirect target is a constant in your own code rather
-   * than something derived from a request.
+   * <p>Until 00.84.00 this was the default of {@code RpInitiatedLogoutInitiator}
+   * and thereby of both OIDC logout adapters, so the only check of the
+   * redirect target was the provider's registered-URI comparison, which the
+   * relying party neither performs nor observes (JS-SEC-089, CWE-601). It is
+   * no longer used by default.
    *
    * @return a validator that permits anything
+   * @deprecated since 00.84.00: a validator that permits anything leaves the
+   *     redirect target to the provider's configuration. Name the targets
+   *     instead - a constant target is a one-element allowlist:
+   *     {@code new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(
+   *     URI.create("https://app.example/signed-out")))}. To send no
+   *     {@code post_logout_redirect_uri} at all, leave it out of the
+   *     {@code LogoutRequest}.
    */
+  @Deprecated(since = "00.84.00")
   static PostLogoutRedirectValidator permitAll() {
     return candidate -> true;
   }
@@ -90,7 +106,7 @@ public interface PostLogoutRedirectValidator {
     if (allowed.length == 0) {
       throw new IllegalArgumentException(
           "allowOnly requires at least one URI — an empty allowlist rejects every logout redirect; "
-              + "use permitAll() if that is what you mean");
+              + "to send no post_logout_redirect_uri, leave it out of the LogoutRequest");
     }
     Set<String> permitted = new LinkedHashSet<>();
     for (URI uri : allowed) {

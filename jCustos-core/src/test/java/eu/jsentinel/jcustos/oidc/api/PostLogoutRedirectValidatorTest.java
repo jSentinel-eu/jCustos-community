@@ -16,7 +16,9 @@
  */
 package eu.jsentinel.jcustos.oidc.api;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -158,9 +160,30 @@ class PostLogoutRedirectValidatorTest {
   }
 
   @Test
-  @DisplayName("permitAll stays the unrestricted validator (ER22 is a separate issue)")
+  @SuppressWarnings("deprecation")
+  @DisplayName("permitAll stays the unrestricted validator, now deprecated (JS-SEC-089)")
   void permitAllUnchanged() {
     assertTrue(PostLogoutRedirectValidator.permitAll()
         .isAllowed(URI.create("https://evil_site.attacker.test/bye")));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: permitAll is deprecated, so callers are told to name their targets")
+  void permitAllIsDeprecated() throws NoSuchMethodException {
+    Deprecated deprecated = PostLogoutRedirectValidator.class.getMethod("permitAll")
+        .getAnnotation(Deprecated.class);
+
+    assertNotNull(deprecated, "permitAll() must carry @Deprecated");
+    assertEquals("00.84.00", deprecated.since());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: the empty-allowlist message no longer recommends permitAll")
+  void emptyAllowlistMessagePointsAtTheRequest() {
+    IllegalArgumentException ex =
+        assertThrows(IllegalArgumentException.class, PostLogoutRedirectValidator::allowOnly);
+
+    assertFalse(ex.getMessage().contains("permitAll"), ex.getMessage());
+    assertTrue(ex.getMessage().contains("leave it out of the LogoutRequest"), ex.getMessage());
   }
 }

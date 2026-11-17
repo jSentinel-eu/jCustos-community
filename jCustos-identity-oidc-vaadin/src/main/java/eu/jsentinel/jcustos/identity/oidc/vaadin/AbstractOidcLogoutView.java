@@ -92,6 +92,14 @@ import java.util.Optional;
  * }</pre>
  * Without a valid token the view shows a confirmation button; its click is an ordinary
  * Vaadin RPC, which a foreign page cannot forge.
+ *
+ * <p><strong>Where the provider may send the user afterwards (JS-SEC-089, CWE-601).</strong>
+ * The view builds the end-session URL with {@link #initiator()}. Its default,
+ * {@code new RpInitiatedLogoutInitiator()}, has no allowlist and refuses every
+ * {@code post_logout_redirect_uri}; a view whose {@link #logoutRequest()} names one overrides
+ * {@link #initiator()} and lists the permitted targets. Until 00.84.00 the initiator was a
+ * private field that forwarded any target, so only the provider's registration stood between
+ * a request-derived target and an open redirect.
  */
 public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterObserver, HasLogger {
 
@@ -114,13 +122,41 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
 
   private static final SecureRandom RANDOM = new SecureRandom();
 
-  private final LogoutInitiator initiator = new RpInitiatedLogoutInitiator();
-
   /** @return the OP {@code end_session_endpoint} (from discovery / config). */
   protected abstract URI endSessionEndpoint();
 
-  /** @return the logout parameters (id_token_hint, post_logout_redirect_uri, state). */
+  /**
+   * @return the logout parameters (id_token_hint, post_logout_redirect_uri, state). A
+   *     {@code post_logout_redirect_uri} is sent only if {@link #initiator()} allows it.
+   */
   protected abstract LogoutRequest logoutRequest();
+
+  /**
+   * The initiator that turns {@link #endSessionEndpoint()} and {@link #logoutRequest()} into
+   * the provider's end-session URL (JS-SEC-089, CWE-601).
+   *
+   * <p>The default, {@code new RpInitiatedLogoutInitiator()}, has no allowlist: it refuses
+   * every {@code post_logout_redirect_uri} and logs {@code oidc/logout-redirect-unvalidated}
+   * once per JVM. A refused target is handled like any other failure of the computation - the
+   * local session ends and the browser goes to {@link #localLogoutTarget()}, so the provider's
+   * session is <em>not</em> ended. A view that sends a {@code post_logout_redirect_uri} names
+   * the permitted targets, usually the ones registered for the client at the provider:
+   * <pre>{@code
+   *   protected LogoutInitiator initiator() {
+   *     return new RpInitiatedLogoutInitiator(
+   *         PostLogoutRedirectValidator.allowOnly(URI.create("https://app.example/signed-out")));
+   *   }
+   * }</pre>
+   *
+   * @implSpec Called once per logout, inside the guarded computation of the redirect: a
+   *     {@code RuntimeException} or a {@code null} result leads to {@link #localLogoutTarget()}
+   *     like a refused target.
+   * @return the initiator for this logout; never {@code null}
+   * @since 00.84.00
+   */
+  protected LogoutInitiator initiator() {
+    return new RpInitiatedLogoutInitiator();
+  }
 
   /**
    * Additional teardown hook, run after the default local teardown of subject, token
@@ -257,6 +293,8 @@ public abstract class AbstractOidcLogoutView extends Div implements BeforeEnterO
     String redirect = null;
     try {
       // RF02: build the OP logout request while the subject is still bound.
+      // JS-SEC-089 (CWE-601): the initiator decides which post_logout_redirect_uri may be sent.
+      LogoutInitiator initiator = Objects.requireNonNull(initiator(), "initiator()");
       redirect = initiator.buildLogoutUri(endSessionEndpoint(), logoutRequest()).toString();
     } catch (RuntimeException redirectFailure) {
       logger().warn("OIDC logout: the end-session redirect could not be computed ({}). The local "

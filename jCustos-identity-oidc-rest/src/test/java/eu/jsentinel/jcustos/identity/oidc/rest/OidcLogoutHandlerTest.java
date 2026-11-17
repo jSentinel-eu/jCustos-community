@@ -23,12 +23,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.svenruppert.dependencies.core.net.HttpStatus;
+import eu.jsentinel.jcustos.identity.oidc.RpInitiatedLogoutInitiator;
+import eu.jsentinel.jcustos.oidc.api.LogoutRequest;
+import eu.jsentinel.jcustos.oidc.api.PostLogoutRedirectValidator;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -40,15 +44,19 @@ import org.junit.jupiter.params.provider.ValueSource;
 @DisplayName("OidcLogoutHandler (REST) — 302 redirect to the end_session endpoint, POST and same origin only")
 class OidcLogoutHandlerTest {
 
+  private static final URI END_SESSION = URI.create("https://idp.example/logout");
+  private static final URI POST_LOGOUT = URI.create("https://app.example/");
+
   private final AtomicInteger hintResolved = new AtomicInteger();
 
+  /** JS-SEC-089: the application names its post-logout target, as it has to since 00.84.00. */
   private OidcLogoutHandler handler() {
-    return new OidcLogoutHandler(
-        URI.create("https://idp.example/logout"),
+    return new OidcLogoutHandler(END_SESSION,
+        new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(POST_LOGOUT)),
         OidcLogoutHandler.hintFrom(req -> {
           hintResolved.incrementAndGet();
           return "ID-TOKEN";
-        }, URI.create("https://app.example/")));
+        }, POST_LOGOUT));
   }
 
   private static RestRequest request(String method, Map<String, String> headers) {
@@ -171,5 +179,48 @@ class OidcLogoutHandlerTest {
 
     assertThrows(IllegalArgumentException.class, () -> handler().withAllowedOrigins(Set.of()));
     assertThrows(IllegalArgumentException.class, () -> handler().withAllowedOrigins(Set.of("app.example")));
+  }
+
+  // ── JS-SEC-089 (CWE-601): no allowlist, no post-logout redirect ──
+
+  @Test
+  @DisplayName("JS-SEC-089: the two-argument constructor no longer forwards a post_logout_redirect_uri")
+  void twoArgumentConstructor_refusesTheRedirectTarget() {
+    OidcLogoutHandler handler = new OidcLogoutHandler(END_SESSION, OidcLogoutHandler.hintFrom(
+        req -> "ID-TOKEN", URI.create("https://attacker.example/harvest")));
+    CapturingResponse response = new CapturingResponse();
+
+    IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+        () -> handler.handle(request("POST", Map.of()), response),
+        "until 00.84.00 this constructor fell back to permitAll() without a word");
+
+    assertTrue(refused.getMessage().contains("no allowlist is configured"), refused.getMessage());
+    assertNull(response.headers.get("Location"), "no redirect to the provider with a foreign target");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: the two-argument constructor still logs out at the provider when no target is asked for")
+  void twoArgumentConstructor_logoutWithoutTarget() {
+    OidcLogoutHandler handler = new OidcLogoutHandler(END_SESSION,
+        OidcLogoutHandler.hintFrom(req -> "ID-TOKEN", null));
+
+    CapturingResponse response = handle(handler, "POST", Map.of());
+
+    assertEquals(HttpStatus.FOUND.code(), response.status);
+    assertEquals("https://idp.example/logout?id_token_hint=ID-TOKEN", response.headers.get("Location"));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: an injected allowlist forwards its own target and refuses a foreign one")
+  void injectedAllowlist_refusesAForeignTarget() {
+    OidcLogoutHandler handler = new OidcLogoutHandler(END_SESSION,
+        new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(POST_LOGOUT)),
+        request -> new LogoutRequest("ID-TOKEN",
+            Optional.of(URI.create("https://app.example.attacker.example/")), Optional.empty()));
+    CapturingResponse response = new CapturingResponse();
+
+    assertThrows(IllegalArgumentException.class,
+        () -> handler.handle(request("POST", Map.of()), response));
+    assertNull(response.headers.get("Location"));
   }
 }

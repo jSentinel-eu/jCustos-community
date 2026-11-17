@@ -44,6 +44,7 @@ package eu.jsentinel.jcustos.identity.oidc;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.jsentinel.jcustos.oidc.api.LogoutRequest;
+import eu.jsentinel.jcustos.oidc.api.PostLogoutRedirectValidator;
 
 import java.net.URI;
 import java.util.Optional;
@@ -54,7 +55,9 @@ import org.junit.jupiter.api.Test;
 @DisplayName("RpInitiatedLogoutInitiator — builds the end_session URL with encoded params")
 class RpInitiatedLogoutInitiatorTest {
 
-  private final RpInitiatedLogoutInitiator initiator = new RpInitiatedLogoutInitiator();
+  /** JS-SEC-089: a post_logout_redirect_uri is sent only when an allowlist names it. */
+  private final RpInitiatedLogoutInitiator initiator = new RpInitiatedLogoutInitiator(
+      PostLogoutRedirectValidator.allowOnly(URI.create("https://app.example/after")));
 
   @Test
   @DisplayName("includes id_token_hint, post_logout_redirect_uri and state, percent-encoded")

@@ -25,9 +25,12 @@ import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.authorization.vaadin.VaadinSessionSubjectStore;
 import eu.jsentinel.jcustos.credential.propagation.BearerToken;
 import eu.jsentinel.jcustos.credential.propagation.vaadin.VaadinSessionTokenCredentialStore;
+import eu.jsentinel.jcustos.identity.oidc.RpInitiatedLogoutInitiator;
 import eu.jsentinel.jcustos.logout.LogoutScope;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.oidc.api.LogoutInitiator;
 import eu.jsentinel.jcustos.oidc.api.LogoutRequest;
+import eu.jsentinel.jcustos.oidc.api.PostLogoutRedirectValidator;
 import eu.jsentinel.jcustos.session.JCustosVersion;
 import eu.jsentinel.jcustos.session.TimeoutSessionPolicy;
 import eu.jsentinel.jcustos.session.vaadin.VaadinJCustosVersionContext;
@@ -81,6 +84,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * snapshot. No mocking framework; the Vaadin service runs on the browserless servlet
  * stand-ins with plain {@link VaadinSession}s (the browserless session re-creates itself
  * when closed, which a servlet container does not do in the middle of a navigation).
+ * Section (d) covers JS-SEC-089 (CWE-601): the {@code post_logout_redirect_uri} is forwarded
+ * only when the view's {@code initiator()} allows it.
  */
 @DisplayName("JS-SEC-147 — the OIDC logout route redirects to the provider, always ends the local session, and is not triggered by navigation alone")
 class OidcLogoutViewTest {
@@ -112,6 +117,9 @@ class OidcLogoutViewTest {
     LogoutView.logoutRequest = () -> new LogoutRequest("ID-TOKEN", Optional.of(POST_LOGOUT), Optional.empty());
     LogoutView.beforeLogout = () -> { };
     LogoutView.localTarget = null;
+    // JS-SEC-089: the application names its post-logout target, as it has to since 00.84.00
+    LogoutView.initiator = () -> new RpInitiatedLogoutInitiator(
+        PostLogoutRedirectValidator.allowOnly(POST_LOGOUT));
 
     Routes routes = new Routes();
     routes.getRoutes().addAll(List.of(LogoutView.class, HomeView.class));
@@ -337,6 +345,68 @@ class OidcLogoutViewTest {
     }
   }
 
+  // ── (d) JS-SEC-089 (CWE-601): where the provider may send the user ──
+
+  @Test
+  @DisplayName("(d) JS-SEC-089: the default initiator does not forward a post_logout_redirect_uri - local logout, local target")
+  void defaultInitiator_refusesTheRedirectTarget() {
+    LogoutView.initiator = null; // the base class default
+    LogoutView.logoutRequest = () -> new LogoutRequest("ID-TOKEN",
+        Optional.of(URI.create("https://attacker.example/harvest")), Optional.empty());
+
+    ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+
+    assertLoggedOutLocally();
+    assertEquals("/login", redirectLocation(),
+        "until 00.84.00 the browser was sent to the provider with the foreign target attached");
+  }
+
+  @Test
+  @DisplayName("(d) JS-SEC-089: the default initiator has no allowlist - even the application's own target is not forwarded")
+  void defaultInitiator_refusesEveryTargetUntilAnAllowlistIsSet() {
+    LogoutView.initiator = null;
+
+    ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+
+    assertLoggedOutLocally();
+    assertEquals("/login", redirectLocation(), "no allowlist, no post-logout redirect");
+  }
+
+  @Test
+  @DisplayName("(d) JS-SEC-089: the default initiator still reaches the provider for a logout without a target")
+  void defaultInitiator_logoutWithoutTargetReachesTheProvider() {
+    LogoutView.initiator = null;
+    LogoutView.logoutRequest = () -> new LogoutRequest("ID-TOKEN", Optional.empty(), Optional.empty());
+
+    ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+
+    assertLoggedOutLocally();
+    assertEquals(END_SESSION + "?id_token_hint=ID-TOKEN", redirectLocation());
+  }
+
+  @Test
+  @DisplayName("(d) JS-SEC-089: a subclass with allowOnly(...) forwards its own target and refuses a foreign one")
+  void allowlistSubclass_refusesAForeignTarget() {
+    LogoutView.logoutRequest = () -> new LogoutRequest("ID-TOKEN",
+        Optional.of(URI.create("https://app.example.attacker.example/")), Optional.empty());
+
+    ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+
+    assertLoggedOutLocally();
+    assertEquals("/login", redirectLocation(), "a look-alike of the allowed host is not forwarded");
+  }
+
+  @Test
+  @DisplayName("(d) JS-SEC-089: an initiator() that returns null or throws ends in the local target")
+  void brokenInitiatorHook_stillLogsOut() {
+    LogoutView.initiator = () -> null;
+
+    ui.navigate(AbstractOidcLogoutView.logoutLocation(LogoutView.class));
+
+    assertLoggedOutLocally();
+    assertEquals("/login", redirectLocation());
+  }
+
   // ── helpers ────────────────────────────────────────────────────
 
   private void assertLoggedOutLocally() {
@@ -383,6 +453,8 @@ class OidcLogoutViewTest {
     static Supplier<LogoutRequest> logoutRequest;
     static Runnable beforeLogout;
     static String localTarget;
+    /** {@code null}: the base class default. */
+    static Supplier<LogoutInitiator> initiator;
 
     @Override protected URI endSessionEndpoint() {
       return endSessionEndpoint.get();
@@ -398,6 +470,10 @@ class OidcLogoutViewTest {
 
     @Override protected String localLogoutTarget() {
       return localTarget != null ? localTarget : super.localLogoutTarget();
+    }
+
+    @Override protected LogoutInitiator initiator() {
+      return initiator != null ? initiator.get() : super.initiator();
     }
   }
 

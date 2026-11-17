@@ -116,14 +116,79 @@ class RpInitiatedLogoutRedirectValidationTest {
         "neither carries authority over where the browser goes");
   }
 
+  // ── JS-SEC-089 (CWE-601): no allowlist, no redirect ─────────────
+
   @Test
-  @DisplayName("without a validator the pre-00.82 behaviour is unchanged")
-  void defaultConstructorForwardsAnything() {
+  @DisplayName("JS-SEC-089: without a validator a foreign target is refused, not forwarded")
+  void defaultConstructorRefusesAForeignTarget() {
     RpInitiatedLogoutInitiator initiator = new RpInitiatedLogoutInitiator();
 
-    assertDoesNotThrow(() -> initiator.buildLogoutUri(END_SESSION,
-            logoutTo(URI.create("https://anywhere.test/x"))),
-        "existing callers must not break on upgrade");
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        () -> initiator.buildLogoutUri(END_SESSION,
+            logoutTo(URI.create("https://attacker.test/harvest"))),
+        "until 00.84.00 the no-argument constructor forwarded any target (open redirect)");
+
+    assertTrue(ex.getMessage().contains("attacker.test"), ex.getMessage());
+    assertTrue(ex.getMessage().contains("no allowlist is configured"),
+        "the message should name the missing allowlist, was: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: without a validator even the application's own target is refused until it is allowed")
+  void defaultConstructorRefusesEveryTargetUntilAnAllowlistIsSet() {
+    assertThrows(IllegalArgumentException.class,
+        () -> new RpInitiatedLogoutInitiator().buildLogoutUri(END_SESSION, logoutTo(ALLOWED)),
+        "there is no same-origin rule to fall back to: the initiator does not know the origin");
+
+    RpInitiatedLogoutInitiator withAllowlist =
+        new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(ALLOWED));
+    assertTrue(withAllowlist.buildLogoutUri(END_SESSION, logoutTo(ALLOWED)).toString()
+        .contains("post_logout_redirect_uri="), "the allowlist is what opens the target");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: without a validator a logout without a redirect target still reaches the provider")
+  void defaultConstructorBuildsALogoutWithoutTarget() {
+    URI logoutUri = assertDoesNotThrow(() -> new RpInitiatedLogoutInitiator().buildLogoutUri(
+        END_SESSION, new LogoutRequest("hint", Optional.empty(), Optional.of("st"))));
+
+    assertEquals("https://op.example.test/logout?id_token_hint=hint&state=st", logoutUri.toString());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089 (CWE-117): the refusal names the target without the format characters java.net.URI admits")
+  void refusalMessageIsScrubbed() {
+    URI reordering = URI.create("https://attacker.test/\u202Etxt.exe");
+
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        () -> new RpInitiatedLogoutInitiator().buildLogoutUri(END_SESSION, logoutTo(reordering)));
+
+    assertFalse(ex.getMessage().contains("\u202E"), "a right-to-left override would reorder the log line");
+    assertTrue(ex.getMessage().contains("https://attacker.test/?txt.exe"), ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-089: default construction writes exactly one oidc/logout-redirect-unvalidated warning")
+  void defaultConstructionWarnsExactlyOnce() {
+    RpInitiatedLogoutInitiator.resetUnvalidatedRedirectWarning();
+    try {
+      new RpInitiatedLogoutInitiator(PostLogoutRedirectValidator.allowOnly(ALLOWED));
+      assertEquals(0, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
+          "an initiator with an allowlist does not warn");
+
+      new RpInitiatedLogoutInitiator();
+      assertEquals(1, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
+          "the missing allowlist is announced");
+
+      new RpInitiatedLogoutInitiator();
+      new RpInitiatedLogoutInitiator();
+      assertEquals(1, RpInitiatedLogoutInitiator.unvalidatedRedirectWarnings(),
+          "once per JVM - a view builds an initiator per logout");
+      assertEquals("oidc/logout-redirect-unvalidated",
+          RpInitiatedLogoutInitiator.UNVALIDATED_REDIRECT_WARNING);
+    } finally {
+      RpInitiatedLogoutInitiator.resetUnvalidatedRedirectWarning();
+    }
   }
 
   @Test
@@ -132,7 +197,7 @@ class RpInitiatedLogoutRedirectValidationTest {
     IllegalArgumentException ex =
         assertThrows(IllegalArgumentException.class, PostLogoutRedirectValidator::allowOnly);
 
-    assertTrue(ex.getMessage().contains("permitAll"),
+    assertTrue(ex.getMessage().contains("LogoutRequest"),
         "the message should point at the intended alternative, was: " + ex.getMessage());
   }
 
