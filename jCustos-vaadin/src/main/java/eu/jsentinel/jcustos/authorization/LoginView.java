@@ -18,8 +18,8 @@ package eu.jsentinel.jcustos.authorization;
 
 import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.LoginFailed;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
@@ -423,15 +423,14 @@ public abstract class LoginView
     }
   }
 
-  /** Removes the subject and the token credential bound to the current session or thread. */
+  /**
+   * Removes the subject and the token credential bound to the current session or thread.
+   * JS-SEC-097 (CWE-1041): the subject goes through {@link CurrentSubject#clear()}, which
+   * never throws and logs a failed removal; the token credential is cleared even when the
+   * subject could not be removed.
+   */
   private static void clearBoundIdentity() {
-    Class<?> subjectType = JCustosServiceResolver
-        .<Object, Object>authenticationService()
-        .subjectType();
-    if (subjectType != null) {
-      SubjectStores.findSubjectStore()
-          .ifPresent(store -> store.deleteCurrentSubject(subjectType));
-    }
+    CurrentSubject.clear();
     JCustosServiceResolver.findTokenCredentialStore().ifPresent(TokenCredentialStore::clear);
   }
 
@@ -527,7 +526,8 @@ public abstract class LoginView
   // Package-private for direct testing of the id-derivation (R14): the
   // security-relevant logic — never leak subject.toString() into the audit
   // channel — lives in LoginSessionRotation since 00.84.00 and stays reachable
-  // here for the existing tests.
+  // here for the existing tests. JS-SEC-097: the rule is CurrentSubject.subjectIdOf -
+  // the SubjectIdResolver, otherwise the identity handle; empty only without a subject.
   static String subjectIdOf(SessionContext<Object> context) {
     return LoginSessionRotation.subjectIdOf(context);
   }
