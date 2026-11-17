@@ -10,6 +10,7 @@
  */
 package eu.jsentinel.jcustos.autoservice.processor;
 
+import javax.annotation.processing.Processor;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.FileObject;
@@ -74,6 +75,16 @@ final class InMemoryCompiler {
    */
   static Result compile(Map<String, String> sources, Map<String, byte[]> seedResources)
       throws IOException {
+    return compile(sources, seedResources, List.of());
+  }
+
+  /**
+   * Compiles {@code sources} with the processor under test followed by
+   * {@code otherProcessors}, in that order — used to observe what the processor
+   * leaves to the processors after it.
+   */
+  static Result compile(Map<String, String> sources, Map<String, byte[]> seedResources,
+                        List<Processor> otherProcessors) throws IOException {
     JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
     DiagnosticCollector<JavaFileObject> collector = new DiagnosticCollector<>();
     StandardJavaFileManager std = javac.getStandardFileManager(collector, null, StandardCharsets.UTF_8);
@@ -88,7 +99,10 @@ final class InMemoryCompiler {
 
     JavaCompiler.CompilationTask task = javac.getTask(
         null, fm, collector, List.of("-proc:full"), null, compilationUnits);
-    task.setProcessors(List.of(new JCustosAutoServiceProcessor()));
+    List<Processor> processors = new ArrayList<>();
+    processors.add(new JCustosAutoServiceProcessor());
+    processors.addAll(otherProcessors);
+    task.setProcessors(processors);
     boolean ok = task.call();
     fm.close();
     return new Result(ok, collector.getDiagnostics(), resources);
@@ -111,10 +125,24 @@ final class InMemoryCompiler {
   private static final class CapturingFileManager
       extends ForwardingJavaFileManager<StandardJavaFileManager> {
     private final Map<String, byte[]> resources;
+    private final Map<String, byte[]> classFiles = new LinkedHashMap<>();
 
     CapturingFileManager(StandardJavaFileManager delegate, Map<String, byte[]> resources) {
       super(delegate);
       this.resources = resources;
+    }
+
+    // Class files stay in memory too: without a class output the standard file
+    // manager writes them into the working directory, the module's root.
+    @Override
+    public JavaFileObject getJavaFileForOutput(Location location, String className,
+                                               JavaFileObject.Kind kind, FileObject sibling)
+        throws IOException {
+      if (location == StandardLocation.CLASS_OUTPUT) {
+        return new CapturingFileObject(className.replace('.', '/') + kind.extension, kind,
+            classFiles);
+      }
+      return super.getJavaFileForOutput(location, className, kind, sibling);
     }
 
     @Override
@@ -151,7 +179,11 @@ final class InMemoryCompiler {
     private final Map<String, byte[]> resources;
 
     CapturingFileObject(String path, Map<String, byte[]> resources) {
-      super(URI.create("mem:///" + path), Kind.OTHER);
+      this(path, Kind.OTHER, resources);
+    }
+
+    CapturingFileObject(String path, Kind kind, Map<String, byte[]> resources) {
+      super(URI.create("mem:///" + path), kind);
       this.path = path;
       this.resources = resources;
     }

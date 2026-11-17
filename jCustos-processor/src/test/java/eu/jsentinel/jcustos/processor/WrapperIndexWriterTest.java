@@ -16,13 +16,20 @@ import com.google.testing.compile.JavaFileObjects;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import javax.annotation.processing.AbstractProcessor;
+import javax.annotation.processing.RoundEnvironment;
+import javax.annotation.processing.SupportedAnnotationTypes;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.TypeElement;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardLocation;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.google.testing.compile.CompilationSubject.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -86,9 +93,12 @@ class WrapperIndexWriterTest {
   void indexNamesTheProxyBuilderVersionOfTheBuild() {
     assertNotNull(POM_PROXYBUILDER_VERSION,
         "run through Maven: Surefire passes the POM property jcustos.test.proxybuilder.version");
-    assertEquals(POM_PROXYBUILDER_VERSION, VERSION,
+    // Read here, not only through the static field: the field is evaluated once per JVM,
+    // so a change to proxyBuilderVersion() would not show in it.
+    String version = SecuredAnnotationProcessor.proxyBuilderVersion();
+    assertEquals(POM_PROXYBUILDER_VERSION, version,
         "the index must carry the proxybuilder version jCustos-processor is built with");
-    assertFalse(SecuredAnnotationProcessor.UNKNOWN_PROXYBUILDER_VERSION.equals(VERSION));
+    assertFalse(SecuredAnnotationProcessor.UNKNOWN_PROXYBUILDER_VERSION.equals(version));
   }
 
   @Test
@@ -279,7 +289,72 @@ class WrapperIndexWriterTest {
         dataRows(readIndex(result)));
   }
 
+  @Test
+  @DisplayName("a native restriction on the @Secured class itself guards, and indexes, every method it declares")
+  void classLevelNativeRestrictionIndexesEveryMethod() throws IOException {
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.AdminOnly",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresRole;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "@Secured @RequiresRole(\"ADMIN\") public class AdminOnly {",
+        "  public void purge() {}",
+        "  public void list() {}",
+        "}");
+
+    Compilation result = compile(source);
+    assertThat(result).succeeded();
+    List<String> rows = dataRows(readIndex(result));
+    assertEquals(1, rows.size(), rows.toString());
+    String[] fields = rows.get(0).split(":", 6);
+    assertEquals("demo.AdminOnly", fields[0]);
+    assertEquals(Set.of("purge", "list"), Set.of(fields[4].split(",")),
+        "both methods are guarded by the class-level @RequiresRole: " + rows);
+  }
+
+  @Test
+  @DisplayName("the processor claims @Secured: a later processor for the same annotation is not handed it")
+  void securedIsClaimed() {
+    List<String> seen = new ArrayList<>();
+    JavaFileObject source = JavaFileObjects.forSourceLines(
+        "demo.Claimed",
+        "package demo;",
+        "import eu.jsentinel.jcustos.authorization.annotations.Secured;",
+        "import eu.jsentinel.jcustos.authorization.annotations.RequiresPermission;",
+        "@Secured public class Claimed {",
+        "  @RequiresPermission(\"c:do\") public void doIt() {}",
+        "}");
+
+    Compilation result = Compiler.javac()
+        .withProcessors(new SecuredAnnotationProcessor(), new RecordingProcessor(seen))
+        .compile(source);
+
+    assertThat(result).succeeded();
+    assertTrue(seen.isEmpty(), "a claimed annotation is not passed on, got " + seen);
+  }
+
   // ── helpers ──────────────────────────────────────────────────────
+
+  /** A later processor for {@code @Secured}; records every annotation it is handed. */
+  @SupportedAnnotationTypes("eu.jsentinel.jcustos.authorization.annotations.Secured")
+  private static final class RecordingProcessor extends AbstractProcessor {
+    private final List<String> seen;
+
+    private RecordingProcessor(List<String> seen) {
+      this.seen = seen;
+    }
+
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      annotations.forEach(a -> seen.add(a.getQualifiedName().toString()));
+      return false;
+    }
+  }
 
   private static String readIndex(Compilation compilation) throws IOException {
     Optional<JavaFileObject> opt = compilation.generatedFile(
