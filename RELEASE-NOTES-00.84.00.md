@@ -1,12 +1,17 @@
 # jCustos V00.84.00 — own your security decisions
 
-**Theme:** (to be written at release close — the window combines the requirements R1–R9
-from aligning the Vaadin Create 2026 talk with the source, the credential-hardening
-backlog, and the findings of the first full entry review over both editions.)
+**Theme:** own your security decisions. 00.84.00 is the hardening release of the year: it
+closes the findings of the security analysis of 10 November 2026 (SA01–SA61, with the exit
+review XR01–XR21) and of the first full entry review over both editions (ER01–ER31), and it
+delivers the requirements R1–R9 that came out of aligning the Vaadin Create 2026 talk with the
+source, together with the credential-hardening backlog. One line runs through all of it: a
+default fails closed, a security rule has exactly one definition, and whatever a deployment has
+to decide for itself — a subject-id resolver, its trusted proxies, a pepper, an origin guard, a
+shared store for several nodes — is named, reported when the application starts and documented.
 
-This file grows with the window; every change cites its JS-SEC identifier and CWE where
-one applies, and its tracker reference (R<n> for the requirements, ER<nn> for the
-entry-review findings).
+Every section cites its JS-SEC identifier and CWE where one applies, and its tracker reference
+(R<n> for the requirements, ER<nn> for the entry-review findings, SA<nn> and XR<nn> for the
+security analysis and its exit review).
 
 ## Vaadin platform 25.3.3 (R6, release hygiene)
 
