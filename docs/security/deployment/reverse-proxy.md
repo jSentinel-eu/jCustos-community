@@ -192,6 +192,9 @@ curl -H 'Authorization: Bearer a' -H 'Authorization: Bearer b' https://app.examp
 
 ## Related
 
+- [reverse-proxy-embedded-jetty.md](reverse-proxy-embedded-jetty.md) — embedded Jetty 12 behind the
+  proxy: session cookie attributes, server banner, `@ClientCallable`, request id, address limit,
+  origin guard.
 - `FEATURES.md` — SPI table entry `ClientAddressResolver`.
 - `RELEASE-NOTES-00.84.00.md` — section "Client address behind a reverse proxy
   (R2, JS-SEC-061, CWE-348)".
