@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Contract every {@link LoginAttemptStore} implementation must
@@ -42,6 +43,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * implements them atomically. What only an atomic implementation can
  * promise — reservations, the window, parallel requests — is in
  * {@link AtomicLoginAttemptStoreContract}.
+ *
+ * <p>Address keys (JS-SEC-062): {@code StoreBackedLoginAttemptPolicy} counts
+ * the failures of a client address on {@link LoginAttemptKey#forAddress}, an
+ * ordinary key with a reserved user id, under limits of their own. A store
+ * keeps such a key like any other; the tests below check the round trip,
+ * the independence from account keys and - for an atomic store - the
+ * reservation.
  */
 @DisplayName("LoginAttemptStore — contract")
 public interface LoginAttemptStoreContract {
@@ -251,5 +259,98 @@ public interface LoginAttemptStoreContract {
     assertThrows(NullPointerException.class, () -> store.completeSuccess(k, t, null));
     assertThrows(NullPointerException.class, () -> store.abandonAttempt(null, t));
     assertThrows(NullPointerException.class, () -> store.abandonAttempt(k, null));
+  }
+
+  // ── address keys (JS-SEC-062, since 00.84.00) ──────────────────────
+
+  /**
+   * Limits of the address-key tests: 5 failures, 1 h window, 30 min lockout,
+   * 30 s reservation - deliberately different from {@link #limits()}.
+   *
+   * @return the address limits
+   */
+  default AttemptLimits addressLimits() {
+    return new AttemptLimits(5, Duration.ofHours(1), Duration.ofMinutes(30),
+        Duration.ofSeconds(30));
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: an address key round-trips and is independent of the account keys on the same address")
+  default void addressKeyRoundTrip() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptKey address = LoginAttemptKey.forAddress(TenantId.DEFAULT, "1.1.1.1");
+    LoginAttemptKey account = key("alice", "1.1.1.1");
+
+    assertTrue(address.addressScoped());
+    assertFalse(account.addressScoped());
+    store.recordFailure(address, t0);
+    store.recordFailure(address, t0.plusSeconds(5));
+    store.recordFailure(account, t0);
+
+    assertEquals(2, store.failureCount(address));
+    assertEquals(Optional.of(t0.plusSeconds(5)), store.lastFailureAt(address));
+    assertEquals(1, store.failureCount(account), "the account key on the same address is separate");
+    assertEquals(0, store.failureCount(LoginAttemptKey.forAddress(TenantId.DEFAULT, "2.2.2.2")));
+    assertEquals(0, store.failureCount(LoginAttemptKey.forAddress(new TenantId("acme"), "1.1.1.1")),
+        "the tenant is part of the address key");
+
+    store.reset(address);
+    assertEquals(0, store.failureCount(address));
+    assertTrue(store.lastFailureAt(address).isEmpty());
+    assertEquals(1, store.failureCount(account), "resetting the address leaves the account alone");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: an address key locks at its own threshold while account keys keep theirs")
+  default void addressKeyLocksWithItsOwnLimits() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptKey address = LoginAttemptKey.forAddress(TenantId.DEFAULT, "1.1.1.1");
+    AttemptLimits accountLimits = limits();
+    AttemptLimits addressLimits = addressLimits();
+
+    // a spray: one failure on each of five accounts, every one also counted on the address
+    for (int i = 0; i < addressLimits.failureThreshold(); i++) {
+      Instant at = t0.plusSeconds(i);
+      LoginAttemptKey account = key("user-" + i, "1.1.1.1");
+      assertFalse(store.tryBeginAttempt(account, at, accountLimits).blocked());
+      assertFalse(store.tryBeginAttempt(address, at, addressLimits).blocked(), "attempt " + (i + 1));
+      assertFalse(store.completeFailure(account, at, accountLimits).blocked(),
+          "one failure does not lock an account");
+      AttemptStatus status = store.completeFailure(address, at, addressLimits);
+      assertEquals(i + 1 == addressLimits.failureThreshold(), status.blocked(), "failure " + (i + 1));
+    }
+
+    Instant last = t0.plusSeconds(addressLimits.failureThreshold() - 1L);
+    AttemptStatus refused = store.tryBeginAttempt(address, last.plusSeconds(60), addressLimits);
+    assertTrue(refused.blocked(), "the address is locked");
+    assertEquals(Optional.of(last.plus(addressLimits.lockout())), refused.blockedUntil(),
+        "with the address lockout, not with the account lockout");
+    assertFalse(store.tryBeginAttempt(key("user-0", "1.1.1.1"), last.plusSeconds(60), accountLimits)
+        .blocked(), "the sprayed accounts themselves are not locked");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: an admitted attempt on an address key is a reservation; abandon gives it back and counts nothing")
+  default void addressKeyReservation() {
+    assumeTrue(this instanceof AtomicLoginAttemptStoreContract,
+        "only an atomic store reserves attempts");
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptKey address = LoginAttemptKey.forAddress(TenantId.DEFAULT, "1.1.1.1");
+    AttemptLimits limits = addressLimits();
+
+    for (int i = 0; i < limits.failureThreshold(); i++) {
+      assertFalse(store.tryBeginAttempt(address, t0, limits).blocked(), "attempt " + (i + 1));
+    }
+    AttemptStatus saturated = store.tryBeginAttempt(address, t0, limits);
+    assertTrue(saturated.blocked(), "the threshold is in flight on the address");
+    assertEquals(Optional.of(t0.plus(limits.reservationTtl())), saturated.blockedUntil());
+
+    store.abandonAttempt(address, t0.plusSeconds(1));
+    assertFalse(store.tryBeginAttempt(address, t0.plusSeconds(1), limits).blocked(),
+        "an abandoned attempt frees its slot");
+    assertEquals(0, store.failureCount(address), "and counts nothing");
   }
 }

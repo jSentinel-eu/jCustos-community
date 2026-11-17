@@ -14,6 +14,7 @@ import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
+import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException;
 import eu.jsentinel.jcustos.logout.LogoutScope;
@@ -26,6 +27,7 @@ import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
 import eu.jsentinel.jcustos.rest.BearerTokenExtractor;
 import eu.jsentinel.jcustos.rest.RestClientAddress;
 import eu.jsentinel.jcustos.rest.RestRequest;
+import eu.jsentinel.jcustos.rest.RestThrottleResponses;
 import eu.jsentinel.jcustos.session.JCustosVersion;
 import eu.jsentinel.jcustos.session.JCustosVersionKey;
 import eu.jsentinel.jcustos.session.SessionId;
@@ -67,7 +69,10 @@ import java.util.Optional;
  * caps password spraying across many names; a failed login is audited
  * as {@code LoginFailed} (by the policy's {@code recordFailure}, and here
  * for a login refused after the check); a verification shed under load is
- * "try again later" (503), not a wrong password (JS-SEC-126).
+ * "try again later" (503), not a wrong password (JS-SEC-126). The password
+ * check runs inside the policy's credential-check gate (JS-SEC-063); an
+ * attempt the gate defers is given back and answered like a lockout, with
+ * 429 and the {@code Retry-After} of {@link RestThrottleResponses}.
  */
 public final class AuthHandler {
 
@@ -110,25 +115,38 @@ public final class AuthHandler {
 
     LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
     LoginAttemptContext attempt = LoginAttemptContext.now(username, clientAddress, null);
+    CredentialCheckGate gate = policy.credentialCheckGate();
     if (policy.beforeAttempt(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
       tooManyRequests(exchange, lockout.remaining());
       return;
     }
 
+    // JS-SEC-063: at most maxConcurrentCredentialChecks password checks run at once
+    CredentialCheckGate.Admission.Entered permit;
+    switch (gate.enter()) {
+      case CredentialCheckGate.Admission.Deferred deferred -> {
+        policy.abandonAttempt(attempt);
+        tooManyRequests(exchange, deferred.retryAfter());
+        return;
+      }
+      case CredentialCheckGate.Admission.Entered entered -> permit = entered;
+    }
     Optional<User> user;
     try {
       user = UserDirectoryProvider.directory().findByCredentials(new Credentials(username, password));
     } catch (CredentialVerificationUnavailableException shed) {
       // JS-SEC-126: no verdict - give the attempt back, count nothing, audit no failure.
       policy.abandonAttempt(attempt);
-      exchange.getResponseHeaders().set("Retry-After",
-          Long.toString(VERIFICATION_RETRY_AFTER.toSeconds()));
+      exchange.getResponseHeaders().set(RestThrottleResponses.RETRY_AFTER,
+          RestThrottleResponses.retryAfterValue(VERIFICATION_RETRY_AFTER));
       Router.respondJson(exchange, HttpStatus.SERVICE_UNAVAILABLE.code(),
           Json.encode(Map.of("error", "temporarily unavailable, try again later")));
       return;
     } catch (RuntimeException failure) {
       policy.abandonAttempt(attempt);
       throw failure;
+    } finally {
+      permit.close();
     }
 
     if (user.isEmpty()) {
@@ -203,8 +221,9 @@ public final class AuthHandler {
   }
 
   private static void tooManyRequests(HttpExchange exchange, Duration retryAfter) throws IOException {
-    exchange.getResponseHeaders().set("Retry-After",
-        Long.toString(Math.max(1L, retryAfter.toSeconds())));
+    // whole seconds rounded up, at least one - the client is not sent back before the limit lifts
+    exchange.getResponseHeaders().set(RestThrottleResponses.RETRY_AFTER,
+        RestThrottleResponses.retryAfterValue(retryAfter));
     Router.respondJson(exchange, HttpStatus.TOO_MANY_REQUESTS.code(),
         Json.encode(Map.of("error", "too many attempts, try again later")));
   }

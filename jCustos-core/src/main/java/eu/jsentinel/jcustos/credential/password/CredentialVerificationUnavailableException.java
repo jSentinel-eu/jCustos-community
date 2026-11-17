@@ -51,10 +51,15 @@ import eu.jsentinel.jcustos.credential.PublicFailureType;
  * <p>The message never says which account was involved or why the
  * verification was shed.</p>
  *
+ * <p>Not final: {@code StandaloneLoginFlow} throws the subclass
+ * {@code CredentialCheckDeferredException}, which adds the retry-after of a
+ * credential check its gate deferred (JS-SEC-063), so that every existing
+ * {@code catch} of this exception covers the deferral as well.</p>
+ *
  * @since 00.84.00
  */
 @ExperimentalJCustosApi
-public final class CredentialVerificationUnavailableException extends RuntimeException {
+public class CredentialVerificationUnavailableException extends RuntimeException {
 
   /** Creates the exception with its fixed, non-revealing message. */
   public CredentialVerificationUnavailableException() {

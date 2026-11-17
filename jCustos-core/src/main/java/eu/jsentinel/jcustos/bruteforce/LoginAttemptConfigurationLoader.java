@@ -46,6 +46,36 @@ import java.util.function.Function;
  *       <td>{@code SECURITY_LOGIN_ATTEMPTS_MAX_LOCKOUT}</td></tr>
  * </table>
  *
+ * <h2>Keys of {@link #loadLimits()} (since 00.84.00)</h2>
+ * <table>
+ *   <caption>Additional keys of the login endpoint (JS-SEC-062, JS-SEC-063)</caption>
+ *   <tr><th>System property</th><th>Environment variable</th><th>Default</th></tr>
+ *   <tr><td>{@code security.login.attempts.address.threshold}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_ADDRESS_THRESHOLD}</td>
+ *       <td>not set - no address counter</td></tr>
+ *   <tr><td>{@code security.login.attempts.address.window}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_ADDRESS_WINDOW}</td>
+ *       <td>the account window</td></tr>
+ *   <tr><td>{@code security.login.attempts.address.initial-lockout}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_ADDRESS_INITIAL_LOCKOUT}</td>
+ *       <td>the account initial lockout</td></tr>
+ *   <tr><td>{@code security.login.attempts.address.max-lockout}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_ADDRESS_MAX_LOCKOUT}</td>
+ *       <td>the larger of the account maximum and the address initial lockout</td></tr>
+ *   <tr><td>{@code security.login.attempts.max-concurrent-checks}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_MAX_CONCURRENT_CHECKS}</td>
+ *       <td>{@code 0} - unbounded</td></tr>
+ *   <tr><td>{@code security.login.attempts.gate-wait}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_GATE_WAIT}</td>
+ *       <td>{@code PT0.25S}</td></tr>
+ *   <tr><td>{@code security.login.attempts.gate-retry-after}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_GATE_RETRY_AFTER}</td>
+ *       <td>{@code PT1S}</td></tr>
+ * </table>
+ *
+ * <p>The address counter is switched on by its threshold. An address window or lockout without
+ * a threshold is refused - it would look like a configured counter that does not exist.
+ *
  * <p>Duration values are parsed as ISO-8601 (e.g. {@code PT5M},
  * {@code PT1H}). The {@link #forBootstrap()} variant uses
  * {@code security.bootstrap.attempts.*} prefixes so the bootstrap
@@ -72,6 +102,26 @@ public final class LoginAttemptConfigurationLoader {
   public static final String BOOTSTRAP_INITIAL_LOCKOUT_ENV = "SECURITY_BOOTSTRAP_ATTEMPTS_INITIAL_LOCKOUT";
   public static final String BOOTSTRAP_MAX_LOCKOUT_PROPERTY = "security.bootstrap.attempts.max-lockout";
   public static final String BOOTSTRAP_MAX_LOCKOUT_ENV = "SECURITY_BOOTSTRAP_ATTEMPTS_MAX_LOCKOUT";
+
+  public static final String LOGIN_ADDRESS_THRESHOLD_PROPERTY = "security.login.attempts.address.threshold";
+  public static final String LOGIN_ADDRESS_THRESHOLD_ENV = "SECURITY_LOGIN_ATTEMPTS_ADDRESS_THRESHOLD";
+  public static final String LOGIN_ADDRESS_WINDOW_PROPERTY = "security.login.attempts.address.window";
+  public static final String LOGIN_ADDRESS_WINDOW_ENV = "SECURITY_LOGIN_ATTEMPTS_ADDRESS_WINDOW";
+  public static final String LOGIN_ADDRESS_INITIAL_LOCKOUT_PROPERTY =
+      "security.login.attempts.address.initial-lockout";
+  public static final String LOGIN_ADDRESS_INITIAL_LOCKOUT_ENV =
+      "SECURITY_LOGIN_ATTEMPTS_ADDRESS_INITIAL_LOCKOUT";
+  public static final String LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY =
+      "security.login.attempts.address.max-lockout";
+  public static final String LOGIN_ADDRESS_MAX_LOCKOUT_ENV = "SECURITY_LOGIN_ATTEMPTS_ADDRESS_MAX_LOCKOUT";
+  public static final String LOGIN_MAX_CONCURRENT_CHECKS_PROPERTY =
+      "security.login.attempts.max-concurrent-checks";
+  public static final String LOGIN_MAX_CONCURRENT_CHECKS_ENV =
+      "SECURITY_LOGIN_ATTEMPTS_MAX_CONCURRENT_CHECKS";
+  public static final String LOGIN_GATE_WAIT_PROPERTY = "security.login.attempts.gate-wait";
+  public static final String LOGIN_GATE_WAIT_ENV = "SECURITY_LOGIN_ATTEMPTS_GATE_WAIT";
+  public static final String LOGIN_GATE_RETRY_AFTER_PROPERTY = "security.login.attempts.gate-retry-after";
+  public static final String LOGIN_GATE_RETRY_AFTER_ENV = "SECURITY_LOGIN_ATTEMPTS_GATE_RETRY_AFTER";
 
   private final Function<String, String> sysprop;
   private final Function<String, String> env;
@@ -122,6 +172,103 @@ public final class LoginAttemptConfigurationLoader {
         BOOTSTRAP_WINDOW_PROPERTY, BOOTSTRAP_WINDOW_ENV,
         BOOTSTRAP_INITIAL_LOCKOUT_PROPERTY, BOOTSTRAP_INITIAL_LOCKOUT_ENV,
         BOOTSTRAP_MAX_LOCKOUT_PROPERTY, BOOTSTRAP_MAX_LOCKOUT_ENV);
+  }
+
+  /**
+   * Loads the complete limits of the standard login endpoint (JS-SEC-062, JS-SEC-063): the
+   * account thresholds of {@link #forLogin()}, the address counter and the bound on concurrent
+   * credential checks. Without any of the additional keys the result equals
+   * {@code LoginAttemptLimits.of(forLogin())} - no address counter, no bound.
+   *
+   * @return the limits
+   * @throws IllegalArgumentException when a value is invalid, or an address key other than the
+   *                                  threshold is set without the threshold
+   * @since 00.84.00
+   */
+  public LoginAttemptLimits loadLimits() {
+    LoginAttemptConfiguration perAccount = forLogin();
+    LoginAttemptLimits limits = LoginAttemptLimits.of(perAccount);
+
+    String threshold = value(LOGIN_ADDRESS_THRESHOLD_PROPERTY, LOGIN_ADDRESS_THRESHOLD_ENV);
+    boolean addressDetails = value(LOGIN_ADDRESS_WINDOW_PROPERTY, LOGIN_ADDRESS_WINDOW_ENV) != null
+        || value(LOGIN_ADDRESS_INITIAL_LOCKOUT_PROPERTY, LOGIN_ADDRESS_INITIAL_LOCKOUT_ENV) != null
+        || value(LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY, LOGIN_ADDRESS_MAX_LOCKOUT_ENV) != null;
+    if (threshold == null && addressDetails) {
+      // fail closed: a window without a threshold would look like a counter that does not exist
+      throw new IllegalArgumentException("The per-address login limit needs "
+          + LOGIN_ADDRESS_THRESHOLD_PROPERTY + " (or " + LOGIN_ADDRESS_THRESHOLD_ENV
+          + "); the other address keys alone do not switch it on.");
+    }
+    if (threshold != null) {
+      int addressThreshold = readThreshold(LOGIN_ADDRESS_THRESHOLD_PROPERTY,
+          LOGIN_ADDRESS_THRESHOLD_ENV, perAccount.failureThreshold());
+      Duration window = readDuration(LOGIN_ADDRESS_WINDOW_PROPERTY, LOGIN_ADDRESS_WINDOW_ENV,
+          perAccount.window());
+      Duration initial = readDuration(LOGIN_ADDRESS_INITIAL_LOCKOUT_PROPERTY,
+          LOGIN_ADDRESS_INITIAL_LOCKOUT_ENV, perAccount.initialLockout());
+      Duration defaultMax = perAccount.maxLockout().compareTo(initial) < 0
+          ? initial
+          : perAccount.maxLockout();
+      Duration max = readDuration(LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY,
+          LOGIN_ADDRESS_MAX_LOCKOUT_ENV, defaultMax);
+      limits = limits.withAddressLimit(
+          new LoginAttemptLimits.AddressLimit(addressThreshold, window, initial, max));
+    }
+
+    limits = limits.withMaxConcurrentCredentialChecks(readNonNegative(
+        LOGIN_MAX_CONCURRENT_CHECKS_PROPERTY, LOGIN_MAX_CONCURRENT_CHECKS_ENV,
+        LoginAttemptLimits.UNBOUNDED_CREDENTIAL_CHECKS));
+    Duration gateWait = readNonNegativeDuration(LOGIN_GATE_WAIT_PROPERTY, LOGIN_GATE_WAIT_ENV,
+        LoginAttemptLimits.DEFAULT_GATE_WAIT);
+    if (gateWait.compareTo(LoginAttemptLimits.MAX_GATE_WAIT) > 0) {
+      throw new IllegalArgumentException("Login gate wait must not exceed "
+          + LoginAttemptLimits.MAX_GATE_WAIT + ": " + gateWait);
+    }
+    return limits
+        .withGateWait(gateWait)
+        .withGateRetryAfter(readDuration(LOGIN_GATE_RETRY_AFTER_PROPERTY,
+            LOGIN_GATE_RETRY_AFTER_ENV, LoginAttemptLimits.DEFAULT_GATE_RETRY_AFTER));
+  }
+
+  private String value(String property, String envVar) {
+    return firstNonBlank(sysprop.apply(property), env.apply(envVar));
+  }
+
+  private int readNonNegative(String property, String envVar, int defaultValue) {
+    String value = value(property, envVar);
+    if (value == null) {
+      return defaultValue;
+    }
+    try {
+      int parsed = Integer.parseInt(value.trim());
+      if (parsed < 0) {
+        throw new IllegalArgumentException(
+            "Login attempt limit must be >= 0 (0 = unbounded): " + value);
+      }
+      return parsed;
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid login attempt limit '" + value + "'. Expected a non-negative integer.", e);
+    }
+  }
+
+  private Duration readNonNegativeDuration(String property, String envVar, Duration defaultValue) {
+    String value = value(property, envVar);
+    if (value == null) {
+      return defaultValue;
+    }
+    try {
+      Duration parsed = Duration.parse(value.trim());
+      if (parsed.isNegative()) {
+        throw new IllegalArgumentException(
+            "Login attempt duration must not be negative: " + value);
+      }
+      return parsed;
+    } catch (DateTimeParseException e) {
+      throw new IllegalArgumentException(
+          "Invalid login attempt duration '" + value
+              + "'. Expected ISO-8601 (e.g. PT0.25S, PT1S).", e);
+    }
   }
 
   private LoginAttemptConfiguration load(

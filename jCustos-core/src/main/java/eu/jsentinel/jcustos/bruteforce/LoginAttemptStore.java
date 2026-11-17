@@ -68,6 +68,17 @@ import java.util.Optional;
  * {@link InMemoryLoginAttemptStore} and the Eclipse-Store adapter do. The
  * shared contract in {@code jCustos-persistence-testkit} states what an
  * atomic implementation has to satisfy.
+ *
+ * <h2>Address keys (since 00.84.00)</h2>
+ *
+ * <p>With an address limit, {@link StoreBackedLoginAttemptPolicy} also counts
+ * every attempt on {@link LoginAttemptKey#forAddress} (JS-SEC-062, CWE-307) -
+ * an ordinary key with the reserved user id
+ * {@link LoginAttemptKey#ADDRESS_USER_ID}, passed with limits of its own. A
+ * store keeps it like any other key; nothing in this interface changes. A
+ * store that derives the deadlines of restored entries from limits it has
+ * seen should keep the limits of address keys apart from those of account
+ * keys, as {@link InMemoryLoginAttemptStore} does.
  */
 @ExperimentalJCustosApi
 public interface LoginAttemptStore {

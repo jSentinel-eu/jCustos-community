@@ -7,6 +7,10 @@ import eu.jsentinel.jcustos.audit.LoginSucceeded;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.audit.SessionRef;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
+import eu.jsentinel.jcustos.bruteforce.InMemoryLoginAttemptPolicy;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptLimits;
+import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
 import eu.jsentinel.jcustos.credential.password.PasswordHashingServices;
 import eu.jsentinel.jcustos.credential.password.limiter.KdfExecutionLimiter;
 import eu.jsentinel.jcustos.credential.password.limiter.KdfResourceBudget;
@@ -291,6 +295,37 @@ class RestSkillDemoSecurityTest {
       assertEquals(200, http.post("/api/auth/login", body, null).status());
     } finally {
       UserDirectoryProvider.setDirectory(directory);
+    }
+  }
+
+  @Test
+  @DisplayName("JS-SEC-063: a credential check the gate defers is 429 with Retry-After and counts nothing")
+  void deferredCredentialCheckIsTooManyRequests() throws Exception {
+    AuthHandler.useLoginRateLimit(null);   // a fresh per-address limit: the 429 must be the gate's
+    LoginAttemptPolicy previous = JCustosServiceResolver.loginAttemptPolicy();
+    InMemoryLoginAttemptPolicy gated = new InMemoryLoginAttemptPolicy(LoginAttemptLimits.defaults()
+        .withMaxConcurrentCredentialChecks(1)
+        .withGateWait(Duration.ZERO)
+        .withGateRetryAfter(Duration.ofMillis(2500)), Clock.systemUTC(), null);
+    JCustosServiceResolver.setLoginAttemptPolicy(gated);
+    try {
+      String body = "{\"username\":\"" + USER + "\",\"password\":\"" + USER_PASSWORD + "\"}";
+      CredentialCheckGate.Admission.Entered busy =
+          (CredentialCheckGate.Admission.Entered) gated.credentialCheckGate().enter();
+      try {
+        for (int i = 0; i < 6; i++) {
+          DemoHttp.Response deferred = http.post("/api/auth/login", body, null);
+          assertEquals(429, deferred.status(), deferred.body());
+          assertEquals("3", deferred.header("Retry-After"), "2.5 s rounds up to 3 s");
+        }
+      } finally {
+        busy.close();
+      }
+      // Six deferrals counted as failures, or left in flight, would have locked the key.
+      assertEquals(200, http.post("/api/auth/login", body, null).status());
+      assertEquals(0, gated.credentialCheckGate().inUse());
+    } finally {
+      JCustosServiceResolver.setLoginAttemptPolicy(previous);
     }
   }
 

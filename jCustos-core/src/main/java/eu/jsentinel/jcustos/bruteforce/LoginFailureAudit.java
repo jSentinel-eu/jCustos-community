@@ -22,6 +22,7 @@ import eu.jsentinel.jcustos.audit.BruteForceLimitReached;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.LogFieldScrubber;
 import eu.jsentinel.jcustos.audit.LoginFailed;
+import eu.jsentinel.jcustos.audit.RateLimitExceeded;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 
 import java.time.Duration;
@@ -32,8 +33,9 @@ import java.util.function.Supplier;
 /**
  * Publishes the audit events of the shipped {@link LoginAttemptPolicy}
  * implementations: the one {@link LoginFailed} event of a rejected login - the single audit
- * point the SPI describes for {@link LoginAttemptPolicy#recordFailure(LoginAttemptContext)} -
- * and {@link BruteForceLimitReached} when a failure locks a key.
+ * point the SPI describes for {@link LoginAttemptPolicy#recordFailure(LoginAttemptContext)} -,
+ * {@link BruteForceLimitReached} when a failure locks a key, and {@link RateLimitExceeded} when
+ * the {@link CredentialCheckGate} defers an attempt.
  *
  * <p>An audit sink that fails must never break the security decision that emitted the event,
  * so its exception is caught. Until 00.84.00 it was also swallowed without a trace - a sink that
@@ -91,6 +93,24 @@ final class LoginFailureAudit {
         context.clientAddress(),
         failedAttempts,
         lockout));
+  }
+
+  /**
+   * Publishes {@link RateLimitExceeded} for an attempt the {@link CredentialCheckGate} deferred
+   * (JS-SEC-063, CWE-770): every permit was busy for the whole wait. The event names no user -
+   * the gate bounds all logins together.
+   *
+   * @param auditService  the gate's audit service, or {@code null} for the registered one
+   * @param at            event time
+   * @param maxConcurrent the gate's permits - the limit, and the checks running at the time
+   * @param gateWait      how long the attempt waited; zero is recorded as one nanosecond,
+   *                      because the event requires a positive window
+   */
+  static void publishCredentialCheckDeferred(JCustosAuditService auditService, Instant at,
+                                             int maxConcurrent, Duration gateWait) {
+    Duration window = gateWait.isZero() || gateWait.isNegative() ? Duration.ofNanos(1) : gateWait;
+    publishGuarded(auditService, () -> new RateLimitExceeded(
+        at, CredentialCheckGate.AUDIT_SCOPE, "", maxConcurrent, window, maxConcurrent));
   }
 
   /** @return audit-sink failures seen since the class was loaded - for tests */

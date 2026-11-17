@@ -71,7 +71,11 @@ import static java.util.Objects.requireNonNull;
  * {@link #lastFailureAt}/{@link #reset} keep working. An entry written only
  * through them carries no limits; the store then applies the limits it saw
  * first in an atomic operation, and treats the entry as unprotected until
- * it has seen any.
+ * it has seen any. Account keys and {@linkplain LoginAttemptKey#addressScoped()
+ * address keys} (JS-SEC-062) are counted with different limits, so the store
+ * remembers the first limits of each kind separately: an address lockout
+ * restored after a restart is not cut short by the shorter window of the
+ * account limits that happen to arrive first.
  */
 @ExperimentalJCustosApi
 public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLogger {
@@ -85,8 +89,10 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
   /** When the last {@code bruteforce/failure-not-recorded} line was logged; guarded by the monitor. */
   private Instant lastUnrecordedWarning;
   private final BoundedAttemptTable<LoginAttemptKey, Ledger> table;
-  /** The limits of the first atomic operation; applied to entries that carry none. */
+  /** The limits of the first atomic operation on an account key; applied to entries that carry none. */
   private AttemptLimits knownLimits;
+  /** The same for address keys (JS-SEC-062), which a policy counts with limits of their own. */
+  private AttemptLimits knownAddressLimits;
 
   /** Creates an empty store bounded at {@link CapacityBound#DEFAULT_MAX_ENTRIES}. */
   public InMemoryLoginAttemptStore() {
@@ -165,7 +171,7 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
     requireNonNull(now, "now must not be null");
     requireNonNull(limits, "limits must not be null");
     synchronized (monitor) {
-      adopt(limits, now);
+      adopt(key, limits, now);
       Ledger ledger = table.get(key, now);
       if (ledger != null) {
         Instant lockedUntil = lockedUntil(ledger, limits);
@@ -201,7 +207,7 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
     requireNonNull(now, "now must not be null");
     requireNonNull(limits, "limits must not be null");
     synchronized (monitor) {
-      adopt(limits, now);
+      adopt(key, limits, now);
       Ledger ledger = table.get(key, now);
       if (ledger == null) {
         ledger = new Ledger();
@@ -231,7 +237,7 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
     requireNonNull(now, "now must not be null");
     requireNonNull(limits, "limits must not be null");
     synchronized (monitor) {
-      adopt(limits, now);
+      adopt(key, limits, now);
       Ledger ledger = table.get(key, now);
       if (ledger == null) {
         return AttemptStatus.open(0);
@@ -319,7 +325,7 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
    * @return {@code false} when the key is new and the table refused it
    */
   private boolean store(LoginAttemptKey key, Ledger ledger, Instant now) {
-    AttemptLimits effective = ledger.limits != null ? ledger.limits : knownLimits;
+    AttemptLimits effective = ledger.limits != null ? ledger.limits : knownLimitsFor(key);
     Instant reservedUntil = ledger.latestReservationEnd();
     Instant lockedUntil = effective == null ? null : lockedUntil(ledger, effective);
     Instant counterEnds = ledger.lastFailureAt == null
@@ -351,15 +357,23 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
         + " counted ({} so far).", unrecordedFailures);
   }
 
-  /** Remembers the first limits seen and derives the deadlines of entries that carry none. */
-  private void adopt(AttemptLimits limits, Instant now) {
-    if (knownLimits != null) {
+  /**
+   * Remembers the first limits seen for the kind of {@code operationKey} - account or address -
+   * and derives the deadlines of the entries of that kind that carry none.
+   */
+  private void adopt(LoginAttemptKey operationKey, AttemptLimits limits, Instant now) {
+    boolean address = operationKey.addressScoped();
+    if (knownLimitsFor(operationKey) != null) {
       return;
     }
-    knownLimits = limits;
+    if (address) {
+      knownAddressLimits = limits;
+    } else {
+      knownLimits = limits;
+    }
     List<LoginAttemptKey> withoutLimits = new ArrayList<>();
     table.forEach((key, ledger) -> {
-      if (ledger.limits == null) {
+      if (ledger.limits == null && key.addressScoped() == address) {
         withoutLimits.add(key);
       }
     });
@@ -369,6 +383,10 @@ public final class InMemoryLoginAttemptStore implements LoginAttemptStore, HasLo
         store(key, ledger, now);
       }
     }
+  }
+
+  private AttemptLimits knownLimitsFor(LoginAttemptKey key) {
+    return key.addressScoped() ? knownAddressLimits : knownLimits;
   }
 
   private static Instant lockedUntil(Ledger ledger, AttemptLimits limits) {

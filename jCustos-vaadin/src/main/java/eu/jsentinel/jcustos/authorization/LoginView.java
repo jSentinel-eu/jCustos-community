@@ -20,6 +20,7 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.LoginFailed;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
@@ -43,6 +44,7 @@ import com.vaadin.flow.component.textfield.Autocomplete;
 import com.vaadin.flow.component.textfield.PasswordField;
 import com.vaadin.flow.component.textfield.TextField;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 
@@ -72,6 +74,17 @@ import java.time.LocalDateTime;
  * without writing a line for it. Until 00.84.00 the view called
  * {@code checkCredentials()} directly, and throttling existed only where the
  * {@code AuthenticationService} implemented it.
+ * <p>
+ * <strong>Concurrent credential checks (JS-SEC-063, CWE-770).</strong> Between
+ * {@code beforeAttempt} and {@link #checkCredentials()} the view enters the policy's
+ * {@link LoginAttemptPolicy#credentialCheckGate() credential-check gate} and leaves it as soon
+ * as the check has returned. When the gate defers the attempt - every permit busy for the whole
+ * wait - the credentials are not checked, the attempt is given back with
+ * {@link LoginAttemptPolicy#abandonAttempt abandonAttempt} and
+ * {@link #reactOnCredentialCheckDeferred(Duration)} is called. The gate is unbounded unless
+ * the policy's {@code LoginAttemptLimits} set {@code maxConcurrentCredentialChecks}, and it
+ * belongs to the throttle protocol: a view that opts out through
+ * {@link #throttleLoginAttempts()} does not enter it either.
  * <p>
  * <strong>Do not consult the policy a second time.</strong> An
  * {@code AuthenticationService} (or a {@code checkCredentials()} override) that calls
@@ -240,6 +253,8 @@ public abstract class LoginView
     final LoginAttemptContext attempt = policy == null
         ? null
         : LoginAttemptContext.now(username(), VaadinClientAddress.current().orElse(null), null);
+    // obtained before the reservation: a policy that cannot hand out its gate reserves nothing
+    final CredentialCheckGate gate = policy == null ? null : policy.credentialCheckGate();
 
     if (policy != null
         && policy.beforeAttempt(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
@@ -249,9 +264,25 @@ public abstract class LoginView
       return;
     }
 
+    // JS-SEC-063 (CWE-770): at most maxConcurrentCredentialChecks checks run at once
+    CredentialCheckGate.Admission.Entered permit = null;
+    if (gate != null) {
+      switch (gate.enter()) {
+        case CredentialCheckGate.Admission.Deferred deferred -> {
+          // no verdict: the reservation is given back, nothing is counted, no LoginFailed
+          abandon(policy, attempt);
+          logger().warn("Login was deferred, all credential checks are busy .. {}",
+              LocalDateTime.now());
+          reactOnCredentialCheckDeferred(deferred.retryAfter());
+          return;
+        }
+        case CredentialCheckGate.Admission.Entered entered -> permit = entered;
+      }
+    }
+
     boolean isValid;
     try {
-      isValid = checkCredentials();
+      isValid = checkCredentialsWithin(permit);
     } catch (CredentialVerificationUnavailableException unavailable) {
       // JS-SEC-126 (CWE-703): "could not verify" is not "wrong". The reservation is given
       // back, no failure is counted, and the user is told to try again.
@@ -336,6 +367,17 @@ public abstract class LoginView
       return;
     }
     navigateToApp();
+  }
+
+  /** Runs the check and gives the permit back as soon as it has returned. */
+  private boolean checkCredentialsWithin(CredentialCheckGate.Admission.Entered permit) {
+    try {
+      return checkCredentials();
+    } finally {
+      if (permit != null) {
+        permit.close();
+      }
+    }
   }
 
   private static void abandon(LoginAttemptPolicy policy, LoginAttemptContext attempt) {
@@ -438,6 +480,21 @@ public abstract class LoginView
    */
   protected void reactOnVerificationUnavailable() {
     reactOnFailedLogin();
+  }
+
+  /**
+   * Called when the credential-check gate of the {@link LoginAttemptPolicy} deferred the
+   * attempt (JS-SEC-063, CWE-770): every permit stayed busy for the whole wait, so
+   * {@link #checkCredentials()} did not run. Nothing was counted against the user and no
+   * {@code LoginFailed} was written. The default delegates to
+   * {@link #reactOnVerificationUnavailable()}; override it to say "too many sign-ins right now,
+   * try again in a few seconds".
+   *
+   * @param retryAfter when the user may try again; positive
+   * @since 00.84.00
+   */
+  protected void reactOnCredentialCheckDeferred(Duration retryAfter) {
+    reactOnVerificationUnavailable();
   }
 
   /**

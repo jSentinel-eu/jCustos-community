@@ -23,6 +23,7 @@ import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
+import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
@@ -47,7 +48,14 @@ import java.util.Objects;
  *       caller can render a wait time. An allowed attempt is reserved by
  *       the policy (JS-SEC-123) and is reported back exactly once, by one
  *       of the next three steps.</li>
- *   <li>Delegate to the registered {@link AuthenticationService}.</li>
+ *   <li>Enter the policy's {@link CredentialCheckGate} (JS-SEC-063, CWE-770).
+ *       When it defers the attempt - every permit busy for the whole wait -
+ *       the attempt is given back to the policy, nothing is counted, and
+ *       {@link CredentialCheckDeferredException} reaches the caller with the
+ *       retry-after. The gate is unbounded unless the policy's
+ *       {@code LoginAttemptLimits} set {@code maxConcurrentCredentialChecks}.</li>
+ *   <li>Delegate to the registered {@link AuthenticationService}; the permit is
+ *       given back as soon as {@code checkCredentials} has returned.</li>
  *   <li>On success — load the subject, confirm the success with the
  *       policy, bind the subject into the active
  *       {@link eu.jsentinel.jcustos.authorization.api.SubjectStore} and
@@ -72,6 +80,9 @@ import java.util.Objects;
  *       {@link LoginResult#rejected}, exactly like wrong credentials; the
  *       exception is logged with its class only.</li>
  * </ol>
+ *
+ * <p>The flow has no client address; the address counter of the policy
+ * (JS-SEC-062) therefore does not apply to it.
  *
  * @param <T> the credentials type
  * @param <U> the subject type
@@ -141,20 +152,40 @@ public final class StandaloneLoginFlow<T, U> {
    *         unavailable, try again" (HTTP 503 or 429). Any other
    *         {@link RuntimeException} of the service is a failed attempt and
    *         returns {@link LoginResult.Rejected} (exit review XR09-6).
+   *         The subclass {@link CredentialCheckDeferredException} means the
+   *         credential-check gate deferred the attempt (JS-SEC-063); it
+   *         carries the retry-after.
    */
   public LoginResult<U> login(T credentials, String username) {
     LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
     LoginAttemptContext attempt = LoginAttemptContext.now(username, null, null);
+    // obtained before the reservation: a policy that cannot hand out its gate reserves nothing
+    CredentialCheckGate gate = policy.credentialCheckGate();
 
-    LoginAttemptDecision gate = policy.beforeAttempt(attempt);
-    if (gate instanceof LoginAttemptDecision.LockedOut lockout) {
+    LoginAttemptDecision decision = policy.beforeAttempt(attempt);
+    if (decision instanceof LoginAttemptDecision.LockedOut lockout) {
       return LoginResult.lockedOut(lockout);
+    }
+
+    // JS-SEC-063 (CWE-770): at most maxConcurrentCredentialChecks checks run at once
+    CredentialCheckGate.Admission.Entered permit;
+    switch (gate.enter()) {
+      case CredentialCheckGate.Admission.Deferred deferred -> {
+        // no verdict: the reservation is released, nothing is counted, no LoginFailed
+        policy.abandonAttempt(attempt);
+        throw new CredentialCheckDeferredException(deferred.retryAfter());
+      }
+      case CredentialCheckGate.Admission.Entered entered -> permit = entered;
     }
 
     boolean ok;
     U subject = null;
     try {
-      ok = authenticationService.checkCredentials(credentials);
+      try {
+        ok = authenticationService.checkCredentials(credentials);
+      } finally {
+        permit.close();
+      }
       if (ok) {
         subject = authenticationService.loadSubject(credentials);
       }

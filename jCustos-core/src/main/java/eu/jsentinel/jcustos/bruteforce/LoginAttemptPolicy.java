@@ -51,7 +51,11 @@ package eu.jsentinel.jcustos.bruteforce;
  * combination of {@code username} and {@code clientAddress}. The default
  * {@link InMemoryLoginAttemptPolicy} tracks the combined key plus the
  * user name alone so an attacker cannot cycle clients to escape the
- * counter.
+ * counter; with {@link LoginAttemptLimits#perAddress()} it also counts
+ * the failures of a client address across all accounts (JS-SEC-062).
+ * Between {@link #beforeAttempt} and the check, the
+ * {@link #credentialCheckGate() gate} bounds how many checks run at once
+ * (JS-SEC-063).
  */
 public interface LoginAttemptPolicy {
 
@@ -186,5 +190,27 @@ public interface LoginAttemptPolicy {
    */
   default void abandonAttempt(LoginAttemptContext context) {
     // nothing reserved, nothing to release
+  }
+
+  /**
+   * The gate that bounds how many credential checks behind this policy run at the same time
+   * (JS-SEC-063, CWE-770).
+   * <p>
+   * A login enters it after {@link #beforeAttempt} allowed the attempt and leaves it when the
+   * credential check has returned. When the gate defers the attempt, the caller does not run
+   * the check, reports {@link #abandonAttempt} and answers "try again" with the deferral's
+   * retry-after - see {@link CredentialCheckGate}. The library {@code LoginView} and
+   * {@code StandaloneLoginFlow} do this for the registered policy.
+   * <p>
+   * The default is {@link CredentialCheckGate#unbounded()}. The shipped policies return the
+   * gate of their {@link LoginAttemptLimits}, which is unbounded as well unless
+   * {@link LoginAttemptLimits#maxConcurrentCredentialChecks()} is set. A policy must return the
+   * same instance on every call: the permits live in it.
+   *
+   * @return the gate; never {@code null}
+   * @since 00.84.00
+   */
+  default CredentialCheckGate credentialCheckGate() {
+    return CredentialCheckGate.unbounded();
   }
 }

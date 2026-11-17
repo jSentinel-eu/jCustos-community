@@ -30,6 +30,27 @@ public interface AuthenticationService<T, U> {
   /**
    * Validates the given credentials.
    *
+   * <p><strong>Timing contract (JS-SEC-064, CWE-208, CWE-203).</strong> An unknown account
+   * must cost about as much as a known account with a wrong password, and must be answered the
+   * same way - {@code false}, never an exception or an early return that a known account does
+   * not take. Otherwise the response time tells an attacker which user names exist, and a list
+   * of valid accounts is the first step of every spraying or stuffing attack. An implementation
+   * that looks up a stored password hash therefore verifies the password against a dummy hash of
+   * comparable cost when no account is found;
+   * {@link eu.jsentinel.jcustos.credential.password.ConstantCostCredentialCheck} does exactly
+   * that on top of the jCustos hashing pipeline. A disabled or locked account is checked in full
+   * as well before it is refused.
+   *
+   * <p>This <em>reduces</em> the timing difference; it does not make the check constant-time.
+   * Database lookups, caches, the garbage collector and the KDF limiter still vary, and an
+   * attacker who can take many measurements may still see a difference. Treat the contract as
+   * one layer next to the throttle of the {@code LoginAttemptPolicy}, not as a guarantee.
+   *
+   * <p>An implementation that cannot check the credentials at all - the KDF was shed under
+   * load, the directory is unreachable - throws
+   * {@link eu.jsentinel.jcustos.credential.password.CredentialVerificationUnavailableException}
+   * instead of returning {@code false} (JS-SEC-126).
+   *
    * @param credentials the credentials to check
    * @return {@code true} if the credentials are valid
    */

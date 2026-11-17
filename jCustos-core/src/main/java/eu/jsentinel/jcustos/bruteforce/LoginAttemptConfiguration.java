@@ -28,6 +28,11 @@ import java.util.Objects;
  * for {@code initialLockout × 2}, then {@code × 4}, and so on, capped
  * at {@code maxLockout}. The {@code window} bounds the rolling failure
  * count: failures older than {@code window} drop out of the count.
+ * <p>
+ * The record shape is stable. The counter on the client address alone
+ * (JS-SEC-062) and the bound on concurrent credential checks (JS-SEC-063)
+ * live in {@link LoginAttemptLimits}, which wraps this configuration as
+ * {@link LoginAttemptLimits#perAccount()}.
  *
  * @param failureThreshold  failures within {@code window} that trigger a lockout
  * @param window            rolling window for failure counting

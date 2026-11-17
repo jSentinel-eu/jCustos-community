@@ -54,6 +54,11 @@ import static java.util.Objects.requireNonNull;
  *       {@link CapacityBound#DEFAULT_MAX_ENTRIES} keys. Expired counters are
  *       removed from the persistent table as well; a live lockout is never
  *       evicted; a store full of live lockouts refuses new keys.</li>
+ *   <li><strong>Address keys</strong> (JS-SEC-062): the counter of a client
+ *       address is persisted under {@link LoginAttemptKey#forAddress}, a key
+ *       of the existing shape, so the format is unchanged. After a restart the
+ *       working state derives an address lockout from the limits of the first
+ *       address operation, not from the shorter limits of the accounts.</li>
  * </ul>
  */
 final class EclipseStoreLoginAttemptStore implements LoginAttemptStore {

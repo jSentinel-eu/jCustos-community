@@ -47,6 +47,7 @@ import eu.jsentinel.jcustos.logout.LogoutScope;
 import eu.jsentinel.jcustos.authorization.api.JCustosSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.logout.SubjectId;
+import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptContext;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptDecision;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptPolicy;
@@ -68,6 +69,7 @@ import eu.jsentinel.jcustos.rest.RestDecisionContext;
 import eu.jsentinel.jcustos.rest.RestHeaders;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
+import eu.jsentinel.jcustos.rest.RestThrottleResponses;
 import eu.jsentinel.jcustos.accountlifecycle.PasswordResetService;
 import eu.jsentinel.jcustos.accountlifecycle.PasswordResetTokenRecord;
 import eu.jsentinel.jcustos.authentication.ApiKeyRecord;
@@ -108,7 +110,10 @@ import java.util.Set;
  * or {@code abandonAttempt}. A rejected password is audited as {@link LoginFailed} by the
  * policy's {@code recordFailure}, a login the policy refuses after the check by the handler
  * itself, and a verification the KDF limiter shed is answered with {@code 503}, without
- * counting a failure. Every {@code 401} written here goes through the published decision mapper
+ * counting a failure. The password check runs inside the policy's credential-check gate
+ * (JS-SEC-063); an attempt the gate defers is given back and answered like every other
+ * refusal of the login: {@code 429} with a {@code Retry-After} header, written by
+ * {@link RestThrottleResponses}. Every {@code 401} written here goes through the published decision mapper
  * (JS-SEC-086) and so carries a {@code WWW-Authenticate} challenge. Sessions are named by
  * their {@linkplain DemoTokenStore#sessionReference(String) reference}, never by the
  * bearer token (JS-SEC-117).
@@ -117,8 +122,6 @@ public final class DemoHandlers {
 
   /** {@code Retry-After} answer, in seconds, when a verification was shed (JS-SEC-126). */
   static final long VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS = 1L;
-
-  private static final String RETRY_AFTER = "Retry-After";
 
   private final DemoUserStore userStore;
   private final DemoTokenStore tokenStore;
@@ -489,9 +492,7 @@ public final class DemoHandlers {
           "login:ip:" + (clientAddress == null ? "unknown" : clientAddress));
       RateLimitDecision decision = loginRateLimit.tryAcquire(key);
       if (decision instanceof RateLimitDecision.Throttled throttled) {
-        response.header(RETRY_AFTER,
-            Long.toString(Math.max(1L, throttled.retryAfter().toSeconds())));
-        writeError(response, HttpStatus.TOO_MANY_REQUESTS);
+        RestThrottleResponses.tooManyRequests(response, throttled.retryAfter());
         return;
       }
     }
@@ -506,22 +507,29 @@ public final class DemoHandlers {
 
     AbuseDecision abuseDecision = abuseDetection.evaluate(abuseContext);
     if (abuseDecision instanceof AbuseDecision.Block block) {
-      response.header(RETRY_AFTER,
-          Long.toString(Math.max(1L, block.retryAfter().toSeconds())));
-      writeError(response, HttpStatus.TOO_MANY_REQUESTS);
+      RestThrottleResponses.tooManyRequests(response, block.retryAfter());
       return;
     }
 
+    CredentialCheckGate gate = loginAttemptPolicy.credentialCheckGate();
     LoginAttemptDecision decision = loginAttemptPolicy.beforeAttempt(attempt);
     if (decision instanceof LoginAttemptDecision.LockedOut lockout) {
-      response.header(RETRY_AFTER,
-          Long.toString(Math.max(1L, lockout.remaining().toSeconds())));
-      writeError(response, HttpStatus.TOO_MANY_REQUESTS);
+      RestThrottleResponses.tooManyRequests(response, lockout.remaining());
       return;
     }
 
     // JS-SEC-123: the allowed attempt is a reservation. From here on every path reports it
     // back exactly once - confirmSuccess, recordFailure or abandonAttempt.
+    CredentialCheckGate.Admission.Entered permit;
+    switch (gate.enter()) {
+      case CredentialCheckGate.Admission.Deferred deferred -> {
+        // JS-SEC-063 (CWE-770): every credential-check permit stayed busy - no verdict
+        loginAttemptPolicy.abandonAttempt(attempt);
+        RestThrottleResponses.tooManyRequests(response, deferred.retryAfter());
+        return;
+      }
+      case CredentialCheckGate.Admission.Entered entered -> permit = entered;
+    }
     Optional<DemoUser> user;
     try {
       user = userStore.authenticate(username, password);
@@ -529,12 +537,15 @@ public final class DemoHandlers {
       // JS-SEC-126 (CWE-703): the KDF limiter shed the verification. That is no verdict on
       // the password: give the attempt back, count nothing, audit no LoginFailed.
       loginAttemptPolicy.abandonAttempt(attempt);
-      response.header(RETRY_AFTER, Long.toString(VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS));
+      response.header(RestThrottleResponses.RETRY_AFTER,
+          Long.toString(VERIFICATION_UNAVAILABLE_RETRY_AFTER_SECONDS));
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;
     } catch (RuntimeException failure) {
       loginAttemptPolicy.abandonAttempt(attempt);
       throw failure;
+    } finally {
+      permit.close();
     }
     if (user.isEmpty()) {
       // The shipped policies publish LoginFailed from recordFailure; no second event here.
@@ -548,9 +559,7 @@ public final class DemoHandlers {
     if (loginAttemptPolicy.confirmSuccess(attempt)
         instanceof LoginAttemptDecision.LockedOut lockout) {
       auditLoginFailed(username, clientAddress, "Locked out while the attempt was in flight");
-      response.header(RETRY_AFTER,
-          Long.toString(Math.max(1L, lockout.remaining().toSeconds())));
-      writeError(response, HttpStatus.TOO_MANY_REQUESTS);
+      RestThrottleResponses.tooManyRequests(response, lockout.remaining());
       return;
     }
     abuseDetection.recordOutcome(abuseContext, AttemptOutcome.SUCCESS);
