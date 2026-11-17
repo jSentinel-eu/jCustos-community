@@ -840,9 +840,15 @@ public final class JCustosServiceResolver {
   // ── Reset (for testing) ────────────────────────────────────────
 
   /**
-   * Clears all cached service references on the default context and
-   * resets {@link SubjectStores}. Intended for testing scenarios where
-   * SPI registrations change between runs.
+   * Returns the default context to the state of a freshly constructed one
+   * ({@link JCustosContext#resetAll()}, which also forgets the installed
+   * {@link eu.jsentinel.jcustos.jwt.api.JwtValidator}) and resets
+   * {@link SubjectStores}. Intended for testing scenarios where SPI
+   * registrations change between runs.
+   * <p>
+   * Registries of the adapter and DX modules keep their own {@code reset()}
+   * methods and are not touched here; the JVM-wide warn-once flags of the
+   * Noop fallbacks deliberately survive a reset.
    */
   public static void resetAll() {
     DEFAULT.resetAll();

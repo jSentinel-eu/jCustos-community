@@ -1440,11 +1440,21 @@ public final class JCustosContext {
   // ── Reset (for testing) ────────────────────────────────────────
 
   /**
-   * Clears all cached service references held by this context.
+   * Returns every slot of this context to the state of a freshly constructed
+   * one: cached SPI lookups, services installed through the setters
+   * (including the {@link eu.jsentinel.jcustos.jwt.api.JwtValidator}), the
+   * remembered secure defaults, the route names, the deny-by-default flag and
+   * the registered {@link OutboundTokenStrategy outbound token strategies}.
    * <p>
    * Unlike {@link JCustosServiceResolver#resetAll()}, this method does
    * <strong>not</strong> reset the global {@link SubjectStores} — that
-   * coupling lives only on the static facade.
+   * coupling lives only on the static facade. The JVM-wide warn-once flags of
+   * the Noop fallbacks (JS-SEC-080, JS-SEC-124) are not state of this context
+   * and deliberately survive a reset, so a reset does not repeat the
+   * warnings.
+   * <p>
+   * ER29 (CWE-459): a slot added to this class must be cleared here as well;
+   * {@code JCustosResetAllGuardTest} fails the build otherwise.
    */
   public void resetAll() {
     authenticationServiceRef.set(null);
@@ -1470,6 +1480,9 @@ public final class JCustosContext {
     denyByDefaultRef.set(false);
     tokenCredentialStoreRef.set(null);
     outboundStrategies.clear();
+    // ER29 (CWE-459): a validator installed by one bootstrap or test must not
+    // keep validating tokens after the reset.
+    jwtValidatorRef.set(null);
   }
 
   static <S> S requireSingleService(Class<S> serviceType, Iterable<? extends S> services) {

@@ -18,12 +18,14 @@ package eu.jsentinel.jcustos.test;
 
 import eu.jsentinel.jcustos.audit.NoopJCustosAuditService;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
+import eu.jsentinel.jcustos.jwt.api.JwtValidator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JCustosTestExtensionTest {
 
@@ -56,5 +58,19 @@ class JCustosTestExtensionTest {
 
     assertSame(NoopJCustosAuditService.INSTANCE,
         JCustosServiceResolver.securityAuditService());
+  }
+
+  @Test
+  @DisplayName("ER29: beforeEach forgets a JwtValidator an earlier test installed")
+  void beforeEachForgetsJwtValidator() {
+    JwtValidator leftOver = compactJwt -> {
+      throw new AssertionError("this validator is never called");
+    };
+    JCustosServiceResolver.setJwtValidator(leftOver);
+
+    new JCustosTestExtension().beforeEach(null);
+
+    assertTrue(JCustosServiceResolver.findJwtValidator().isEmpty(),
+        "a validator installed by an earlier test must not validate tokens in the next one");
   }
 }
