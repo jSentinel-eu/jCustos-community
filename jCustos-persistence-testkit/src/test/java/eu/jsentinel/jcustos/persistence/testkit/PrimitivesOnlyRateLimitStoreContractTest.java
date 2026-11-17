@@ -37,12 +37,27 @@ import static java.util.Objects.requireNonNull;
  * sequence would let every parallel caller read the count before the first
  * one records. The contract's concurrency test passes because the default
  * serialises its callers on the store instance.</p>
+ *
+ * <p>Such a store does not report the oldest event in the window and keeps no
+ * blocks (00.84.00): the contract checks that its admissions name no oldest
+ * event and that the inherited {@code blockedUntil} and {@code block} refuse
+ * instead of dropping the block.</p>
  */
 class PrimitivesOnlyRateLimitStoreContractTest implements RateLimitStoreContract {
 
   @Override
   public RateLimitStore newStore() {
     return new PrimitivesOnlyStore();
+  }
+
+  @Override
+  public boolean reportsOldestInWindow() {
+    return false;
+  }
+
+  @Override
+  public boolean keepsBlocks() {
+    return false;
   }
 
   private static final class PrimitivesOnlyStore implements RateLimitStore {

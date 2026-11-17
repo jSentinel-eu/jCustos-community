@@ -19,6 +19,9 @@ package eu.jsentinel.jcustos.ratelimiting;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 
 import java.time.Instant;
+import java.util.Optional;
+
+import static java.util.Objects.requireNonNull;
 
 /**
  * Persistent event store for sliding-window rate-limiting policies
@@ -45,6 +48,15 @@ import java.time.Instant;
  *       runs on a schedule, drops events the policy would no longer
  *       count anyway.</li>
  * </ol>
+ *
+ * <p>Since 00.84.00 a store can also keep a <em>block</em> per key
+ * ({@link #block}, {@link #blockedUntil}) - the state of an opt-in
+ * {@link RateLimitEscalation}. A block is no event: it is not counted, and
+ * {@link #tryAdmit} does not look at it; the policy does. {@link #reset} lifts
+ * it, {@link #purgeOlderThan} drops it once it has ended. The defaults of both
+ * methods refuse with {@link UnsupportedOperationException}, so a store written
+ * before 00.84.00 keeps compiling and {@link InMemoryRateLimitPolicy} refuses an
+ * escalation over it at construction instead of losing every block.
  *
  * <p>Implementations must be thread-safe; concurrent recordEvent
  * and countSince happen on every protected endpoint. Events are a
@@ -74,7 +86,8 @@ public interface RateLimitStore {
   int countSince(RateLimitKey key, Instant since);
 
   /**
-   * Drops every recorded event under {@code key}.
+   * Drops every recorded event under {@code key} and, in a store that keeps
+   * blocks (since 00.84.00), the key's block.
    *
    * @param key key to clear; must not be {@code null}
    */
@@ -82,7 +95,9 @@ public interface RateLimitStore {
 
   /**
    * Across every key, drops events whose timestamp is strictly
-   * before {@code cutoff}. Intended as a retention sweep.
+   * before {@code cutoff}. Intended as a retention sweep. A store that keeps
+   * blocks (since 00.84.00) also drops every block that ended strictly before
+   * {@code cutoff}; a key is forgotten once it holds neither.
    *
    * @param cutoff retention boundary; must not be {@code null}
    * @return number of events purged
@@ -104,14 +119,40 @@ public interface RateLimitStore {
   }
 
   /**
-   * Outcome of {@link #tryAdmit}: whether the event was recorded and how many
-   * events the key holds in the window afterwards.
+   * Outcome of {@link #tryAdmit}: whether the event was recorded, how many
+   * events the key holds in the window afterwards, and the oldest of them.
+   *
+   * <p>The oldest event in the window is the one whose departure frees the
+   * next slot; {@link InMemoryRateLimitPolicy} derives
+   * {@link RateLimitDecision.Throttled#retryAfter()} from it. A store that does
+   * not report it - the {@linkplain #Admission(boolean, int) two-argument
+   * constructor}, the default {@link #tryAdmit} - leaves it empty, and the
+   * policy then answers with the whole window.</p>
    *
    * @param admitted       {@code true} when the event was recorded
    * @param eventsInWindow events at or after {@code since}, including this one when admitted
+   * @param oldestInWindow the earliest event at or after {@code since} after the decision;
+   *                       empty when the window holds none or the store does not report it;
+   *                       never {@code null}
    * @since 00.84.00
    */
-  record Admission(boolean admitted, int eventsInWindow) {
+  record Admission(boolean admitted, int eventsInWindow, Optional<Instant> oldestInWindow) {
+
+    /** Validates the components. */
+    public Admission {
+      requireNonNull(oldestInWindow, "oldestInWindow must not be null - use Optional.empty()");
+    }
+
+    /**
+     * An admission that does not report the oldest event in the window - the
+     * shape before the oldest event was part of it.
+     *
+     * @param admitted       {@code true} when the event was recorded
+     * @param eventsInWindow events at or after {@code since}, including this one when admitted
+     */
+    public Admission(boolean admitted, int eventsInWindow) {
+      this(admitted, eventsInWindow, Optional.empty());
+    }
   }
 
   /**
@@ -126,10 +167,11 @@ public interface RateLimitStore {
    * one instance in one JVM atomic, and nothing more: it does not cover a
    * second instance over the same data, another node, or a caller that uses
    * {@link #recordEvent} directly. The shipped in-memory and Eclipse-Store
-   * implementations override it, count events with equal instants separately
-   * and drop events older than {@code since} on the way; the contract in
-   * {@code jCustos-persistence-testkit} checks the admission under real
-   * concurrency.</p>
+   * implementations override it, count events with equal instants separately,
+   * drop events older than {@code since} on the way and report the oldest event
+   * left in the window; the contract in {@code jCustos-persistence-testkit}
+   * checks the admission under real concurrency. The default reports no oldest
+   * event.</p>
    *
    * @param key   bucket key
    * @param at    event instant
@@ -147,5 +189,59 @@ public interface RateLimitStore {
       recordEvent(key, at);
       return new Admission(true, current + 1);
     }
+  }
+
+  /**
+   * The end of the block {@link #block} recorded for {@code key}. The key is
+   * blocked while the clock reads earlier than this instant. The store has no
+   * clock of its own, so a block that has ended is still reported until
+   * {@link #reset} or {@link #purgeOlderThan} removes it - the caller compares
+   * it with its own time.
+   *
+   * <p>The default throws {@link UnsupportedOperationException}: a store that
+   * does not implement blocks says so instead of reporting none.
+   * {@link InMemoryRateLimitPolicy} asks once at construction when it is given
+   * a {@link RateLimitEscalation} and refuses such a store.</p>
+   *
+   * @param key key to query; must not be {@code null}
+   * @return the end of the key's block; empty when none is recorded
+   * @throws UnsupportedOperationException when the store keeps no blocks
+   * @since 00.84.00
+   */
+  default Optional<Instant> blockedUntil(RateLimitKey key) {
+    requireNonNull(key, "key must not be null");
+    throw noBlocks();
+  }
+
+  /**
+   * Blocks {@code key} until {@code until} - or keeps the key's block when it
+   * already lasts longer - as one step: a block only ever grows, so of two
+   * concurrent calls the later end wins whatever order they run in.
+   * <p>
+   * <strong>Implementations that keep blocks must make this atomic</strong> in
+   * their backing store, as {@link InMemoryRateLimitStore} and the Eclipse-Store
+   * adapter do; the contract in {@code jCustos-persistence-testkit} checks it
+   * with real threads. A store that persists its data persists the block with
+   * it, so a restart does not lift it. A key that has no events yet is tracked
+   * like any other key, inside the store's bound. The default throws
+   * {@link UnsupportedOperationException}.</p>
+   *
+   * @param key   key to block; must not be {@code null}
+   * @param until end of the block, exclusive; must not be {@code null}
+   * @return the end of the key's block after the call - the later of the end
+   *         recorded before and {@code until}
+   * @throws UnsupportedOperationException when the store keeps no blocks
+   * @since 00.84.00
+   */
+  default Instant block(RateLimitKey key, Instant until) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(until, "until must not be null");
+    throw noBlocks();
+  }
+
+  /** @return the refusal of the defaults of {@link #blockedUntil} and {@link #block} */
+  private static UnsupportedOperationException noBlocks() {
+    return new UnsupportedOperationException("this RateLimitStore keeps no blocks: implement"
+        + " blockedUntil and block (atomically) to use it with a RateLimitEscalation");
   }
 }

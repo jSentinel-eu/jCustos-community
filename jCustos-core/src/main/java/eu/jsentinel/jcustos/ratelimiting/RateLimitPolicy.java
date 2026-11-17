@@ -26,15 +26,24 @@ import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
  * {@link eu.jsentinel.jcustos.session.SessionPolicy
  * SessionPolicy} (which is about session lifetime).
  * <p>
- * Callers wrap the protected operation:
+ * Callers wrap the protected operation and refuse every decision that is not
+ * {@link RateLimitDecision.Allowed} - a throttle as well as a block
+ * (since 00.84.00):
  * <pre>{@code
- *   RateLimitDecision d = policy.tryAcquire(key);
- *   if (d instanceof RateLimitDecision.Throttled t) {
- *       // 429 Too Many Requests + Retry-After: t.retryAfter().toSeconds()
+ *   switch (policy.tryAcquire(key)) {
+ *     case RateLimitDecision.Allowed allowed -> { } // proceed
+ *     case RateLimitDecision.Throttled throttled -> {
+ *       // 429 Too Many Requests + Retry-After from throttled.retryAfter(), rounded up
  *       return;
+ *     }
+ *     case RateLimitDecision.Blocked blocked -> {
+ *       // the same answer, with blocked.retryAfter()
+ *       return;
+ *     }
  *   }
- *   // proceed
  * }</pre>
+ * A REST handler writes that answer with
+ * {@code eu.jsentinel.jcustos.rest.RestRateLimit.respond(decision, response)}.
  *
  * <p>Implementations must be thread-safe.
  */
@@ -51,7 +60,7 @@ public interface RateLimitPolicy {
    *
    * @param key non-null key; the scope is the application's
    *            choice — IP, subject, endpoint, or composed
-   * @return admit / throttle decision, never {@code null}
+   * @return admit / throttle / block decision, never {@code null}
    */
   RateLimitDecision tryAcquire(RateLimitKey key);
 }

@@ -110,7 +110,9 @@ class InMemoryRateLimitPolicyTest {
         assertInstanceOf(RateLimitDecision.Throttled.class, fourth);
     assertEquals(3, t.eventsInWindow());
     assertEquals(3, t.limit());
-    assertEquals(Duration.ofMinutes(1), t.retryAfter());
+    // all three events lie at T0: the oldest leaves the window one nanosecond after T0 + 1 min
+    assertEquals(Duration.ofMinutes(1).plus(InMemoryRateLimitPolicy.MIN_RETRY_AFTER),
+        t.retryAfter());
 
     // a single RateLimitExceeded audit event
     assertEquals(1, audit.published.size());

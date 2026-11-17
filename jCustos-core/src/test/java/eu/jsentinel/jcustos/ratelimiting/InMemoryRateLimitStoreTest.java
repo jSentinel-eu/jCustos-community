@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -166,6 +167,48 @@ class InMemoryRateLimitStoreTest {
     assertEquals(false, refused.admitted(), "a limit above the per-key bound must not be unreachable");
     assertEquals(5, refused.eventsInWindow());
     assertThrows(IllegalArgumentException.class, () -> new InMemoryRateLimitStore(10, 0));
+  }
+
+  @Test
+  @DisplayName("a blocked key without events is tracked until its block has ended, then purged")
+  void blockedKeyWithoutEventsIsKeptWhileTheBlockLasts() {
+    RateLimitKey k = key("ip:9.9.9.9");
+    store.recordEvent(k, T0);
+    store.block(k, T0.plusSeconds(600));
+    assertEquals(1, store.purgeOlderThan(T0.plusSeconds(60)));
+    assertEquals(1, store.trackedKeyCount(), "the events went, the block holds the key");
+    assertEquals(Optional.of(T0.plusSeconds(600)), store.blockedUntil(k));
+    assertEquals(0, store.purgeOlderThan(T0.plusSeconds(601)));
+    assertEquals(0, store.trackedKeyCount(), "nothing is left once the block has ended");
+  }
+
+  @Test
+  @DisplayName("at the bound a blocked key that is being asked for is in use: the idle key goes first")
+  void blockedKeyInUseIsNotTheFirstToBeEvicted() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(3);
+    RateLimitKey blocked = key("ip:10.0.0.1");
+    bounded.block(blocked, T0.plusSeconds(600)); // the eldest entry
+    bounded.recordEvent(key("ip:10.0.0.2"), T0);
+    bounded.recordEvent(key("ip:10.0.0.3"), T0);
+    assertEquals(Optional.of(T0.plusSeconds(600)), bounded.blockedUntil(blocked));
+    bounded.recordEvent(key("ip:10.0.0.4"), T0);
+    assertEquals(Optional.of(T0.plusSeconds(600)), bounded.blockedUntil(blocked),
+        "the blocked key in use must not make room for a new key");
+    assertEquals(0, bounded.countSince(key("ip:10.0.0.2"), T0), "the key used least recently went");
+  }
+
+  @Test
+  @DisplayName("a block on a key the store does not know stays within the bound")
+  void blockStaysWithinTheBound() {
+    InMemoryRateLimitStore bounded = new InMemoryRateLimitStore(3);
+    for (int i = 0; i < 10; i++) {
+      bounded.block(key("ip:10.0.0." + i), T0.plusSeconds(600));
+    }
+    assertEquals(3, bounded.trackedKeyCount());
+    assertEquals(Optional.empty(), bounded.blockedUntil(key("ip:10.0.0.0")),
+        "the key used least recently made room");
+    assertEquals(Optional.of(T0.plusSeconds(600)),
+        bounded.blockedUntil(key("ip:10.0.0.9")));
   }
 
   @Nested

@@ -27,14 +27,20 @@ import eu.jsentinel.jcustos.demo.rest.domain.DemoUserStore;
 import eu.jsentinel.jcustos.ratelimiting.InMemoryRateLimitPolicy;
 import eu.jsentinel.jcustos.ratelimiting.InMemoryRateLimitStore;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitDecision;
+import eu.jsentinel.jcustos.ratelimiting.RateLimitEscalation;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitKey;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
+import eu.jsentinel.jcustos.rest.RestThrottleResponses;
 import eu.jsentinel.jcustos.session.InMemoryJCustosVersionStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Map;
 
 import static com.svenruppert.dependencies.core.net.HttpStatus.*;
@@ -55,14 +61,25 @@ class DemoLoginRateLimitTest {
   private static final int LIMIT = 3;
   private static final Duration WINDOW = Duration.ofMinutes(1);
   private static final String IP = "10.0.0.42";
+  /** Password of the seeded demo administrator ({@code InsecureSeed}). */
+  private static final String ADMIN_PASSWORD = "admin";
+
+  private static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
 
   private RateLimitPolicy policy;
   private DemoHandlers handlers;
+  private JCustosAuditService audit;
 
   @BeforeEach
   void setUp() {
     JCustosServiceResolver.resetAll();
-    JCustosAuditService audit = JCustosServiceResolver.securityAuditService();
+    audit = JCustosServiceResolver.securityAuditService();
+    policy = new InMemoryRateLimitPolicy(
+        new InMemoryRateLimitStore(), audit, LIMIT, WINDOW);
+    handlers = handlers(policy);
+  }
+
+  private static DemoHandlers handlers(RateLimitPolicy loginRateLimit) {
     DemoTokenStore tokens = new DemoTokenStore();
     DemoUserStore users = new DemoUserStore(
         PasswordHashingServices.defaults(),
@@ -71,14 +88,12 @@ class DemoLoginRateLimitTest {
     DemoRolePermissionMapping mapping = new DemoRolePermissionMapping();
     DemoSubjectResolver resolver = new DemoSubjectResolver(tokens, mapping);
     DemoOperationRegistry registry = new DemoOperationRegistry();
-    policy = new InMemoryRateLimitPolicy(
-        new InMemoryRateLimitStore(), audit, LIMIT, WINDOW);
-    handlers = new DemoHandlers(
+    return new DemoHandlers(
         users, tokens, documents, registry, resolver,
         NoopLoginAttemptPolicy.INSTANCE,
         new InMemoryJCustosVersionStore(),
         null,
-        policy);
+        loginRateLimit);
   }
 
   @Test
@@ -95,6 +110,55 @@ class DemoLoginRateLimitTest {
         "attempt LIMIT+1 must be refused with 429 Too Many Requests");
     assertTrue(throttled.getHeaders().containsKey("Retry-After"),
         "throttled response must advertise Retry-After");
+  }
+
+  @Test
+  @DisplayName("Retry-After is the time until the oldest attempt leaves the window, rounded up - not the window")
+  void retryAfterFollowsTheOldestAttempt() {
+    MutableClock clock = new MutableClock(T0);
+    handlers = handlers(new InMemoryRateLimitPolicy(
+        new InMemoryRateLimitStore(), audit, LIMIT, WINDOW, clock));
+    for (Instant at : new Instant[] {T0, T0.plusSeconds(10), T0.plusSeconds(20)}) {
+      clock.set(at);
+      assertEquals(UNAUTHORIZED.code(), runLogin("admin", "wrong-password").status());
+    }
+    clock.set(T0.plusMillis(30_500));
+    DemoHttpResponse throttled = runLogin("admin", "wrong-password");
+    assertEquals(TOO_MANY_REQUESTS.code(), throttled.status());
+    // oldest (T0) + window (60 s) - now (T0+30.5 s) = 29.5 s, rounded up
+    assertEquals("30", throttled.getHeaders().get(RestThrottleResponses.RETRY_AFTER));
+
+    clock.set(T0.plusSeconds(60).plusNanos(1));
+    assertEquals(UNAUTHORIZED.code(), runLogin("admin", "wrong-password").status(),
+        "a client that waited that long reaches the credential check again");
+  }
+
+  @Test
+  @DisplayName("an escalating policy blocks the address: 429 for the block's duration, even with the right password")
+  void blockedAddressIsRefusedLikeAThrottle() {
+    MutableClock clock = new MutableClock(T0);
+    handlers = handlers(new InMemoryRateLimitPolicy(new InMemoryRateLimitStore(), audit, 1,
+        WINDOW, clock, new RateLimitEscalation(2, Duration.ofMinutes(5), Duration.ofMinutes(10))));
+    assertEquals(UNAUTHORIZED.code(), runLogin("admin", "wrong-password").status());
+    clock.set(T0.plusSeconds(1));
+    DemoHttpResponse throttled = runLogin("admin", "wrong-password");
+    assertEquals(TOO_MANY_REQUESTS.code(), throttled.status());
+    assertEquals("60", throttled.getHeaders().get(RestThrottleResponses.RETRY_AFTER));
+
+    clock.set(T0.plusSeconds(2));
+    DemoHttpResponse blocked = runLogin("admin", "wrong-password");
+    assertEquals(TOO_MANY_REQUESTS.code(), blocked.status(), "the second throttle blocks");
+    assertEquals("600", blocked.getHeaders().get(RestThrottleResponses.RETRY_AFTER));
+
+    clock.set(T0.plusSeconds(120)); // the window is empty again, the block is not over
+    DemoHttpResponse stillBlocked = runLogin("admin", ADMIN_PASSWORD);
+    assertEquals(TOO_MANY_REQUESTS.code(), stillBlocked.status(),
+        "a blocked address does not reach the credential check, not even with the right password");
+    assertEquals("482", stillBlocked.getHeaders().get(RestThrottleResponses.RETRY_AFTER));
+
+    clock.set(T0.plusSeconds(2).plus(Duration.ofMinutes(10)));
+    assertEquals(OK.code(), runLogin("admin", ADMIN_PASSWORD).status(),
+        "the block ends after its duration");
   }
 
   @Test
@@ -118,5 +182,33 @@ class DemoLoginRateLimitTest {
     DemoHttpResponse res = new DemoHttpResponse();
     handlers.login(req, res);
     return res;
+  }
+
+  /** Mutable clock that returns whatever instant the test set. */
+  private static final class MutableClock extends Clock {
+    private Instant now;
+
+    MutableClock(Instant now) {
+      this.now = now;
+    }
+
+    void set(Instant at) {
+      this.now = at;
+    }
+
+    @Override
+    public ZoneOffset getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
+
+    @Override
+    public Instant instant() {
+      return now;
+    }
   }
 }

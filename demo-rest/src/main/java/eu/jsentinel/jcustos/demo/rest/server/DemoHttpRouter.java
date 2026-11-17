@@ -20,6 +20,7 @@ import com.svenruppert.dependencies.core.net.HttpStatus;
 import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.demo.rest.shared.DemoEndpoints;
 import eu.jsentinel.jcustos.policy.api.ResourceRef;
+import eu.jsentinel.jcustos.rest.RestAuditCorrelation;
 import eu.jsentinel.jcustos.rest.RestAuthenticationFilter;
 import eu.jsentinel.jcustos.rest.RestAuthorizationFilter;
 import eu.jsentinel.jcustos.rest.RestHeaderLines;
@@ -129,7 +130,9 @@ public final class DemoHttpRouter implements HttpHandler {
         return;
       }
       DemoHttpRequest request = readRequest(exchange);
-      dispatch(request, response);
+      // R5 (JS-SEC-066): one correlation scope per request, outermost - also for the bootstrap
+      // handlers and the version filter, which audit outside the REST filters
+      RestAuditCorrelation.run(request, () -> dispatch(request, response));
       writeResponse(exchange, response);
     } catch (RuntimeException e) {
       DemoHttpResponse fallback = new DemoHttpResponse();

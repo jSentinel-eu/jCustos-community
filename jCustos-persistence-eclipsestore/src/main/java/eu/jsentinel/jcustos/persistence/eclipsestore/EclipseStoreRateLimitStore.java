@@ -25,6 +25,7 @@ import eu.jsentinel.jcustos.ratelimiting.RateLimitStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -62,6 +63,17 @@ import static java.util.Objects.requireNonNull;
  *
  * <p>An admitted event writes the key's event list; a refused request writes
  * nothing unless it pruned.</p>
+ *
+ * <h2>Blocks (since 00.84.00)</h2>
+ * <p>A key's block is a field of its bucket, so it is stored, evicted and reset
+ * with the key's events. {@link #block} extends it under the write lock and
+ * writes the bucket; {@link #blockedUntil} reads under the read lock and marks a
+ * blocked key as used. A bucket is dead only once its block has ended as well, so
+ * neither the sweep nor the bound's first pass drops a key whose block lasts; at
+ * the bound a blocked key that nobody asks for can still be evicted as the one
+ * used least recently.
+ * {@link #purgeOlderThan} drops blocks that ended before the cutoff. A bucket
+ * stored before blocks existed loads without one.</p>
  */
 final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
 
@@ -97,7 +109,7 @@ final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
     storage.update(() -> {
       RateLimitBucket bucket = bucket(key);
       if (bucket == null) {
-        addBucket(key, at, 0L);
+        addBucket(key, at, withEvent(at, 0L));
         return;
       }
       insertInOrder(bucket.events, at);
@@ -130,19 +142,21 @@ final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
         current = bucket.events.size();
       }
       if (current >= limit || current >= maxEventsPerKey) {
-        if (bucket != null) {
-          rememberWindow(bucket, windowMillis(at, since));
+        if (bucket == null) {
+          return new Admission(false, current);
         }
-        return new Admission(false, current);
+        rememberWindow(bucket, windowMillis(at, since));
+        // the oldest event left in the window is the one whose departure frees a slot
+        return new Admission(false, current, oldestEvent(bucket));
       }
       if (bucket == null) {
-        addBucket(key, at, windowMillis(at, since));
-      } else {
-        insertInOrder(bucket.events, at);
-        storage.markChanged(bucket.events);
-        rememberWindow(bucket, windowMillis(at, since));
+        addBucket(key, at, withEvent(at, windowMillis(at, since)));
+        return new Admission(true, 1, Optional.of(at));
       }
-      return new Admission(true, current + 1);
+      insertInOrder(bucket.events, at);
+      storage.markChanged(bucket.events);
+      rememberWindow(bucket, windowMillis(at, since));
+      return new Admission(true, current + 1, oldestEvent(bucket));
     });
   }
 
@@ -167,18 +181,78 @@ final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
     requireNonNull(cutoff, "cutoff must not be null");
     return storage.write(() -> {
       int[] purged = {0};
-      storage.tables().rateLimitBuckets.removeIf((key, bucket) -> {
+      StoredTable<RateLimitKey, RateLimitBucket> buckets = storage.tables().rateLimitBuckets;
+      buckets.removeIf((key, bucket) -> {
         int stale = firstAtOrAfter(bucket.events, cutoff);
         if (stale > 0) {
           bucket.events.subList(0, stale).clear();
           purged[0] += stale;
-          if (!bucket.events.isEmpty()) {
-            storage.markChanged(bucket.events);
-          }
         }
-        return bucket.events.isEmpty();
+        boolean blockEnded = bucket.blockedUntil != null && bucket.blockedUntil.isBefore(cutoff);
+        if (blockEnded) {
+          bucket.blockedUntil = null;
+        }
+        if (bucket.events.isEmpty() && bucket.blockedUntil == null) {
+          return true;
+        }
+        if (stale > 0) {
+          storage.markChanged(bucket.events);
+        }
+        if (blockEnded) {
+          storage.markChanged(bucket);
+          buckets.noteDeadline(bucket.deadAt()); // without its block the bucket dies sooner
+        }
+        return false;
       });
       return purged[0];
+    });
+  }
+
+  /**
+   * Reads under the read lock. A key that has a block is then marked as used under the write
+   * lock - nothing is written - because a blocked client's requests reach the store only
+   * here: otherwise the key it keeps hammering would be the first candidate for eviction.
+   *
+   * @return the end of the key's block; empty when none is recorded
+   * @since 00.84.00
+   */
+  @Override
+  public Optional<Instant> blockedUntil(RateLimitKey key) {
+    requireNonNull(key, "key must not be null");
+    Optional<Instant> until = storage.read(() -> {
+      RateLimitBucket bucket = storage.tables().rateLimitBuckets.get(key);
+      return bucket == null ? Optional.empty() : Optional.ofNullable(bucket.blockedUntil);
+    });
+    if (until.isPresent()) {
+      storage.update(() -> storage.tables().rateLimitBuckets.touch(key));
+    }
+    return until;
+  }
+
+  /**
+   * Extends the key's block to {@code until} under the write lock and stores it; a key the
+   * store does not know yet gets a bucket inside the bound.
+   *
+   * @return the end of the key's block after the call
+   * @since 00.84.00
+   */
+  @Override
+  public Instant block(RateLimitKey key, Instant until) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(until, "until must not be null");
+    return storage.write(() -> {
+      RateLimitBucket bucket = bucket(key);
+      if (bucket == null) {
+        RateLimitBucket blocked = new RateLimitBucket();
+        blocked.blockedUntil = until;
+        addBucket(key, storage.now(), blocked);
+        return until;
+      }
+      if (bucket.blockedUntil == null || until.isAfter(bucket.blockedUntil)) {
+        bucket.blockedUntil = until; // a block only ever grows, and so does the deadline
+        storage.markChanged(bucket);
+      }
+      return bucket.blockedUntil;
     });
   }
 
@@ -196,19 +270,30 @@ final class EclipseStoreRateLimitStore implements RateLimitStore, HasLogger {
   /**
    * Stores a bucket for a key that had none. The bucket is complete before it enters the table:
    * the table notes the deadline of what it is handed, and an empty bucket would look dead.
+   *
+   * @param now the instant entries that are dead by then may be dropped to make room
    */
-  private void addBucket(RateLimitKey key, Instant firstEvent, long windowMillis) {
+  private void addBucket(RateLimitKey key, Instant now, RateLimitBucket bucket) {
     StoredTable<RateLimitKey, RateLimitBucket> buckets = storage.tables().rateLimitBuckets;
-    int evicted = buckets.makeRoomFor(key, storage.maxEntries(), firstEvent);
+    int evicted = buckets.makeRoomFor(key, storage.maxEntries(), now);
     if (evicted > 0 && buckets.evictionLogDue()) {
       logger().warn("persistence/rate-limit-store-capacity: the rate-limit store is at its bound"
           + " of {} keys; the key used least recently is dropped for every new key - its events"
           + " no longer count", storage.maxEntries());
     }
+    buckets.put(key, bucket);
+  }
+
+  /** @return a new bucket holding {@code firstEvent} */
+  private static RateLimitBucket withEvent(Instant firstEvent, long windowMillis) {
     RateLimitBucket bucket = new RateLimitBucket();
     bucket.events.add(firstEvent);
     bucket.retentionMillis = windowMillis;
-    buckets.put(key, bucket);
+    return bucket;
+  }
+
+  private static Optional<Instant> oldestEvent(RateLimitBucket bucket) {
+    return bucket.events.isEmpty() ? Optional.empty() : Optional.of(bucket.events.get(0));
   }
 
   /** @return the window {@code [since, at]} in milliseconds, rounded up; 0 when there is none */

@@ -108,9 +108,17 @@ public final class AuthHandler {
 
     RateLimitDecision rate = loginRateLimit.tryAcquire(new RateLimitKey(TenantId.DEFAULT,
         "login:ip:" + (clientAddress == null ? "unknown" : clientAddress)));
-    if (rate instanceof RateLimitDecision.Throttled throttled) {
-      tooManyRequests(exchange, throttled.retryAfter());
-      return;
+    // refuse every decision but Allowed: a block of an escalating policy as well (00.84.00)
+    switch (rate) {
+      case RateLimitDecision.Allowed allowed -> { }
+      case RateLimitDecision.Throttled throttled -> {
+        tooManyRequests(exchange, throttled.retryAfter());
+        return;
+      }
+      case RateLimitDecision.Blocked blocked -> {
+        tooManyRequests(exchange, blocked.retryAfter());
+        return;
+      }
     }
 
     LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();

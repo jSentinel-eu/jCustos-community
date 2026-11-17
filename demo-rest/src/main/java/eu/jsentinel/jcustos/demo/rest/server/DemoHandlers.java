@@ -64,9 +64,11 @@ import eu.jsentinel.jcustos.jwt.api.JwtValidator;
 import eu.jsentinel.jcustos.jwt.api.ValidatedJwt;
 import eu.jsentinel.jcustos.rest.BearerTokenExtractor;
 import eu.jsentinel.jcustos.rest.BodyRestRequest;
+import eu.jsentinel.jcustos.rest.RestAuditCorrelation;
 import eu.jsentinel.jcustos.rest.RestClientAddress;
 import eu.jsentinel.jcustos.rest.RestDecisionContext;
 import eu.jsentinel.jcustos.rest.RestHeaders;
+import eu.jsentinel.jcustos.rest.RestRateLimit;
 import eu.jsentinel.jcustos.rest.RestRequest;
 import eu.jsentinel.jcustos.rest.RestResponse;
 import eu.jsentinel.jcustos.rest.RestThrottleResponses;
@@ -77,7 +79,6 @@ import eu.jsentinel.jcustos.authentication.ApiKeyStore;
 import eu.jsentinel.jcustos.authentication.TokenService;
 import eu.jsentinel.jcustos.credential.token.TokenHasher;
 import eu.jsentinel.jcustos.authorization.api.permissions.PermissionName;
-import eu.jsentinel.jcustos.ratelimiting.RateLimitDecision;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitKey;
 import eu.jsentinel.jcustos.ratelimiting.RateLimitPolicy;
 import com.svenruppert.dependencies.core.net.HttpStatus;
@@ -117,6 +118,12 @@ import java.util.Set;
  * (JS-SEC-086) and so carries a {@code WWW-Authenticate} challenge. Sessions are named by
  * their {@linkplain DemoTokenStore#sessionReference(String) reference}, never by the
  * bearer token (JS-SEC-117).
+ * <p>
+ * The per-address login rate limit is answered through {@link RestRateLimit}, so a block of
+ * an escalating policy is refused like a throttle (00.84.00). The public handlers that audit
+ * outside the REST filters - {@link #login}, the {@code /api/auth/token/*} handlers and the
+ * password-reset handlers - run inside {@link RestAuditCorrelation#run} (R5, JS-SEC-066):
+ * their audit events carry the request's correlation id.
  */
 public final class DemoHandlers {
 
@@ -465,7 +472,16 @@ public final class DemoHandlers {
             "hunter2", "trustno1"));
   }
 
+  /**
+   * {@code POST /api/login}. Audits outside the REST filters - the login-attempt policy's
+   * events, {@code LoginSucceeded}, {@code RateLimitExceeded} - so it opens the request's
+   * correlation scope itself (R5, JS-SEC-066).
+   */
   public void login(RestRequest request, RestResponse response) {
+    RestAuditCorrelation.run(request, () -> loginInScope(request, response));
+  }
+
+  private void loginInScope(RestRequest request, RestResponse response) {
     Map<String, Object> body;
     try {
       body = DemoJson.decodeObject(requireBody(request));
@@ -487,12 +503,12 @@ public final class DemoHandlers {
     // before the per-username brute-force policy. Configured for an order
     // of magnitude more attempts than the brute-force window: it catches
     // distributed credential stuffing rather than single-user lockouts.
+    // RestRateLimit refuses every decision but Allowed - a block of an
+    // escalating policy as well as a throttle (00.84.00).
     if (loginRateLimit != null) {
       RateLimitKey key = new RateLimitKey(TenantId.DEFAULT,
           "login:ip:" + (clientAddress == null ? "unknown" : clientAddress));
-      RateLimitDecision decision = loginRateLimit.tryAcquire(key);
-      if (decision instanceof RateLimitDecision.Throttled throttled) {
-        RestThrottleResponses.tooManyRequests(response, throttled.retryAfter());
+      if (RestRateLimit.respond(loginRateLimit.tryAcquire(key), response)) {
         return;
       }
     }
@@ -774,6 +790,11 @@ public final class DemoHandlers {
    * production would couple this to a credential challenge.
    */
   public void issueTokenPair(RestRequest request, RestResponse response) {
+    // R5 (JS-SEC-066): dispatched without the REST filters, audited by the service
+    RestAuditCorrelation.run(request, () -> issueTokenPairInScope(request, response));
+  }
+
+  private void issueTokenPairInScope(RestRequest request, RestResponse response) {
     if (tokenService == null) {
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;
@@ -802,6 +823,11 @@ public final class DemoHandlers {
    * expired) returns 401 + {@code WWW-Authenticate: TokenRotated}.
    */
   public void rotateTokenPair(RestRequest request, RestResponse response) {
+    // R5 (JS-SEC-066): dispatched without the REST filters, audited by the service
+    RestAuditCorrelation.run(request, () -> rotateTokenPairInScope(request, response));
+  }
+
+  private void rotateTokenPairInScope(RestRequest request, RestResponse response) {
     if (tokenService == null) {
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;
@@ -836,6 +862,11 @@ public final class DemoHandlers {
    * token returns 200 with {@code revoked:false}.
    */
   public void revokeTokenPair(RestRequest request, RestResponse response) {
+    // R5 (JS-SEC-066): dispatched without the REST filters, audited by the service
+    RestAuditCorrelation.run(request, () -> revokeTokenPairInScope(request, response));
+  }
+
+  private void revokeTokenPairInScope(RestRequest request, RestResponse response) {
     if (tokenService == null) {
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;
@@ -894,6 +925,11 @@ public final class DemoHandlers {
    * operators can detect enumeration / abuse.
    */
   public void requestPasswordReset(RestRequest request, RestResponse response) {
+    // R5 (JS-SEC-066): dispatched without the REST filters, audited by the service
+    RestAuditCorrelation.run(request, () -> requestPasswordResetInScope(request, response));
+  }
+
+  private void requestPasswordResetInScope(RestRequest request, RestResponse response) {
     if (passwordResetService == null) {
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;
@@ -927,6 +963,11 @@ public final class DemoHandlers {
    * / wrong tenant, 410 when the token has already been consumed.
    */
   public void consumePasswordReset(RestRequest request, RestResponse response) {
+    // R5 (JS-SEC-066): dispatched without the REST filters, audited by the service
+    RestAuditCorrelation.run(request, () -> consumePasswordResetInScope(request, response));
+  }
+
+  private void consumePasswordResetInScope(RestRequest request, RestResponse response) {
     if (passwordResetService == null) {
       writeError(response, HttpStatus.SERVICE_UNAVAILABLE);
       return;

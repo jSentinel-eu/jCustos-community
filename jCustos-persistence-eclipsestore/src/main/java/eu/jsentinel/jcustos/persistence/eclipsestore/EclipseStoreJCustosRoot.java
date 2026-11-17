@@ -254,8 +254,9 @@ final class EclipseStoreJCustosRoot {
   }
 
   /**
-   * The events of one rate-limit key (JS-SEC-118). A list in ascending order,
-   * not a set: two requests in the same clock tick are two events.
+   * The events of one rate-limit key (JS-SEC-118) and, since 00.84.00, its block.
+   * A list in ascending order, not a set: two requests in the same clock tick are
+   * two events.
    */
   static final class RateLimitBucket {
 
@@ -270,11 +271,27 @@ final class EclipseStoreJCustosRoot {
      */
     long retentionMillis;
 
+    /**
+     * End of the key's block, exclusive; {@code null} while the key has none. Added in
+     * 00.84.00 after the layout of JS-SEC-125: a bucket stored before has none.
+     */
+    Instant blockedUntil;
+
     RateLimitBucket() {
     }
 
-    /** @return the instant from which this bucket can no longer influence an admission */
+    /**
+     * @return the instant from which this bucket can no longer influence a decision: its
+     *     events are out of every window applied to it and its block has ended
+     */
     Instant deadAt() {
+      Instant eventsDeadAt = eventsDeadAt();
+      return blockedUntil != null && blockedUntil.isAfter(eventsDeadAt)
+          ? blockedUntil
+          : eventsDeadAt;
+    }
+
+    private Instant eventsDeadAt() {
       if (events.isEmpty()) {
         return Instant.MIN;
       }

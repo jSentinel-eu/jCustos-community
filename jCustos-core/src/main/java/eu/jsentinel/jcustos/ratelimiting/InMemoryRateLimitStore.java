@@ -25,6 +25,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static java.util.Objects.requireNonNull;
@@ -63,6 +64,14 @@ import static java.util.Objects.requireNonNull;
  * <p>Events that left the window are dropped per key on {@link #tryAdmit};
  * keys that are no longer used stay until {@link #purgeOlderThan(Instant)}
  * or the bound removes them.</p>
+ *
+ * <p><strong>Blocks</strong> (since 00.84.00): a key's block lives next to its
+ * events, under the same lock - {@link #block} extends it atomically,
+ * {@link #reset} lifts it with the events, {@link #purgeOlderThan} keeps a key
+ * whose block lasts beyond the cutoff although it holds no events. A blocked key
+ * takes the same place in the order of use as any other: a key whose client is
+ * still being refused is in use, but a blocked key nobody asks for can be evicted
+ * at the bound like the events of any other key.</p>
  */
 @ExperimentalJCustosApi
 public final class InMemoryRateLimitStore implements RateLimitStore {
@@ -76,9 +85,24 @@ public final class InMemoryRateLimitStore implements RateLimitStore {
    */
   public static final int DEFAULT_MAX_EVENTS_PER_KEY = 10_000;
 
+  /** The events of one key, ascending, and the end of its block; guarded by the lock. */
+  private static final class Bucket {
+    final ArrayList<Instant> events = new ArrayList<>(4);
+    /** End of the key's block, exclusive; {@code null} while the key has none. */
+    Instant blockedUntil;
+
+    boolean isEmpty() {
+      return events.isEmpty() && blockedUntil == null;
+    }
+
+    Optional<Instant> oldestEvent() {
+      return events.isEmpty() ? Optional.empty() : Optional.of(events.get(0));
+    }
+  }
+
   private final ReentrantLock lock = new ReentrantLock();
   /** Access order: iteration starts at the key that was used least recently. */
-  private final LinkedHashMap<RateLimitKey, ArrayList<Instant>> buckets =
+  private final LinkedHashMap<RateLimitKey, Bucket> buckets =
       new LinkedHashMap<>(16, 0.75f, true);
   private final int maxEntries;
   private final int maxEventsPerKey;
@@ -135,13 +159,13 @@ public final class InMemoryRateLimitStore implements RateLimitStore {
     requireNonNull(at, "at must not be null");
     lock.lock();
     try {
-      ArrayList<Instant> events = buckets.get(key);
-      if (events == null) {
-        events = newBucket(key);
+      Bucket bucket = buckets.get(key);
+      if (bucket == null) {
+        bucket = newBucket(key);
       }
-      insertInOrder(events, at);
-      if (events.size() > maxEventsPerKey) {
-        events.remove(0); // the oldest event of the key makes room
+      insertInOrder(bucket.events, at);
+      if (bucket.events.size() > maxEventsPerKey) {
+        bucket.events.remove(0); // the oldest event of the key makes room
       }
     } finally {
       lock.unlock();
@@ -160,36 +184,38 @@ public final class InMemoryRateLimitStore implements RateLimitStore {
     // limit-1 see each other's events instead of all passing (JS-SEC-078, CWE-367).
     lock.lock();
     try {
-      ArrayList<Instant> events = buckets.get(key);
+      Bucket bucket = buckets.get(key);
       int current = 0;
-      if (events != null) {
-        events.subList(0, firstAtOrAfter(events, since)).clear(); // outside the window
-        current = events.size();
+      if (bucket != null) {
+        // outside the window
+        bucket.events.subList(0, firstAtOrAfter(bucket.events, since)).clear();
+        current = bucket.events.size();
       }
       if (current >= limit || current >= maxEventsPerKey) {
-        return new Admission(false, current);
+        // the oldest event left in the window is the one whose departure frees a slot
+        return new Admission(false, current,
+            bucket == null ? Optional.empty() : bucket.oldestEvent());
       }
-      if (events == null) {
-        events = newBucket(key);
+      if (bucket == null) {
+        bucket = newBucket(key);
       }
-      insertInOrder(events, at);
-      return new Admission(true, current + 1);
+      insertInOrder(bucket.events, at);
+      return new Admission(true, current + 1, bucket.oldestEvent());
     } finally {
       lock.unlock();
     }
   }
 
   /** Caller holds the lock. Evicts the keys used least recently until the new key fits. */
-  private ArrayList<Instant> newBucket(RateLimitKey key) {
-    Iterator<Map.Entry<RateLimitKey, ArrayList<Instant>>> leastRecentlyUsed =
-        buckets.entrySet().iterator();
+  private Bucket newBucket(RateLimitKey key) {
+    Iterator<Map.Entry<RateLimitKey, Bucket>> leastRecentlyUsed = buckets.entrySet().iterator();
     while (buckets.size() >= maxEntries && leastRecentlyUsed.hasNext()) {
       leastRecentlyUsed.next();
       leastRecentlyUsed.remove();
     }
-    ArrayList<Instant> events = new ArrayList<>(4);
-    buckets.put(key, events);
-    return events;
+    Bucket bucket = new Bucket();
+    buckets.put(key, bucket);
+    return bucket;
   }
 
   @Override
@@ -198,8 +224,8 @@ public final class InMemoryRateLimitStore implements RateLimitStore {
     requireNonNull(since, "since must not be null");
     lock.lock();
     try {
-      ArrayList<Instant> events = buckets.get(key);
-      return events == null ? 0 : events.size() - firstAtOrAfter(events, since);
+      Bucket bucket = buckets.get(key);
+      return bucket == null ? 0 : bucket.events.size() - firstAtOrAfter(bucket.events, since);
     } finally {
       lock.unlock();
     }
@@ -222,17 +248,62 @@ public final class InMemoryRateLimitStore implements RateLimitStore {
     lock.lock();
     try {
       int purged = 0;
-      Iterator<ArrayList<Instant>> all = buckets.values().iterator();
+      Iterator<Bucket> all = buckets.values().iterator();
       while (all.hasNext()) {
-        ArrayList<Instant> events = all.next();
-        int stale = firstAtOrAfter(events, cutoff);
-        events.subList(0, stale).clear();
+        Bucket bucket = all.next();
+        int stale = firstAtOrAfter(bucket.events, cutoff);
+        bucket.events.subList(0, stale).clear();
         purged += stale;
-        if (events.isEmpty()) {
+        if (bucket.blockedUntil != null && bucket.blockedUntil.isBefore(cutoff)) {
+          bucket.blockedUntil = null; // the block has ended
+        }
+        if (bucket.isEmpty()) {
           all.remove();
         }
       }
       return purged;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * @return the end of the key's block; empty when none is recorded
+   * @since 00.84.00
+   */
+  @Override
+  public Optional<Instant> blockedUntil(RateLimitKey key) {
+    requireNonNull(key, "key must not be null");
+    lock.lock();
+    try {
+      Bucket bucket = buckets.get(key);
+      return bucket == null ? Optional.empty() : Optional.ofNullable(bucket.blockedUntil);
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Extends the key's block to {@code until} under the store's lock; a key the store does
+   * not know yet is added inside the bound.
+   *
+   * @return the end of the key's block after the call
+   * @since 00.84.00
+   */
+  @Override
+  public Instant block(RateLimitKey key, Instant until) {
+    requireNonNull(key, "key must not be null");
+    requireNonNull(until, "until must not be null");
+    lock.lock();
+    try {
+      Bucket bucket = buckets.get(key);
+      if (bucket == null) {
+        bucket = newBucket(key);
+      }
+      if (bucket.blockedUntil == null || until.isAfter(bucket.blockedUntil)) {
+        bucket.blockedUntil = until; // a block only ever grows
+      }
+      return bucket.blockedUntil;
     } finally {
       lock.unlock();
     }

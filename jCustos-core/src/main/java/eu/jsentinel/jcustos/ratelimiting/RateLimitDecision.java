@@ -25,9 +25,17 @@ import static java.util.Objects.requireNonNull;
 /**
  * Result of a {@link RateLimitPolicy#tryAcquire} call.
  * <p>
- * Sealed because adapters dispatch on the two outcomes — let the
- * request through or refuse it with a {@code 429 Too Many
- * Requests} (REST) / equivalent rejection (UI).
+ * Sealed because adapters dispatch on the outcomes — let the
+ * request through ({@link Allowed}) or refuse it with a {@code 429 Too Many
+ * Requests} (REST) / equivalent rejection (UI): {@link Throttled} while the
+ * window is full, {@link Blocked} (since 00.84.00) while the key serves a block
+ * that an opt-in {@link RateLimitEscalation} imposed.
+ * <p>
+ * Refuse every decision that is not {@link Allowed}: code that tests for
+ * {@code instanceof Throttled} alone lets a {@link Blocked} decision through. An
+ * exhaustive {@code switch} over the three variants, or
+ * {@code eu.jsentinel.jcustos.rest.RestRateLimit.respond} in a REST handler, cannot
+ * miss one.
  */
 @ExperimentalJCustosApi
 public sealed interface RateLimitDecision {
@@ -72,7 +80,10 @@ public sealed interface RateLimitDecision {
    * @param retryAfter     duration until the oldest in-window event
    *                       falls out of the window — a fair lower
    *                       bound for {@code Retry-After}; non-null,
-   *                       non-negative
+   *                       non-negative. {@link InMemoryRateLimitPolicy}
+   *                       computes it from the oldest event the store
+   *                       reports (since 00.84.00; until then it was the
+   *                       whole window)
    */
   record Throttled(int eventsInWindow, int limit, Duration window, Duration retryAfter)
       implements RateLimitDecision {
@@ -88,6 +99,46 @@ public sealed interface RateLimitDecision {
       requireNonNull(retryAfter, "retryAfter must not be null");
       if (retryAfter.isNegative()) {
         throw new IllegalArgumentException("retryAfter must not be negative");
+      }
+    }
+  }
+
+  /**
+   * The event was refused because the key is blocked: it was throttled
+   * {@code throttledCount} times within the escalation window of a
+   * {@link RateLimitEscalation}, and the block has not ended yet. Nothing is
+   * recorded while a key is blocked. Only a policy configured with an
+   * escalation returns this variant; without one it never occurs.
+   *
+   * @param eventsInWindow events in the window when the decision was taken
+   * @param limit          configured limit
+   * @param window         configured window
+   * @param retryAfter     duration until the block ends; non-null, strictly
+   *                       positive
+   * @param throttledCount the throttles within the escalation window that
+   *                       caused the block - the escalation's threshold;
+   *                       non-negative
+   * @since 00.84.00
+   */
+  record Blocked(int eventsInWindow, int limit, Duration window, Duration retryAfter,
+                 int throttledCount)
+      implements RateLimitDecision {
+    /** Validates the components. */
+    public Blocked {
+      if (eventsInWindow < 0) {
+        throw new IllegalArgumentException("eventsInWindow must not be negative");
+      }
+      if (limit <= 0) {
+        throw new IllegalArgumentException("limit must be strictly positive");
+      }
+      requireNonNull(window, "window must not be null");
+      requireNonNull(retryAfter, "retryAfter must not be null");
+      if (retryAfter.isNegative() || retryAfter.isZero()) {
+        throw new IllegalArgumentException("retryAfter must be strictly positive: a block that"
+            + " has ended blocks nothing");
+      }
+      if (throttledCount < 0) {
+        throw new IllegalArgumentException("throttledCount must not be negative");
       }
     }
   }
