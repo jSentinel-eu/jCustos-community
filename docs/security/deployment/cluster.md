@@ -119,6 +119,12 @@ this release; their limits therefore add up across the nodes.
   (`LoginAttemptLimits.maxConcurrentCredentialChecks`) holds a fixed number of permits per policy
   instance, so it bounds the concurrent credential checks of one node. The cluster as a whole runs
   up to `permits × nodes` checks; size the permits for one node.
+- **Proactive reaction to a version change** (`ObservableJCustosVersionStore`, R8, JS-SEC-167). The
+  decorator notifies the listeners of the node that changed the version, so only the sessions on
+  that node are ended at once and only their controls refreshed. The other nodes read the new
+  version from the shared `JCustosVersionStore` and end a drifted session at its next request (the
+  per-request check of `JCustosVersionEnforcerListener`). Proactive delivery to every node would need
+  a message bus between the nodes; this release ships none.
 
 ## What a store for several nodes has to guarantee
 
