@@ -121,7 +121,11 @@ import java.util.Optional;
  * {@link CredentialStore#replaceSecretIfCurrent}, which records the change and
  * clears a compromise marker in the same step (JS-SEC-161). Open
  * siblings are retired and {@link PasswordResetCompleted} is emitted
- * (JS-SEC-074).</p>
+ * (JS-SEC-074). A credential that was {@code RESET_PENDING} or
+ * {@link CredentialStatus#MUST_CHANGE} returns to {@code ACTIVE}; since
+ * {@code PasswordChangeService} refuses to replace a secret declared
+ * compromised, the reset is the way out of {@code COMPROMISED -> MUST_CHANGE}
+ * (JS-SEC-161).</p>
  *
  * <p>Every failure variant collapses to the same generic public
  * response at the adapter boundary; the differentiated reason stays
@@ -500,22 +504,28 @@ public final class PasswordResetService implements HasLogger {
     retireOpenSiblings(record.username(), token.selector());
     publish(new PasswordResetCompleted(now, record.username(), token.selector()));
 
-    // Move the credential back to ACTIVE.
-    if (credentialRecord.status() == CredentialStatus.RESET_PENDING
-        && lifecycleService.isAllowed(
-            CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE)) {
+    // Move the credential back to ACTIVE. JS-SEC-161 (CWE-620): MUST_CHANGE is
+    // cleared too - the reset wrote a secret only the owner of the recovery
+    // channel chose, which is what MUST_CHANGE asks for, and for a credential
+    // that went COMPROMISED -> MUST_CHANGE the reset is the only way back,
+    // because PasswordChangeService refuses a change while the compromise is
+    // recorded.
+    CredentialStatus statusBefore = credentialRecord.status();
+    if ((statusBefore == CredentialStatus.RESET_PENDING
+        || statusBefore == CredentialStatus.MUST_CHANGE)
+        && lifecycleService.isAllowed(statusBefore, CredentialStatus.ACTIVE)) {
       try {
         lifecycleService.transition(record.username(),
-            CredentialStatus.RESET_PENDING, CredentialStatus.ACTIVE,
+            statusBefore, CredentialStatus.ACTIVE,
             "reset-consumed");
       } catch (InvalidStatusTransitionException refused) {
         // JS-SEC-161: only a store that does not record the new secret gets here
         // (replaceSecretIfCurrent left the compromise marker in place). The
-        // password is replaced; the credential stays RESET_PENDING.
+        // password is replaced; the credential keeps its status.
         logger().warn("credential/rotation-not-recorded: the password of user '{}' was"
             + " reset, but the credential store did not record the new secret, so the"
             + " credential stays {}: {}", LogFieldScrubber.scrub(record.username()),
-            CredentialStatus.RESET_PENDING, refused.getMessage());
+            statusBefore, refused.getMessage());
       }
     }
     // JS-SEC-121: the reset completed; there is no earlier status to return to.

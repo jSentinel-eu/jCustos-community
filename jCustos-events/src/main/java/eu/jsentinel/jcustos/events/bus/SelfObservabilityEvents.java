@@ -162,8 +162,10 @@ public final class SelfObservabilityEvents {
    */
   public static final int MAX_UNVERIFIED_ID_LENGTH = 64;
 
+  // JS-SEC-101: REASON_KEY_NOT_AUTHORIZED is deliberately absent - only the
+  // holder of a usable key can cause it, so it is no keyless noise.
   private static final Set<String> UNAUTHENTICATED_REASONS = Set.of(
-      REASON_UNKNOWN_KEY, REASON_KEY_REVOKED, REASON_KEY_EXPIRED, REASON_KEY_NOT_AUTHORIZED);
+      REASON_UNKNOWN_KEY, REASON_KEY_REVOKED, REASON_KEY_EXPIRED);
 
   private SelfObservabilityEvents() {
   }
@@ -264,10 +266,19 @@ public final class SelfObservabilityEvents {
    * behind it (an audit chain) should not record every one of them, and an
    * alerting listener should throttle them.
    *
+   * <p>A rejection with reason {@link #REASON_KEY_NOT_AUTHORIZED} is not one
+   * of them (JS-SEC-101, CWE-290, CWE-778). Its signature verified, so only
+   * the holder of a usable key can cause it, and it documents that this key
+   * signed in the name of a producer it is not bound to - the misuse an audit
+   * chain exists to record. The event is still raised under
+   * {@link #UNAUTHENTICATED_TENANT} with an unverified envelope id, because
+   * the producer and tenant the envelope claims are not facts; the key id it
+   * carries is.</p>
+   *
    * @param event any event
    * @return {@code true} for a {@link SignatureInvalidEvent} and for an
    *     {@link EnvelopeRejectedEvent} whose reason is unknown key, revoked
-   *     key, expired key or key not bound to the producer
+   *     key or expired key
    * @since 00.84.00
    */
   public static boolean isUnauthenticatedRejection(JCustosEvent event) {

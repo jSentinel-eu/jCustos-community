@@ -1944,8 +1944,17 @@ records the change time and clears the marker in the same compare-and-swap as th
 keeps both. `MassCredentialStatusChange` records the compromise when it writes `COMPROMISED` and no
 longer moves a credential that still holds a compromised secret to `ACTIVE`, `REHASH_REQUIRED` or
 `DEPRECATED_ALGORITHM`; such credentials are counted in the new `Report.rotationRequired`.
-**Consumers:** re-enabling a credential that went through `COMPROMISED` throws until the user
-changes the password or completes a reset — offer `MUST_CHANGE` or `RESET_PENDING` instead.
+`PasswordChangeService` no longer lets the compromised secret authorise its own replacement: while
+`secretRotationRequired()` holds — typically after `COMPROMISED → MUST_CHANGE` — `change` returns
+the new `PasswordChangeResult.ResetRequired` before it verifies the current password. Whoever
+obtained the leak knows that password as well; accepted, it let them set a password of their own
+and take the account over, and the change then counted as the rotation. The reset, which proves
+possession of the recovery channel, is the only way out, and a consumed reset now returns a
+`MUST_CHANGE` credential to `ACTIVE` as it already did for `RESET_PENDING`.
+**Consumers:** re-enabling a credential that went through `COMPROMISED` throws until a reset has
+been completed — offer `RESET_PENDING`, or `MUST_CHANGE` together with a reset link, instead. An
+exhaustive `switch` over `PasswordChangeResult` needs a branch for `ResetRequired`; answer it
+generically, offer the reset, and do not count it as a failed attempt.
 `CredentialRecord` gained two components (the six-argument constructor stays); a record Eclipse
 Store loads from a storage written before 00.84.00 has both null and is treated fail-closed. A
 third-party `CredentialStore` persists both components, implements `replaceSecretIfCurrent` and
@@ -2095,6 +2104,10 @@ holder could spend it with unsigned envelopes and then sign in another producer'
 These rejections now have a budget of their own (`DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT` per
 `DEFAULT_KEY_NOT_AUTHORIZED_EVENT_WINDOW`, `suppressedKeyNotAuthorizedCount()`), and
 `EnvelopeRejectedEvent` carries the verified key id in the new `keyId` component.
+`SelfObservabilityEvents.isUnauthenticatedRejection` no longer counts the reason
+`key-not-authorized-for-producer`: the signature verified, so only the holder of a usable key can
+cause it, and a listener that leaves keyless noise out — the enterprise audit chain — now records
+the misuse. The event is still raised under the system tenant with an unverified envelope id.
 `JdkKeyStoreKeyManagement` looked keys up case-insensitively (`VAADIN-CLIENT` resolved
 `vaadin-client`); a key id is now accepted only if it equals an alias the store lists.
 **Consumers:** the three-argument `EnvelopeRejectedEvent` constructor stays, record patterns need

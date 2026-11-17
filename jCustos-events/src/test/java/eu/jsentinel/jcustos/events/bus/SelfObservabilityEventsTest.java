@@ -271,7 +271,9 @@ class SelfObservabilityEventsTest {
     assertFalse(result.envelopeAuthenticated(), name);
     assertEquals(TenantId.DEFAULT, event.tenantId(),
         name + ": the event must not be raised under the tenant the junk claims");
-    assertTrue(SelfObservabilityEvents.isUnauthenticatedRejection(event), name);
+    // JS-SEC-101: only a key holder causes KeyNotAuthorizedForProducer - no keyless noise.
+    assertEquals(!(result instanceof JCustosEventVerificationResult.KeyNotAuthorizedForProducer),
+        SelfObservabilityEvents.isUnauthenticatedRejection(event), name);
     String reportedId = event instanceof SignatureInvalidEvent signature
         ? signature.envelopeId()
         : ((EnvelopeRejectedEvent) event).rejectedEnvelopeId();

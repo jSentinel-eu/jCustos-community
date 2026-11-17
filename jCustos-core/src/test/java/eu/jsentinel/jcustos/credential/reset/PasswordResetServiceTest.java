@@ -248,6 +248,23 @@ class PasswordResetServiceTest {
   }
 
   @Test
+  @DisplayName("JS-SEC-161: a consumed reset clears MUST_CHANGE - the owner chose the new secret")
+  void consumeClearsMustChange() {
+    Fixture f = new Fixture();
+    f.register("alice", "Old-Password-1", CredentialStatus.MUST_CHANGE);
+    String wire = ((ResetTokenCreationResult.Created) f.service.issue("alice", TTL))
+        .token().encode();
+    assertEquals(CredentialStatus.MUST_CHANGE,
+        f.credentials.findByUsername("alice").orElseThrow().status());
+
+    assertSame(PasswordResetConsumeResult.Succeeded.INSTANCE,
+        f.service.consume(wire, SecretValue.ofString("new-password-22")));
+
+    assertEquals(CredentialStatus.ACTIVE,
+        f.credentials.findByUsername("alice").orElseThrow().status());
+  }
+
+  @Test
   @DisplayName("consume happy path: hash updated, token consumed, credential ACTIVE again")
   void consumeHappyPath() {
     Fixture f = new Fixture();

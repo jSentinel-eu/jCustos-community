@@ -36,8 +36,9 @@ import java.util.Objects;
  * boundary; the differentiated structural reason stays in audit
  * (CWE-203 / CWE-209).</p>
  *
- * <p>Since 00.84.00 the type has the variant {@link VerificationUnavailable};
- * an exhaustive {@code switch} over the result needs a branch for it.</p>
+ * <p>Since 00.84.00 the type has the variants {@link VerificationUnavailable}
+ * and {@link ResetRequired}; an exhaustive {@code switch} over the result
+ * needs a branch for each.</p>
  */
 public sealed interface PasswordChangeResult
     permits PasswordChangeResult.Succeeded,
@@ -45,6 +46,7 @@ public sealed interface PasswordChangeResult
             PasswordChangeResult.VerificationUnavailable,
             PasswordChangeResult.NewPasswordRejected,
             PasswordChangeResult.Blocked,
+            PasswordChangeResult.ResetRequired,
             PasswordChangeResult.Conflict,
             PasswordChangeResult.NotFound {
 
@@ -104,6 +106,25 @@ public sealed interface PasswordChangeResult
     public Blocked {
       Objects.requireNonNull(decision, "decision");
     }
+  }
+
+  /**
+   * The credential still holds a secret that was declared compromised
+   * ({@link eu.jsentinel.jcustos.credential.store.CredentialRecord#secretRotationRequired()}),
+   * typically after {@code COMPROMISED -> MUST_CHANGE} (JS-SEC-161, CWE-620,
+   * CWE-640). Knowing that secret proves nothing - whoever obtained the leak
+   * knows it too - so it cannot authorise its own replacement: only the reset
+   * flow, which proves possession of the account's recovery channel, writes the
+   * new secret. The check runs before the current password is verified, so the
+   * result says nothing about the password. The store is untouched; the adapter
+   * answers generically, may offer the reset, and must not count a failed
+   * attempt for it.
+   *
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  record ResetRequired() implements PasswordChangeResult {
+    public static final ResetRequired INSTANCE = new ResetRequired();
   }
 
   /**

@@ -207,6 +207,8 @@ class UnauthenticatedRejectionFloodTest {
     assertEquals(BusFixtures.KEY.value(), reported.keyId(), "the verified key is named");
     assertEquals(SelfObservabilityEvents.UNAUTHENTICATED_TENANT, reported.tenantId(),
         "the claimed tenant is still not adopted");
+    assertFalse(SelfObservabilityEvents.isUnauthenticatedRejection(reported),
+        "a key holder's impersonation is no keyless noise; an audit chain records it");
 
     // Its own budget is bounded too, and independent of the keyless one.
     int keyLimit = ConsumeFailureHandler.DEFAULT_KEY_NOT_AUTHORIZED_EVENT_LIMIT;

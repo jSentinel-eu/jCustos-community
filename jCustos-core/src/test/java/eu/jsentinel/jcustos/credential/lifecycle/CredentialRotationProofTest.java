@@ -190,26 +190,74 @@ class CredentialRotationProofTest {
   }
 
   @Test
-  @DisplayName("allowed: a password change from MUST_CHANGE records the change and reaches ACTIVE")
-  void passwordChangeIsTheRotation() {
+  @DisplayName("SA61-D2: the leaked password cannot replace itself - a change from COMPROMISED -> MUST_CHANGE is refused")
+  void passwordChangeCannotReplaceACompromisedSecret() {
     CredentialTestKit kit = compromisedAlice();
     kit.lifecycle().transition("alice", CredentialStatus.COMPROMISED, CredentialStatus.MUST_CHANGE,
         "force-change");
-    Instant changeAt = kit.clock.instant();
+    CredentialRecord before = alice(kit);
+    long activations = statusEvents(kit, CredentialStatus.ACTIVE);
+    PasswordChangeService change = changeService(kit, kit.credentials);
 
-    PasswordChangeResult result = changeService(kit, kit.credentials).change(
-        new PasswordChangeCommand("alice", SecretValue.ofString(LEAKED),
-            SecretValue.ofString(FRESH)));
+    PasswordChangeResult withLeak = change.change(new PasswordChangeCommand("alice",
+        SecretValue.ofString(LEAKED), SecretValue.ofString(FRESH)));
+    PasswordChangeResult withGuess = change.change(new PasswordChangeCommand("alice",
+        SecretValue.ofString("a wrong guess 3"), SecretValue.ofString(FRESH)));
 
-    assertInstanceOf(PasswordChangeResult.Succeeded.class, result);
-    CredentialRecord changed = alice(kit);
-    assertEquals(CredentialStatus.ACTIVE, changed.status());
-    assertEquals(changeAt, changed.secretChangedAt());
-    assertNull(changed.compromisedSince());
-    assertFalse(changed.secretRotationRequired());
+    assertSame(PasswordChangeResult.ResetRequired.INSTANCE, withLeak);
+    assertSame(PasswordChangeResult.ResetRequired.INSTANCE, withGuess,
+        "checked before the verification: the answer says nothing about the password");
+    assertEquals(before, alice(kit), "the store is untouched");
+    assertTrue(kit.passwordIs("alice", LEAKED));
+    assertEquals(CredentialStatus.MUST_CHANGE, kit.status("alice"));
+    assertEquals(activations, statusEvents(kit, CredentialStatus.ACTIVE));
+  }
+
+  @Test
+  @DisplayName("SA61-D2: a change while the reset out of COMPROMISED is pending is refused as well")
+  void passwordChangeIsRefusedWhileTheResetIsPending() {
+    CredentialTestKit kit = compromisedAlice();
+    PasswordResetService reset = resetService(kit, kit.credentials);
+    String link = assertInstanceOf(ResetTokenCreationResult.Created.class,
+        reset.issue("alice", TTL)).token().encode();
+    assertEquals(CredentialStatus.RESET_PENDING, kit.status("alice"));
+
+    assertSame(PasswordChangeResult.ResetRequired.INSTANCE,
+        changeService(kit, kit.credentials).change(new PasswordChangeCommand("alice",
+            SecretValue.ofString(LEAKED), SecretValue.ofString(FRESH))));
+    assertTrue(kit.passwordIs("alice", LEAKED));
+
+    assertSame(PasswordResetConsumeResult.Succeeded.INSTANCE,
+        reset.consume(link, SecretValue.ofString(FRESH)), "the link still works");
+    assertEquals(CredentialStatus.ACTIVE, kit.status("alice"));
+  }
+
+  @Test
+  @DisplayName("allowed: a consumed reset leads COMPROMISED -> MUST_CHANGE back to ACTIVE")
+  void resetIsTheWayOutOfMustChange() {
+    CredentialTestKit kit = compromisedAlice();
+    kit.lifecycle().transition("alice", CredentialStatus.COMPROMISED, CredentialStatus.MUST_CHANGE,
+        "force-change");
+    PasswordResetService reset = resetService(kit, kit.credentials);
+    String link = assertInstanceOf(ResetTokenCreationResult.Created.class,
+        reset.issue("alice", TTL)).token().encode();
+    assertEquals(CredentialStatus.MUST_CHANGE, kit.status("alice"), "the request moves nothing");
+    kit.clock.advance(Duration.ofSeconds(5));
+
+    assertSame(PasswordResetConsumeResult.Succeeded.INSTANCE,
+        reset.consume(link, SecretValue.ofString(FRESH)));
+
+    CredentialRecord after = alice(kit);
+    assertEquals(CredentialStatus.ACTIVE, after.status());
+    assertEquals(kit.clock.instant(), after.secretChangedAt());
+    assertNull(after.compromisedSince());
+    assertFalse(after.secretRotationRequired());
     assertTrue(kit.passwordIs("alice", FRESH));
 
-    // the account is an ordinary one again: disable and re-enable work
+    // the account is an ordinary one again: the next change and a disable/re-enable work
+    assertInstanceOf(PasswordChangeResult.Succeeded.class,
+        changeService(kit, kit.credentials).change(new PasswordChangeCommand("alice",
+            SecretValue.ofString(FRESH), SecretValue.ofString("yet another password 4"))));
     CredentialLifecycleService lifecycle = kit.lifecycle();
     lifecycle.transition("alice", CredentialStatus.ACTIVE, CredentialStatus.DISABLED, "x");
     assertInstanceOf(CredentialUpdateResult.Updated.class,
@@ -422,7 +470,7 @@ class CredentialRotationProofTest {
   }
 
   @Test
-  @DisplayName("a store that keeps the mark but not the change: the change succeeds, the credential stays MUST_CHANGE")
+  @DisplayName("a store that keeps the mark but not the change: the reset succeeds, the credential stays MUST_CHANGE")
   void storeThatCannotRecordTheChangeFailsClosed() {
     CredentialTestKit kit = compromisedAlice();
     kit.lifecycle().transition("alice", CredentialStatus.COMPROMISED, CredentialStatus.MUST_CHANGE,
@@ -446,11 +494,16 @@ class CredentialRotationProofTest {
         return kit.credentials.updateStatusIfCurrent(username, expected, next, when);
       }
     };
+    assertSame(PasswordChangeResult.ResetRequired.INSTANCE,
+        changeService(kit, partial).change(new PasswordChangeCommand(
+            "alice", SecretValue.ofString(LEAKED), SecretValue.ofString(FRESH))));
+    PasswordResetService reset = resetService(kit, partial);
+    String link = assertInstanceOf(ResetTokenCreationResult.Created.class,
+        reset.issue("alice", TTL)).token().encode();
 
-    PasswordChangeResult result = changeService(kit, partial).change(new PasswordChangeCommand(
-        "alice", SecretValue.ofString(LEAKED), SecretValue.ofString(FRESH)));
+    assertSame(PasswordResetConsumeResult.Succeeded.INSTANCE,
+        reset.consume(link, SecretValue.ofString(FRESH)), "no exception reaches the user");
 
-    assertInstanceOf(PasswordChangeResult.Succeeded.class, result, "no exception reaches the user");
     assertTrue(kit.passwordIs("alice", FRESH));
     assertEquals(CredentialStatus.MUST_CHANGE, kit.status("alice"),
         "without a recorded rotation the credential does not become ACTIVE");

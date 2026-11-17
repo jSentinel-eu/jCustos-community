@@ -20,7 +20,7 @@ what is permanently one-way.
 | `AbuseDecision.Block` throttle      | Wait for the window to expire, or restart with a tighter window.        |
 | Policy version increment            | Decrement (deploy the previous policy) — old envelopes still verify under it. |
 | Provider downgrade (pin previous version) | Re-pin the affected dependency; SBOM diff verifies the change.    |
-| `MUST_CHANGE` status flip           | Operator-issued `CredentialLifecycleService` transition back to `ACTIVE`. Rare; needs an audit-recorded justification. Never for a credential that was `COMPROMISED`: since V00.84.00 `COMPROMISED` cannot return to `ACTIVE` without a new secret (JS-SEC-076), and a detour through `MUST_CHANGE` would accept the compromised secret again. |
+| `MUST_CHANGE` status flip           | Operator-issued `CredentialLifecycleService` transition back to `ACTIVE`. Rare; needs an audit-recorded justification. Never for a credential that was `COMPROMISED`: since V00.84.00 `COMPROMISED` cannot return to `ACTIVE` without a new secret (JS-SEC-076, JS-SEC-161) — the transition is refused with `SECRET_ROTATION_REQUIRED`, and the password change refuses with `ResetRequired`, so only a completed reset leads such a credential back to `ACTIVE`. |
 
 ## Conditionally reversible
 

@@ -53,6 +53,11 @@ import java.util.Optional;
  *   <li>Load the credential by username; missing → {@code NotFound}.</li>
  *   <li>Consult the lifecycle service; status that forbids change
  *       (LOCKED / COMPROMISED / DISABLED) → {@code Blocked}.</li>
+ *   <li>A credential that still holds a secret declared compromised
+ *       ({@link CredentialRecord#secretRotationRequired()}, typically
+ *       {@code COMPROMISED -> MUST_CHANGE}) → {@code ResetRequired}: the
+ *       leaked password must not authorise its own replacement, the reset
+ *       is the only way out (JS-SEC-161, CWE-620, CWE-640).</li>
  *   <li>Re-authenticate by verifying the supplied current password
  *       (CWE-620). A verification that could not be carried out - shed by
  *       the KDF limiter - → {@code VerificationUnavailable}: "could not
@@ -184,6 +189,14 @@ public final class PasswordChangeService implements HasLogger {
         || lifecycle instanceof CredentialLifecycleDecision.BlockedPermanent) {
       return new PasswordChangeResult.Blocked(lifecycle);
     }
+    // JS-SEC-161 (CWE-620, CWE-640): COMPROMISED -> MUST_CHANGE keeps the
+    // compromised secret. Verified here, it would let whoever holds the leak set
+    // a password of their own and take the account over - with the change then
+    // counted as the rotation. Checked before the verification, so the answer
+    // says nothing about the password.
+    if (record.secretRotationRequired()) {
+      return PasswordChangeResult.ResetRequired.INSTANCE;
+    }
 
     CredentialVerificationResult verifyResult = hashingService.verify(
         command.currentPassword(), record.encodedHash());
@@ -224,9 +237,9 @@ public final class PasswordChangeService implements HasLogger {
             CredentialStatus.MUST_CHANGE, CredentialStatus.ACTIVE,
             "password-changed");
       } catch (InvalidStatusTransitionException refused) {
-        // JS-SEC-161: only a store that does not record the new secret gets here
-        // (CredentialStore.replaceSecretIfCurrent left the compromise marker in
-        // place). The password is new; the credential stays MUST_CHANGE.
+        // JS-SEC-161: the change is refused while a compromise is recorded, so
+        // only a compromise recorded concurrently with this change gets here.
+        // The password is new; the credential stays MUST_CHANGE.
         logger().warn("credential/rotation-not-recorded: the password of user '{}' was"
             + " changed, but the credential store did not record the new secret, so the"
             + " credential stays {}: {}", LogFieldScrubber.scrub(record.username()),
