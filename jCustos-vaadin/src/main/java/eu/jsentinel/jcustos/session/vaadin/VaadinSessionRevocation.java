@@ -20,11 +20,10 @@ import com.svenruppert.dependencies.core.logger.HasLogger;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.audit.SessionInvalidated;
 import eu.jsentinel.jcustos.audit.SessionRef;
+import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectIdResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStore;
-import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.session.SessionId;
 import eu.jsentinel.jcustos.session.SessionRecord;
 import eu.jsentinel.jcustos.session.SessionStatus;
@@ -98,6 +97,16 @@ import static java.util.Objects.requireNonNull;
  *
  * <p>The audit events of this class carry the {@link SessionRef reference} of the session id,
  * never the id itself (JS-SEC-117).
+ *
+ * <p><strong>The subject id of a revocation (ER30 follow-up, decision F21, JS-SEC-097).</strong>
+ * {@code SessionInvalidated} names the subject bound to the session through the value of the
+ * registered {@link SubjectIdResolver}; without one - or when it fails or yields a blank
+ * value - through the subject id of the session record that is revoked, so the audit trail
+ * names the session under the id the session inventory shows; without a record through the
+ * identity handle of {@link CurrentSubject#subjectIdOf(Object)}. It is never the subject's
+ * {@code toString()}. Only a session without a bound subject and without a record id is
+ * audited with an empty subject id: there is nobody to name. Until this follow-up a session
+ * ended without a resolver and without a record was audited with an empty id.
  *
  * <p>The holder is process-wide. {@code VaadinSecurity.bootstrap()} publishes the store
  * whenever store-backed sessions are configured ({@code .sessions(s -> s.storeBacked(...))});
@@ -206,12 +215,18 @@ public final class VaadinSessionRevocation {
    * {@link SessionRef reference}: {@code sessionId} may be the live id or its reference, as a
    * session inventory keyed by references holds it.
    *
-   * @param sessionId         the HTTP session id or its reference; non-null
-   * @param fallbackSubjectId subject id to audit when the session no longer exposes one;
-   *                          may be {@code null}
+   * <p>The audit names the subject by the rule of the class comment: the registered
+   * {@link SubjectIdResolver}'s value, else {@code recordSubjectId}, else the identity handle
+   * of the bound subject (decision F21).
+   *
+   * @param sessionId       the HTTP session id or its reference; non-null
+   * @param recordSubjectId the subject id of the session record, as the session inventory
+   *                        shows it; audited when no resolver yields an id. May be
+   *                        {@code null} or blank when there is no record: the identity
+   *                        handle of the bound subject is audited then
    * @return {@code true} when a live session was found and its termination scheduled
    */
-  public static boolean terminate(SessionId sessionId, String fallbackSubjectId) {
+  public static boolean terminate(SessionId sessionId, String recordSubjectId) {
     requireNonNull(sessionId, "sessionId must not be null");
     String wanted = SessionRef.of(sessionId.value());
     boolean found = false;
@@ -223,7 +238,7 @@ public final class VaadinSessionRevocation {
         found = true;
         // JS-SEC-131 (CWE-613): access() runs the command under the lock of the TARGET
         // session - at once when the session is idle, otherwise when its request ends.
-        session.access(() -> terminateLocked(session, sessionId.value(), fallbackSubjectId));
+        session.access(() -> terminateLocked(session, sessionId.value(), recordSubjectId));
       }
     }
     return found;
@@ -238,6 +253,10 @@ public final class VaadinSessionRevocation {
    * still renders its response; Vaadin destroys the session when that request ends. The
    * caller holds the session lock, as every navigation listener and RPC handler does.
    *
+   * <p>No session record is consulted, so the audit names the subject through the registered
+   * {@link SubjectIdResolver} or, without one, through its identity handle (decision F21);
+   * until then it carried an empty subject id without a resolver.
+   *
    * @param reason the audit reason; non-null
    * @return {@code false} when no session is bound to the thread
    */
@@ -247,10 +266,9 @@ public final class VaadinSessionRevocation {
     if (session == null) {
       return false;
     }
-    SubjectStore store = SubjectStores.findSubjectStore().orElse(null);
-    String subjectId = currentSubjectId(store).orElse("");
+    String subjectId = auditSubjectId(null);
     String sessionId = SessionTermination.sessionIdOf(session);
-    SessionTermination.clearIdentity(session, store);
+    SessionTermination.clearIdentity(session);
     audit(subjectId, sessionId, reason);
     SessionTermination.closeAndInvalidate(session);
     return true;
@@ -276,7 +294,7 @@ public final class VaadinSessionRevocation {
     }
   }
 
-  private static void terminateLocked(VaadinSession session, String sessionId, String fallbackSubjectId) {
+  private static void terminateLocked(VaadinSession session, String sessionId, String recordSubjectId) {
     if (session.getState() != VaadinSessionState.OPEN) {
       return;
     }
@@ -284,9 +302,8 @@ public final class VaadinSessionRevocation {
     // target session, so nothing below reads the administrator's request or UI.
     CurrentInstance.clearAll();
     VaadinSession.setCurrent(session);
-    SubjectStore store = SubjectStores.findSubjectStore().orElse(null);
-    String subjectId = currentSubjectId(store).orElse(fallbackSubjectId);
-    SessionTermination.clearIdentity(session, store);
+    String subjectId = auditSubjectId(recordSubjectId);
+    SessionTermination.clearIdentity(session);
     auditRevoked(subjectId, sessionId);
     SessionTermination.closeInvalidateAndDestroy(session);
   }
@@ -295,16 +312,17 @@ public final class VaadinSessionRevocation {
    * JS-SEC-131 (CWE-613): the store side of the revocation, evaluated for the session bound
    * to the current thread with its lock held.
    *
-   * @return {@code true} when the record of the session says it was revoked
+   * @return the revocation when the record of the session says it was revoked - or when the
+   *     record this session was seen with has gone; empty otherwise
    */
-  static boolean isRevoked(VaadinSession session) {
+  static Optional<Revoked> revocationOf(VaadinSession session) {
     SessionStore store = STORE.get();
     if (store == null) {
-      return false;
+      return Optional.empty();
     }
     String sessionId = SessionTermination.sessionIdOf(session);
     if (sessionId == null || sessionId.isBlank()) {
-      return false;
+      return Optional.empty();
     }
     Optional<SessionRecord> record;
     try {
@@ -319,13 +337,26 @@ public final class VaadinSessionRevocation {
       // JS-SEC-117 (CWE-532): the class only - the message can name the id the store was asked for.
       HasLogger.staticLogger().warn("Session revocation check skipped, the SessionStore failed: {}",
           storeFailure.getClass().getName());
-      return false;
+      return Optional.empty();
     }
     if (record.isPresent()) {
       session.setAttribute(RECORD_SEEN_ATTRIBUTE, sessionId);
-      return record.get().status() == SessionStatus.REVOKED;
+      return record.get().status() == SessionStatus.REVOKED
+          ? Optional.of(new Revoked(record.get().subjectId().value()))
+          : Optional.empty();
     }
-    return sessionId.equals(session.getAttribute(RECORD_SEEN_ATTRIBUTE));
+    return sessionId.equals(session.getAttribute(RECORD_SEEN_ATTRIBUTE))
+        ? Optional.of(new Revoked(null))
+        : Optional.empty();
+  }
+
+  /**
+   * A revocation found by {@link #revocationOf(VaadinSession)}.
+   *
+   * @param recordSubjectId the subject id of the revoked session record; {@code null} when the
+   *                        record has gone since the session was seen with it
+   */
+  record Revoked(String recordSubjectId) {
   }
 
   static void auditRevoked(String subjectId, String sessionId) {
@@ -343,25 +374,27 @@ public final class VaadinSessionRevocation {
     }
   }
 
-  /** Resolves the audit id of the subject bound to the current session; never the raw subject. */
-  static Optional<String> currentSubjectId(SubjectStore store) {
-    try {
-      Class<?> subjectType = SessionTermination.resolveSubjectType();
-      if (store == null || subjectType == null) {
-        return Optional.empty();
-      }
-      Optional<?> subject = store.currentSubject(subjectType);
-      if (subject.isEmpty()) {
-        return Optional.empty();
-      }
-      Optional<SubjectIdResolver<Object>> resolver = JCustosServiceResolver.findSubjectIdResolver();
-      if (resolver.isEmpty()) {
-        return Optional.empty();
-      }
-      String resolved = resolver.get().resolve(subject.get()).value();
-      return resolved == null || resolved.isBlank() ? Optional.empty() : Optional.of(resolved);
-    } catch (RuntimeException ignored) {
-      return Optional.empty();
+  /**
+   * ER30 follow-up, decision F21 (JS-SEC-097, CWE-1041, CWE-778): the subject id a revocation
+   * audits for the subject bound to the current session - the registered
+   * {@link SubjectIdResolver}'s value, else {@code recordSubjectId}, else the identity handle
+   * of {@link CurrentSubject#subjectIdOf(Object)}. The subject is read through
+   * {@link CurrentSubject#current()}, which reads a failing lookup as "no subject".
+   *
+   * @param recordSubjectId the subject id of the session record that is revoked; {@code null}
+   *                        or blank when no record is bound
+   * @return the subject id; empty only when no subject is bound and no record id is given
+   */
+  static String auditSubjectId(String recordSubjectId) {
+    boolean recordNamesSubject = recordSubjectId != null && !recordSubjectId.isBlank();
+    Optional<Object> subject = CurrentSubject.current();
+    if (subject.isEmpty()) {
+      return recordNamesSubject ? recordSubjectId : "";
     }
+    if (!recordNamesSubject) {
+      // the resolver, else the identity handle - CurrentSubject's own rule
+      return CurrentSubject.subjectIdOf(subject.get());
+    }
+    return CurrentSubject.resolvedSubjectIdOf(subject.get()).orElse(recordSubjectId);
   }
 }

@@ -348,9 +348,13 @@ public class SessionLifetimeListener
     String subjectId = CurrentSubject.subjectIdOf(currentSubject.get());
     String sessionId = SessionTermination.sessionIdOf(session);
 
-    // JS-SEC-131 (CWE-613): "Revoke" has to end the session, not only edit the store.
-    if (VaadinSessionRevocation.isRevoked(session)) {
-      return Optional.of(new Ending(subjectId, sessionId, null));
+    // JS-SEC-131 (CWE-613): "Revoke" has to end the session, not only edit the store. The
+    // audit names the subject as the node where Revoke was clicked does (decision F21): the
+    // resolver's id, else the record's, else the identity handle.
+    Optional<VaadinSessionRevocation.Revoked> revoked = VaadinSessionRevocation.revocationOf(session);
+    if (revoked.isPresent()) {
+      return Optional.of(new Ending(
+          VaadinSessionRevocation.auditSubjectId(revoked.get().recordSubjectId()), sessionId, null));
     }
 
     Instant createdAt = sessionCreatedAt(session);

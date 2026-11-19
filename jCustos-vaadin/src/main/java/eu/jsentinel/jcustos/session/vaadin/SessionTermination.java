@@ -21,7 +21,6 @@ import com.svenruppert.dependencies.core.net.HttpStatus;
 import com.svenruppert.dependencies.core.net.MediaType;
 import eu.jsentinel.jcustos.authorization.api.CurrentSubject;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
-import eu.jsentinel.jcustos.authorization.api.SubjectStore;
 import eu.jsentinel.jcustos.credential.propagation.TokenCredentialStore;
 import com.vaadin.flow.internal.CurrentInstance;
 import com.vaadin.flow.server.HandlerHelper;
@@ -292,25 +291,6 @@ final class SessionTermination {
         // nothing left to invalidate
       }
     }
-  }
-
-  /**
-   * As {@link #clearIdentity(VaadinSession)}. The store argument is not read: every caller
-   * passes the registered {@link SubjectStore}, the one {@link CurrentSubject#clear()}
-   * resolves itself. Kept for {@link VaadinSessionRevocation} until it moves to
-   * {@link CurrentSubject} (JS-SEC-097 follow-up).
-   */
-  static void clearIdentity(VaadinSession session, SubjectStore registeredStore) {
-    clearIdentity(session);
-  }
-
-  /**
-   * The subject type of the registered authentication service, or {@code null}. Delegates
-   * to {@link CurrentSubject#subjectType()}; kept for {@link VaadinSessionRevocation} until
-   * it moves to {@link CurrentSubject} (JS-SEC-097 follow-up).
-   */
-  static Class<?> resolveSubjectType() {
-    return CurrentSubject.subjectType().orElse(null);
   }
 
   /** @return the id of the HTTP session behind {@code session}, or {@code null} */

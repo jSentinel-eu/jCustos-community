@@ -187,6 +187,21 @@ class VaadinSessionRevocationPipelineTest {
   }
 
   @Test
+  @DisplayName("F21: a revocation found by the request check audits the record's subject id without a resolver, as the clicking node does")
+  void recordMarkedRevoked_withoutResolver_auditsTheRecordId() {
+    JCustosServiceResolver.setSubjectIdResolver(null);
+    store.save(record(pipeline.httpSessionId(), "inventory-7").withStatus(SessionStatus.REVOKED));
+
+    Exchange refused = pipeline.fire(view, "work");
+
+    assertTrue(refused.sessionExpired(), refused.body());
+    SessionInvalidated invalidated = audit.single(SessionInvalidated.class);
+    assertEquals(VaadinSessionRevocation.REASON_REVOKED, invalidated.reason());
+    assertEquals("inventory-7", invalidated.subjectId(),
+        "the id the session inventory shows, not the identity handle");
+  }
+
+  @Test
   @DisplayName("XR09-1: a session revoked on another node before its first request is refused on that request")
   void revokedElsewhereBeforeTheFirstRequest_firstRequestIsRefused() {
     // bob has logged in and his record exists, but no request has consulted it on this node

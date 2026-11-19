@@ -165,6 +165,23 @@ public final class CurrentSubject {
    */
   public static String subjectIdOf(Object subject) {
     requireNonNull(subject, "subject must not be null");
+    return resolvedSubjectIdOf(subject).orElseGet(() -> identityHandleOf(subject));
+  }
+
+  /**
+   * The value of the registered {@link SubjectIdResolver} for {@code subject}, without the
+   * identity-handle fallback of {@link #subjectIdOf(Object)}. For a caller that knows a better
+   * second choice than the handle - a session revocation audits the subject id of the revoked
+   * session record (decision F21). A failing lookup or resolver is reported as described in
+   * the class comment and reads as empty.
+   *
+   * @param subject the typed subject; non-null
+   * @return the resolved id; empty without a resolver, when the lookup or the resolver fails,
+   *     or when it yields a blank value
+   * @since 00.84.00
+   */
+  public static Optional<String> resolvedSubjectIdOf(Object subject) {
+    requireNonNull(subject, "subject must not be null");
     Optional<SubjectIdResolver<Object>> resolver;
     try {
       resolver = JCustosServiceResolver.findSubjectIdResolver();
@@ -172,30 +189,31 @@ public final class CurrentSubject {
       // RF17: an ambiguous registration fails every lookup; one line a minute is enough
       if (dueForWarning(LOOKUP_FAILURE_KEY)) {
         HasLogger.staticLogger().warn("No SubjectIdResolver can be resolved ({}, for instance "
-                + "several registered); the identity handle stands in for the subject id "
-                + "(reported at most once every {} seconds)", lookupFailure.getClass().getName(),
+                + "several registered); the subject id falls back (reported at most once every"
+                + " {} seconds)", lookupFailure.getClass().getName(),
             RESOLVER_WARNING_INTERVAL_SECONDS);
       }
-      return identityHandleOf(subject);
+      return Optional.empty();
     }
-    if (resolver.isPresent()) {
-      try {
-        SubjectId resolved = resolver.get().resolve(subject);
-        if (resolved != null && resolved.value() != null && !resolved.value().isBlank()) {
-          return resolved.value();
-        }
-      } catch (RuntimeException resolverFailure) {
-        // the classes only - the message of a failing resolver may carry what it was asked
-        // about. RF17: throttled per resolver class, the throttle is cleared by resetAll().
-        String resolverClass = resolver.get().getClass().getName();
-        if (dueForWarning(resolverClass)) {
-          HasLogger.staticLogger().warn("The SubjectIdResolver {} failed ({}); the identity handle "
-                  + "stands in for the subject id (reported at most once every {} seconds)",
-              resolverClass, resolverFailure.getClass().getName(), RESOLVER_WARNING_INTERVAL_SECONDS);
-        }
+    if (resolver.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      SubjectId resolved = resolver.get().resolve(subject);
+      if (resolved != null && resolved.value() != null && !resolved.value().isBlank()) {
+        return Optional.of(resolved.value());
+      }
+    } catch (RuntimeException resolverFailure) {
+      // the classes only - the message of a failing resolver may carry what it was asked
+      // about. RF17: throttled per resolver class, the throttle is cleared by resetAll().
+      String resolverClass = resolver.get().getClass().getName();
+      if (dueForWarning(resolverClass)) {
+        HasLogger.staticLogger().warn("The SubjectIdResolver {} failed ({}); the subject id falls"
+                + " back (reported at most once every {} seconds)",
+            resolverClass, resolverFailure.getClass().getName(), RESOLVER_WARNING_INTERVAL_SECONDS);
       }
     }
-    return identityHandleOf(subject);
+    return Optional.empty();
   }
 
   /**

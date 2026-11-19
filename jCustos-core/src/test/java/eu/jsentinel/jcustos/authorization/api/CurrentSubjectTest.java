@@ -95,6 +95,23 @@ class CurrentSubjectTest {
   }
 
   @Test
+  @DisplayName("resolvedSubjectIdOf: the resolver value, without the identity-handle fallback (F21)")
+  void resolvedSubjectIdOf_resolverOnly() {
+    assertEquals(Optional.empty(), CurrentSubject.resolvedSubjectIdOf(alice), "no resolver: empty, no handle");
+
+    JCustosServiceResolver.<PiiUser>setSubjectIdResolver(u -> SubjectId.of("user-7"));
+    assertEquals(Optional.of("user-7"), CurrentSubject.resolvedSubjectIdOf(alice));
+
+    JCustosServiceResolver.<PiiUser>setSubjectIdResolver(u -> {
+      throw new IllegalStateException("directory unreachable for " + u);
+    });
+    assertEquals(Optional.empty(), CurrentSubject.resolvedSubjectIdOf(alice), "a failing resolver: empty");
+
+    JCustosServiceResolver.<PiiUser>setSubjectIdResolver(u -> null);
+    assertEquals(Optional.empty(), CurrentSubject.resolvedSubjectIdOf(alice), "no id: empty");
+  }
+
+  @Test
   @DisplayName("without a resolver: two equal subject objects get different handles (identity, not equality)")
   void subjectIdOf_noResolver_identityNotEquality() {
     PiiUser twin = new PiiUser("alice@example.test", SECRET);
