@@ -196,17 +196,36 @@ public final class OAuth2FormPost {
     return Result.success(new Outcome(response.statusCode(), new String(bytes, StandardCharsets.UTF_8)));
   }
 
+  /**
+   * The {@code client_secret_basic} credentials (RFC 6749 §2.3.1, CWE-116): the client id and
+   * the secret are each encoded with {@code application/x-www-form-urlencoded} (Appendix B),
+   * then {@code id:secret} is Base64-encoded. Up to 00.83.00 the raw values were joined, so a
+   * {@code :} in the client id moved the split, and {@code %}, {@code +}, a space or a
+   * non-ASCII character in the secret reached a compliant server as a different secret.
+   *
+   * <p>{@link URLEncoder} with UTF-8 produces the encoding of Appendix B: a space becomes
+   * {@code +}, every other octet outside {@code A-Z a-z 0-9 - . _ *} becomes {@code %XX}, so
+   * the separator {@code :} can only be the one between id and secret. It leaves {@code *}
+   * unescaped and escapes {@code ~}; a form decoder reads an unescaped octet as itself and
+   * {@code %7E} as {@code ~}, so both decode to the original value.
+   *
+   * <p>The secret passes through a {@link String} for the encoder, as the
+   * {@code client_secret_post} form field always has; the header itself carries it in Base64.
+   * The byte arrays built here are zeroed.
+   */
   private static String basicHeader(String clientId, SecretValue secret) {
-    byte[] secretBytes = secret.asUtf8Bytes();
-    byte[] idBytes = clientId.getBytes(StandardCharsets.UTF_8);
-    byte[] userInfo = new byte[idBytes.length + 1 + secretBytes.length];
-    System.arraycopy(idBytes, 0, userInfo, 0, idBytes.length);
-    userInfo[idBytes.length] = ':';
-    System.arraycopy(secretBytes, 0, userInfo, idBytes.length + 1, secretBytes.length);
+    char[] secretChars = secret.asChars();
+    byte[] userInfo = (formEncode(clientId) + ':' + formEncode(new String(secretChars)))
+        .getBytes(StandardCharsets.US_ASCII);
+    Arrays.fill(secretChars, '\0');
     String header = "Basic " + Base64.getEncoder().encodeToString(userInfo);
     Arrays.fill(userInfo, (byte) 0);
-    Arrays.fill(secretBytes, (byte) 0);
     return header;
+  }
+
+  /** {@code application/x-www-form-urlencoded} with UTF-8 (RFC 6749 Appendix B). */
+  private static String formEncode(String value) {
+    return URLEncoder.encode(value, StandardCharsets.UTF_8);
   }
 
   private static String encode(Map<String, String> form) {
@@ -215,9 +234,9 @@ public final class OAuth2FormPost {
       if (sb.length() > 0) {
         sb.append('&');
       }
-      sb.append(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8))
+      sb.append(formEncode(e.getKey()))
           .append('=')
-          .append(URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8));
+          .append(formEncode(e.getValue()));
     }
     return sb.toString();
   }
