@@ -29,13 +29,76 @@ them keeps the key on a token while hashing.
 |---|---|---|
 | `KeyStorePepperService.fromPkcs12(path, password)` | a PKCS12 file | Secret-key entries, key id = alias (compared exactly; PKCS12 stores aliases in lower case). The file must belong to the process user, carry no group or other permissions and must not be a symbolic link. |
 | `KeyStorePepperService.fromKeyStore(keyStore, entryPassword)` | a key store the application loaded, e.g. a PKCS#11 token through `SunPKCS11` | The key must be **extractable** (`CKA_SENSITIVE=false`, `CKA_EXTRACTABLE=true`); a key that never leaves the token is refused at `load()` with "not extractable". |
-| `FilePepperService.fromDirectory(dir)` | one Base64 file per key id, e.g. `/run/secrets` | Same file checks as the PKCS12 source. Kubernetes secret volumes (symbolic links, root-owned, group-readable) are refused; copy the key into an owner-only file at start or use PKCS12. |
+| `FilePepperService.fromDirectory(dir)` | one Base64 file per key id, e.g. `/run/secrets` | Same file checks as the PKCS12 source, plus the key-directory rules below. Kubernetes secret volumes (symbolic links, root-owned, group-readable) are refused; see "Key files in containers". |
 | `InMemoryPepperService` | tests, or keys the application obtained itself | Heap only. |
 
 All sources load only the key ids that are named (one active, any
 number retired), refuse keys shorter than 32 bytes, fail closed at
 `load()` and never put key material, file content or a password into a
 message, a log line or `toString()`.
+
+## Key files in containers
+
+`FilePepperService` checks, before it reads anything:
+
+- **each key file:** not a symbolic link, owned by the process user, no
+  permissions for group or others (0400 or 0600), exactly one hard link;
+- **the key directory:** not a symbolic link, owned by the process user
+  or by root, not writable by group or others unless its sticky bit is
+  set. The directories above it are not checked.
+
+Any violation stops `load()`; the application does not start without
+its pepper.
+
+**Docker Swarm.** Declare the secret with the process `uid` and
+`mode: 0400`; `/run/secrets` belongs to root and is not writable by
+others, so `FilePepperService.fromDirectory(Path.of("/run/secrets"))`
+accepts it.
+
+**Kubernetes.** The entries of a secret volume are symbolic links into
+`..data/`, owned by root and, with `fsGroup`, readable by the group. They
+are refused, and an `emptyDir` itself (mode 0777 without sticky bit) is
+refused as key directory as well. Copy the key in an init container
+that runs as the application's user into an owner-only sub-directory of
+an in-memory `emptyDir`:
+
+```yaml
+spec:
+  securityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001            # lets the init container read the secret
+  volumes:
+    - name: pepper-secret
+      secret:
+        secretName: jcustos-pepper
+        defaultMode: 0440
+    - name: pepper
+      emptyDir:
+        medium: Memory        # the key never reaches the node's disk
+  initContainers:
+    - name: copy-pepper
+      image: busybox:1.36
+      command: ["sh", "-c", "umask 077 && rm -rf /pepper/keys && mkdir /pepper/keys && cp /secret/pepper-2026 /pepper/keys/ && chmod 0400 /pepper/keys/pepper-2026"]
+      volumeMounts:
+        - { name: pepper-secret, mountPath: /secret, readOnly: true }
+        - { name: pepper, mountPath: /pepper }
+  containers:
+    - name: app
+      volumeMounts:
+        - { name: pepper, mountPath: /pepper, readOnly: true }
+```
+
+The application then loads
+`FilePepperService.fromDirectory(Path.of("/pepper/keys")).activeKeyId("pepper-2026").load()`.
+`/pepper/keys` belongs to the process user and carries mode 0700, the key
+file mode 0400 with one link; `cp` follows the secret's symbolic link and
+writes a plain file. Do not mount the secret volume into the application
+container. The recipe follows from the documented layout of secret volumes
+and from the checks above; a test reproduces the directory layout, but it
+has not been run on a cluster. A PKCS12 file from a secret volume is
+refused for the same reasons; copy it the same way and use
+`KeyStorePepperService.fromPkcs12(...)`.
 
 ## PKCS#11 with an extractable key
 
