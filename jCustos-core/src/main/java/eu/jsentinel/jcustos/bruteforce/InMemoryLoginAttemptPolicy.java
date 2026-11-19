@@ -123,7 +123,9 @@ import java.util.Optional;
  *       failure threshold - with an empty user name when the key is an
  *       address</li>
  *   <li>{@link eu.jsentinel.jcustos.audit.RateLimitExceeded} when the
- *       {@link #credentialCheckGate() gate} defers an attempt</li>
+ *       {@link #credentialCheckGate() gate} defers attempts - at most one a
+ *       second, with the number of deferrals in {@code eventsInWindow}
+ *       (exit review RF11)</li>
  * </ul>
  *
  * <p>Audit-sink failures never break the security flow that emitted them.

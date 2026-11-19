@@ -51,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -190,7 +191,13 @@ class StandaloneLoginFlowGateTest {
     assertInstanceOf(StandaloneLoginFlow.LoginResult.Success.class, flow.login(PASSWORD, "alice"));
     assertEquals(1, service.evaluations.get());
     assertTrue(audit.of(LoginFailed.class).isEmpty());
-    assertEquals(threshold + 3, audit.of(RateLimitExceeded.class).size());
+    // RF11 (CWE-779): the gate audits at most one deferral a second and carries the count
+    List<RateLimitExceeded> deferrals = audit.of(RateLimitExceeded.class);
+    assertFalse(deferrals.isEmpty(), "the first deferral is audited at once");
+    assertEquals(1, deferrals.getFirst().eventsInWindow());
+    assertTrue(deferrals.stream().mapToInt(RateLimitExceeded::eventsInWindow).sum()
+        <= threshold + 3, "the count never exceeds the deferrals");
+    assertEquals(threshold + 3, policy.credentialCheckGate().deferredCount());
   }
 
   @Test

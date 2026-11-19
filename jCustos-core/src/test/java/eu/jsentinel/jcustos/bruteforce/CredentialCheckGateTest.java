@@ -139,7 +139,7 @@ class CredentialCheckGateTest {
     assertEquals(CredentialCheckGate.AUDIT_SCOPE, event.scope());
     assertEquals("", event.subjectId(), "the gate names no account");
     assertEquals(2, event.limit());
-    assertEquals(2, event.eventsInWindow());
+    assertEquals(1, event.eventsInWindow(), "RF11: the deferrals the event stands for - one");
     assertEquals(Duration.ofMillis(20), event.window());
     assertEquals(T0, event.timestamp());
 

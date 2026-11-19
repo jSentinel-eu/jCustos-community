@@ -35,7 +35,7 @@ import java.util.function.Supplier;
  * implementations: the one {@link LoginFailed} event of a rejected login - the single audit
  * point the SPI describes for {@link LoginAttemptPolicy#recordFailure(LoginAttemptContext)} -,
  * {@link BruteForceLimitReached} when a failure locks a key, and {@link RateLimitExceeded} when
- * the {@link CredentialCheckGate} defers an attempt.
+ * the {@link CredentialCheckGate} defers attempts - at most one a second, with their count.
  *
  * <p>An audit sink that fails must never break the security decision that emitted the event,
  * so its exception is caught. Until 00.84.00 it was also swallowed without a trace - a sink that
@@ -96,21 +96,25 @@ final class LoginFailureAudit {
   }
 
   /**
-   * Publishes {@link RateLimitExceeded} for an attempt the {@link CredentialCheckGate} deferred
+   * Publishes {@link RateLimitExceeded} for attempts the {@link CredentialCheckGate} deferred
    * (JS-SEC-063, CWE-770): every permit was busy for the whole wait. The event names no user -
-   * the gate bounds all logins together.
+   * the gate bounds all logins together. The gate publishes at most one such event a second
+   * and hands over how many deferrals it stands for (exit review RF11, CWE-779).
    *
    * @param auditService  the gate's audit service, or {@code null} for the registered one
    * @param at            event time
-   * @param maxConcurrent the gate's permits - the limit, and the checks running at the time
-   * @param gateWait      how long the attempt waited; zero is recorded as one nanosecond,
+   * @param maxConcurrent the gate's permits - the limit
+   * @param gateWait      how long each attempt waited; zero is recorded as one nanosecond,
    *                      because the event requires a positive window
+   * @param deferrals     the deferrals since the previous event, the current one included -
+   *                      recorded as {@link RateLimitExceeded#eventsInWindow()}; positive
    */
   static void publishCredentialCheckDeferred(JCustosAuditService auditService, Instant at,
-                                             int maxConcurrent, Duration gateWait) {
+                                             int maxConcurrent, Duration gateWait,
+                                             int deferrals) {
     Duration window = gateWait.isZero() || gateWait.isNegative() ? Duration.ofNanos(1) : gateWait;
     publishGuarded(auditService, () -> new RateLimitExceeded(
-        at, CredentialCheckGate.AUDIT_SCOPE, "", maxConcurrent, window, maxConcurrent));
+        at, CredentialCheckGate.AUDIT_SCOPE, "", maxConcurrent, window, deferrals));
   }
 
   /** @return audit-sink failures seen since the class was loaded - for tests */

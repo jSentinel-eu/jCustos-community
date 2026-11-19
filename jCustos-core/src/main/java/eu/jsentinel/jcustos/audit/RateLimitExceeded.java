@@ -34,7 +34,17 @@ import static java.util.Objects.requireNonNull;
  * @param limit       configured per-window event limit; positive
  * @param window      configured window duration; non-null, positive
  * @param eventsInWindow events counted within the window at decision
- *                       time; non-negative
+ *                       time; non-negative. Two producers publish at
+ *                       most one event a second - per gate, per key - and
+ *                       record here how many refusals the event stands
+ *                       for: those counted since the previous event of
+ *                       the same gate or key, including the refusal that
+ *                       publishes it (since 00.84.00, exit review RF11).
+ *                       They are the credential-check gate (scope
+ *                       {@code login:credential-check}) and
+ *                       {@code InMemoryRateLimitPolicy} for a key that is
+ *                       already blocked (and for its aggregate scope
+ *                       {@code #throttled:untracked-keys})
  */
 public record RateLimitExceeded(
     Instant timestamp,

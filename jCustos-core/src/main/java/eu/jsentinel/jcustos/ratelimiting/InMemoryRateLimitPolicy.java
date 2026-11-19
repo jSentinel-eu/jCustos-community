@@ -25,6 +25,7 @@ import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
@@ -58,11 +59,38 @@ import static java.util.Objects.requireNonNull;
  * throttles cannot all stay below the threshold. The throttle that reaches it
  * blocks the key for the block duration ({@link RateLimitStore#block}) and is answered with
  * {@link RateLimitDecision.Blocked}, as is every request while the block lasts;
- * a blocked request records nothing. Each refusal - throttled or blocked -
- * publishes one {@link RateLimitExceeded}. The store has to keep blocks: a store
- * whose {@link RateLimitStore#blockedUntil} refuses with
+ * a blocked request records nothing. Each throttle publishes one
+ * {@link RateLimitExceeded}, the one that starts the block included. The store has
+ * to keep blocks: a store whose {@link RateLimitStore#blockedUntil} refuses with
  * {@link UnsupportedOperationException} is refused at construction. Without an
  * escalation the policy never blocks and never reads a block.</p>
+ *
+ * <h2>Audit of a blocked key (exit review RF11, CWE-779)</h2>
+ * <p>The requests of a key that is already blocked are audited at most once a
+ * second per key. The first refusal publishes a {@link RateLimitExceeded} at once;
+ * the refusals within the following second are counted, not published; the first
+ * refusal one second or more after the last event publishes the next one. For these
+ * events {@link RateLimitExceeded#eventsInWindow()} is the number of refusals the
+ * event stands for: those of the key since its previous event of this kind, the one
+ * that publishes it included - {@code 1} for the first refusal. Summed over these
+ * events, those of {@link #UNTRACKED_KEYS_AUDIT_SCOPE} included, plus the refusals
+ * still counted, it is the number of blocked requests. The other components keep their
+ * meaning: the scope of the key, the policy's limit and window. A refusal that is
+ * counted after the last event of its key is reported by the next refusal of that
+ * key, or by {@link #purgeOldEvents()}, which publishes every count whose second is
+ * over - a burst that ends within a second of the last event is not reported before
+ * one of the two happens. Such an event carries the correlation id of the request,
+ * or of the thread, that publishes it.</p>
+ *
+ * <p>The counts of at most 10 000 keys are kept. A key that is refused for the first
+ * time while all of them are taken evicts the key with the oldest event, if that event
+ * is at least a second old; the evicted key's counted refusals then move to the
+ * aggregate scope {@link #UNTRACKED_KEYS_AUDIT_SCOPE}. When every tracked key has
+ * published within the last second, the new key's refusals are counted under that
+ * scope, again at most one event a second. However many keys a flood brings, the
+ * blocked requests of one policy cost at most 10 001 events a second and a bounded
+ * amount of memory; the refusals counted under the aggregate scope keep their count
+ * but lose their scope. No refusal goes unaudited.</p>
  *
  * <p>The audit emit-side optionally derives a {@code subjectId}
  * from the {@link RateLimitKey#scope()} when the scope begins
@@ -104,6 +132,18 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
    */
   public static final String THROTTLE_SCOPE_PREFIX = "#throttled:";
 
+  /**
+   * The {@link RateLimitExceeded#scope()} under which an escalating policy counts the
+   * refusals of blocked keys whose counts it cannot keep individually: {@value}. Its
+   * {@link RateLimitExceeded#eventsInWindow()} is the number of such refusals since the
+   * previous event of this scope; see the class description. It starts with
+   * {@link #THROTTLE_SCOPE_PREFIX}, which an escalating policy refuses as the scope of a
+   * request, so no request key shares it.
+   *
+   * @since 00.84.00
+   */
+  public static final String UNTRACKED_KEYS_AUDIT_SCOPE = THROTTLE_SCOPE_PREFIX + "untracked-keys";
+
   /** Key the constructor asks for a block, to learn whether the store keeps blocks. */
   private static final RateLimitKey BLOCK_PROBE =
       new RateLimitKey(TenantId.DEFAULT, THROTTLE_SCOPE_PREFIX + "probe");
@@ -115,6 +155,8 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
   private final Clock clock;
   /** {@code null} when the policy does not escalate. */
   private final RateLimitEscalation escalation;
+  /** Audit throttle of the refusals of blocked keys; {@code null} when the policy does not escalate. */
+  private final RefusalAuditThrottle blockedRefusals;
 
   /**
    * @param store        non-null
@@ -207,6 +249,9 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
     this.window = window;
     this.clock = requireNonNull(clock, "clock must not be null");
     this.escalation = escalation.map(wanted -> requireStoreCanEscalate(store, wanted)).orElse(null);
+    this.blockedRefusals = this.escalation == null
+        ? null
+        : new RefusalAuditThrottle(new RateLimitKey(TenantId.DEFAULT, UNTRACKED_KEYS_AUDIT_SCOPE));
   }
 
   /** Refuses an escalation the store could not carry out - fail closed, at construction. */
@@ -241,7 +286,8 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
       if (blockedUntil.isPresent() && now.isBefore(blockedUntil.get())) {
         // blocked: nothing is recorded, neither an event nor a throttle
         int events = store.countSince(key, minusSaturating(now, window));
-        publishExceeded(now, key, events);
+        // RF11 (CWE-779): at most one audit event per key and second, carrying the count
+        publish(now, blockedRefusals.refused(key, now));
         return new RateLimitDecision.Blocked(events, limit, window,
             Duration.between(now, blockedUntil.get()), escalation.throttleThreshold());
       }
@@ -349,14 +395,23 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
    * (JS-SEC-118). Purge with the longest window then, or give each policy
    * its own store.
    *
+   * <p>With an escalation it also publishes the counted refusals of blocked keys
+   * whose second is over, one {@link RateLimitExceeded} per key, and forgets the
+   * keys that have nothing counted (exit review RF11). Scheduled outside a request,
+   * those events carry no correlation id.</p>
+   *
    * @return number of events removed
    */
   public int purgeOldEvents() {
+    Instant now = clock.instant();
     Duration retention = window;
-    if (escalation != null && escalation.escalationWindow().compareTo(window) > 0) {
-      retention = escalation.escalationWindow();
+    if (escalation != null) {
+      publish(now, blockedRefusals.flushDue(now));
+      if (escalation.escalationWindow().compareTo(window) > 0) {
+        retention = escalation.escalationWindow();
+      }
     }
-    return store.purgeOlderThan(minusSaturating(clock.instant(), retention));
+    return store.purgeOlderThan(minusSaturating(now, retention));
   }
 
   /** @return configured per-window limit */
@@ -375,6 +430,18 @@ public final class InMemoryRateLimitPolicy implements RateLimitPolicy {
    */
   public Optional<RateLimitEscalation> escalation() {
     return Optional.ofNullable(escalation);
+  }
+
+  /** @return the audit throttle of blocked keys, {@code null} without an escalation - for tests */
+  RefusalAuditThrottle blockedRefusalAudit() {
+    return blockedRefusals;
+  }
+
+  /** Publishes what the audit throttle of blocked keys released - outside its lock. */
+  private void publish(Instant at, List<RefusalAuditThrottle.Publication> publications) {
+    for (RefusalAuditThrottle.Publication publication : publications) {
+      publishExceeded(at, publication.key(), publication.refusals());
+    }
   }
 
   private void publishExceeded(Instant at, RateLimitKey key, int observed) {

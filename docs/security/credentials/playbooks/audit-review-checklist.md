@@ -23,7 +23,7 @@ under `JSentinelAuditService`. The review covers:
 | `CredentialRehashed`               | Rehash reason distribution: `ALGORITHM_DEPRECATED`, `PARAMETERS_OUTDATED`, `POLICY_VERSION_OUTDATED`, `PEPPER_KEY_ROTATED`. |
 | `CredentialStatusChanged`          | Bulk transitions; presence of an incident id in `reason` field. |
 | `PasswordResetRequested` / `PasswordResetCompleted` | Volume; per-user cardinality. |
-| `RateLimitExceeded`                | Scope distribution; sustained vs burst patterns.       |
+| `RateLimitExceeded`                | Scope distribution; sustained vs burst patterns. Since V00.84.00 the credential-check gate (scope `login:credential-check`) and `InMemoryRateLimitPolicy` for an already blocked key (and its aggregate scope `#throttled:untracked-keys`) publish at most one event a second per key; `eventsInWindow` is then the number of refusals the event stands for. Sum `eventsInWindow` for these scopes instead of counting events. |
 | `LoginSucceeded` / `LoginFailed`   | Failure rate baseline shift; new client-address surfaces. Since V00.84.00 the login-attempt policy audits every rejected login exactly once (before, `StandaloneLoginFlow` audited it twice and the store-backed and Noop policies not at all) — do not compare a baseline across that upgrade. |
 | `BruteForceLimitReached`           | Affected accounts; lockout durations.                  |
 
