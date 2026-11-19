@@ -40,9 +40,9 @@ import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
  *
  * <p><strong>Address keys (JS-SEC-062, CWE-307).</strong> A key built by
  * {@link #forAddress(TenantId, String)} counts the failures of one client
- * address across all accounts. It is an ordinary key whose {@code userId}
- * is the reserved {@link #ADDRESS_USER_ID}, so a store keeps it like any
- * other - the Eclipse-Store format is unchanged. No account can own that
+ * address - for IPv6 one prefix - across all accounts. It is an ordinary key
+ * whose {@code userId} is the reserved {@link #ADDRESS_USER_ID}, so a store
+ * keeps it like any other - the Eclipse-Store format is unchanged. No account can own that
  * user id: {@link #accountUserId(String)} rewrites every user name that
  * starts with {@link #RESERVED_PREFIX}, and
  * {@link StoreBackedLoginAttemptPolicy} passes every user name through it.
@@ -112,10 +112,13 @@ public record LoginAttemptKey(TenantId tenant, String userId, String ip) {
 
   /**
    * The key that counts the failures of {@code ip} across all accounts
-   * (JS-SEC-062, CWE-307).
+   * (JS-SEC-062, CWE-307). {@link StoreBackedLoginAttemptPolicy} passes the
+   * address's bucket, {@link LoginAttemptLimits.AddressLimit#bucketOf(String)}:
+   * the exact IPv4 address or the IPv6 prefix, such as
+   * {@code 2001:db8:1:2::/64}. This factory uses {@code ip} as it is given.
    *
    * @param tenant tenant scope; {@code null} becomes {@link TenantId#DEFAULT}
-   * @param ip     non-blank client address
+   * @param ip     non-blank client address or address bucket
    * @return the address key
    * @since 00.84.00
    */

@@ -95,6 +95,27 @@ class BoundedAttemptTableTest {
   }
 
   @Test
+  @DisplayName("hasRoomFor answers what put would do, without evicting anything")
+  void hasRoomForMatchesPut() {
+    Instant far = T0.plusSeconds(3600);
+    assertTrue(table.hasRoomFor("x", T0), "an empty table has room");
+    table.put("a", "A", far, T0.plusSeconds(60), T0);
+    table.put("b", "B", far, T0.plusSeconds(30), T0);
+    table.put("c", "C", far, null, T0);
+    assertTrue(table.hasRoomFor("d", T0), "c is not protected and could make room");
+    assertEquals(3, table.size(), "asking evicts nothing");
+    assertTrue(removed.isEmpty());
+
+    table.put("c", "C", far, T0.plusSeconds(90), T0);
+    assertFalse(table.hasRoomFor("d", T0), "every entry is protected");
+    assertFalse(table.put("d", "D", far, null, T0), "and put agrees");
+    assertTrue(table.hasRoomFor("a", T0), "a known key always has room");
+    assertTrue(table.hasRoomFor("d", T0.plusSeconds(30)), "b's protection has run out");
+    assertEquals(3, table.size());
+    assertTrue(table.put("d", "D", far, null, T0.plusSeconds(30)));
+  }
+
+  @Test
   @DisplayName("the size never exceeds the bound, whatever mix of entries arrives")
   void hardBound() {
     Instant far = T0.plusSeconds(3600);

@@ -25,6 +25,8 @@ import java.util.Map;
 import java.util.Optional;
 
 import static eu.jsentinel.jcustos.bruteforce.LoginAttemptConfigurationLoader.LOGIN_ADDRESS_INITIAL_LOCKOUT_PROPERTY;
+import static eu.jsentinel.jcustos.bruteforce.LoginAttemptConfigurationLoader.LOGIN_ADDRESS_IPV6_PREFIX_ENV;
+import static eu.jsentinel.jcustos.bruteforce.LoginAttemptConfigurationLoader.LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY;
 import static eu.jsentinel.jcustos.bruteforce.LoginAttemptConfigurationLoader.LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY;
 import static eu.jsentinel.jcustos.bruteforce.LoginAttemptConfigurationLoader.LOGIN_ADDRESS_THRESHOLD_ENV;
 import static eu.jsentinel.jcustos.bruteforce.LoginAttemptConfigurationLoader.LOGIN_ADDRESS_THRESHOLD_PROPERTY;
@@ -111,6 +113,28 @@ class LoginAttemptLimitsTest {
         base.withGateWait(LoginAttemptLimits.MAX_GATE_WAIT).gateWait());
   }
 
+  @Test
+  @DisplayName("JS-SEC-062: the IPv6 prefix of the address counter is /64 by default and accepted from 32 to 128 only")
+  void ipv6PrefixLength() {
+    LoginAttemptLimits.AddressLimit address = new LoginAttemptLimits.AddressLimit(
+        20, Duration.ofMinutes(10), Duration.ofMinutes(5), Duration.ofHours(1));
+    assertEquals(64, LoginAttemptLimits.DEFAULT_IPV6_PREFIX_LENGTH);
+    assertEquals(LoginAttemptLimits.DEFAULT_IPV6_PREFIX_LENGTH, address.ipv6PrefixLength());
+    assertEquals(48, address.withIpv6PrefixLength(48).ipv6PrefixLength());
+    assertEquals(address.failureThreshold(), address.withIpv6PrefixLength(48).failureThreshold());
+    assertEquals(32, address.withIpv6PrefixLength(LoginAttemptLimits.MIN_IPV6_PREFIX_LENGTH)
+        .ipv6PrefixLength());
+    assertEquals(128, address.withIpv6PrefixLength(LoginAttemptLimits.MAX_IPV6_PREFIX_LENGTH)
+        .ipv6PrefixLength());
+    for (int invalid : new int[]{-1, 0, 31, 129}) {
+      assertThrows(IllegalArgumentException.class, () -> address.withIpv6PrefixLength(invalid),
+          "prefix " + invalid);
+    }
+    assertEquals("2001:db8:1:2::/64", address.bucketOf("2001:db8:1:2::1"));
+    assertEquals("2001:db8::/32", address.withIpv6PrefixLength(32).bucketOf("2001:db8:1:2::1"));
+    assertEquals("203.0.113.5", address.bucketOf("203.0.113.5"));
+  }
+
   // ── the loader ─────────────────────────────────────────────────────
 
   @Test
@@ -165,6 +189,39 @@ class LoginAttemptLimitsTest {
     LoginAttemptLimits.AddressLimit address = limits.perAddress().orElseThrow();
     assertEquals(Duration.ofHours(6), address.initialLockout());
     assertEquals(Duration.ofHours(6), address.maxLockout());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: security.login.attempts.address.ipv6-prefix sets the prefix; without it the default /64 applies")
+  void ipv6PrefixKey() {
+    assertEquals(LoginAttemptLimits.DEFAULT_IPV6_PREFIX_LENGTH,
+        loader(Map.of(LOGIN_ADDRESS_THRESHOLD_PROPERTY, "30"), Map.of()).loadLimits()
+            .perAddress().orElseThrow().ipv6PrefixLength());
+    assertEquals(48, loader(Map.of(LOGIN_ADDRESS_THRESHOLD_PROPERTY, "30",
+        LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY, " 48 "), Map.of()).loadLimits()
+        .perAddress().orElseThrow().ipv6PrefixLength());
+    assertEquals(56, loader(Map.of(LOGIN_ADDRESS_THRESHOLD_PROPERTY, "30"),
+        Map.of(LOGIN_ADDRESS_IPV6_PREFIX_ENV, "56")).loadLimits()
+        .perAddress().orElseThrow().ipv6PrefixLength());
+    assertEquals(128, loader(Map.of(LOGIN_ADDRESS_THRESHOLD_PROPERTY, "30",
+        LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY, "128"), Map.of(LOGIN_ADDRESS_IPV6_PREFIX_ENV, "48"))
+        .loadLimits().perAddress().orElseThrow().ipv6PrefixLength(),
+        "the system property wins over the environment");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: an invalid IPv6 prefix fails closed at load, and so does a prefix without a threshold")
+  void invalidIpv6PrefixFailsClosed() {
+    for (String invalid : new String[]{"31", "129", "0", "-64", "64.5", "/64", "sixty-four"}) {
+      IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+          () -> loader(Map.of(LOGIN_ADDRESS_THRESHOLD_PROPERTY, "30",
+              LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY, invalid), Map.of()).loadLimits(), invalid);
+      assertTrue(refused.getMessage().contains("32") && refused.getMessage().contains("128"),
+          invalid + ": the message names the range - " + refused.getMessage());
+    }
+    IllegalArgumentException withoutThreshold = assertThrows(IllegalArgumentException.class,
+        () -> loader(Map.of(), Map.of(LOGIN_ADDRESS_IPV6_PREFIX_ENV, "48")).loadLimits());
+    assertTrue(withoutThreshold.getMessage().contains(LOGIN_ADDRESS_THRESHOLD_PROPERTY));
   }
 
   @Test

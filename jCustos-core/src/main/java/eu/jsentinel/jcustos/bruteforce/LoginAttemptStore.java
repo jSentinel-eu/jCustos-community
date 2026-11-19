@@ -73,13 +73,24 @@ import java.util.Optional;
  * <h2>Address keys (since 00.84.00)</h2>
  *
  * <p>With an address limit, {@link StoreBackedLoginAttemptPolicy} also counts
- * every attempt on {@link LoginAttemptKey#forAddress} (JS-SEC-062, CWE-307) -
- * an ordinary key with the reserved user id
- * {@link LoginAttemptKey#ADDRESS_USER_ID}, passed with limits of its own. A
- * store keeps it like any other key; nothing in this interface changes. A
- * store that derives the deadlines of restored entries from limits it has
- * seen should keep the limits of address keys apart from those of account
- * keys, as {@link InMemoryLoginAttemptStore} does.
+ * the failures of every attempt on {@link LoginAttemptKey#forAddress}
+ * (JS-SEC-062, CWE-307) - an ordinary key with the reserved user id
+ * {@link LoginAttemptKey#ADDRESS_USER_ID}, passed with limits of its own. Its
+ * {@code ip} is the address's bucket: the exact IPv4 address, or an IPv6
+ * prefix in CIDR notation such as {@code 2001:db8:1:2::/64}; a store keeps it
+ * verbatim, like any other key. A store that derives the deadlines of restored
+ * entries from limits it has seen should keep the limits of address keys apart
+ * from those of account keys, as {@link InMemoryLoginAttemptStore} does.
+ *
+ * <p>The address key takes <strong>no reservation</strong> (exit review RF03):
+ * the policy never calls {@link #tryBeginAttempt} or {@link #abandonAttempt}
+ * on it. Before an attempt it reads {@link #failureCount} and
+ * {@link #lastFailureAt} and derives the lockout from them; after a failed one
+ * it calls {@link #completeFailure} for a key that has no attempt in flight.
+ * A store therefore has to count such a failure without releasing anything -
+ * an implementation that decrements a counter of attempts in flight must not
+ * let it fall below zero - and its two read methods must see the failures the
+ * atomic operations have recorded.
  *
  * <h2>Account keys (since 00.84.00)</h2>
  *

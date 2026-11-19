@@ -149,6 +149,22 @@ final class BoundedAttemptTable<K, S> {
     return true;
   }
 
+  /**
+   * Whether a {@link #put} of {@code key} at {@code now} would find room - the key is present,
+   * the table is below its bound, or an entry that is not (or no longer) protected could be
+   * evicted. Changes nothing but what {@link #get} changes as well: expired entries are dropped.
+   *
+   * @return {@code false} when {@code key} is new, the table is full and every entry is
+   *         protected - a {@code put} would be refused
+   */
+  boolean hasRoomFor(K key, Instant now) {
+    dropExpired(now);
+    if (nodes.containsKey(key) || nodes.size() < maxEntries || !evictable.isEmpty()) {
+      return true;
+    }
+    return !byProtection.isEmpty() && !byProtection.first().protectedUntil.isAfter(now);
+  }
+
   /** Removes {@code key}; unknown keys are ignored. */
   void remove(K key) {
     Node<K, S> node = nodes.get(key);

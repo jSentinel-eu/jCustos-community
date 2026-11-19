@@ -18,7 +18,7 @@ SPI (`eu.jsentinel.jcustos.net`) instead of calling `getRemoteAddr()` itself:
 |---|---|---|
 | Vaadin | `VaadinClientAddress.current()` (used by `LoginView`) | `SessionContext.clientAddress`, the login-attempt policy `LoginView` runs (JS-SEC-124) |
 | REST | `RestClientAddress.resolve(request)`, `RestAccessContextFactory` attribute `clientAddress` | authorisation context, audit route |
-| Standalone (CLI) | — | no network, no client address |
+| Standalone (CLI) | — | no network, no client address; a standalone server that knows its peer passes it to `StandaloneLoginFlow.login(credentials, username, clientAddress)`, which feeds the login-attempt policy and its address counter |
 
 The default resolver, `DefaultClientAddressResolver`, returns the connection
 peer and consults **no** header. That is correct when clients connect directly,

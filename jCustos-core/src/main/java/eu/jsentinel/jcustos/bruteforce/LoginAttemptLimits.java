@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.bruteforce;
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.net.AddressBucket;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -31,7 +32,8 @@ import java.util.Optional;
  *   <li><strong>{@link #perAddress()}</strong> (JS-SEC-062, CWE-307) - a counter on the client
  *       address alone. The account counters cannot see password spraying: one address that tries
  *       one or two passwords against each of many accounts stays below every per-account
- *       threshold. Off by default.</li>
+ *       threshold. IPv6 addresses are counted per prefix, {@link #DEFAULT_IPV6_PREFIX_LENGTH}
+ *       bits by default. Off by default.</li>
  *   <li><strong>{@link #maxConcurrentCredentialChecks()}</strong> (JS-SEC-063, CWE-770) - how many
  *       credential checks may run at the same time behind the policy's
  *       {@link LoginAttemptPolicy#credentialCheckGate() gate}. A credential check is the most
@@ -85,6 +87,34 @@ public record LoginAttemptLimits(
    */
   public static final Duration MAX_GATE_WAIT = Duration.ofSeconds(10);
 
+  /**
+   * Default {@link AddressLimit#ipv6PrefixLength()}: {@value} bits. A /64 is the standard IPv6
+   * subnet (RFC 4291 interface identifiers, SLAAC): what one host, one mobile device or one
+   * customer LAN is usually given, and within which it can pick a new source address for every
+   * request. Counting such a client per exact address would never see two of its attempts.
+   *
+   * @since 00.84.00
+   */
+  public static final int DEFAULT_IPV6_PREFIX_LENGTH = 64;
+
+  /**
+   * Shortest accepted {@link AddressLimit#ipv6PrefixLength()}: {@value} bits, the typical size
+   * of the block a regional internet registry allocates to a provider. A shorter prefix would
+   * put the customers of several providers into one bucket, and one sprayer among them would
+   * lock out all of them.
+   *
+   * @since 00.84.00
+   */
+  public static final int MIN_IPV6_PREFIX_LENGTH = 32;
+
+  /**
+   * Longest accepted {@link AddressLimit#ipv6PrefixLength()}: {@value} bits - every IPv6 address
+   * is counted exactly, as IPv4 addresses always are.
+   *
+   * @since 00.84.00
+   */
+  public static final int MAX_IPV6_PREFIX_LENGTH = 128;
+
   /** Validates the components. */
   public LoginAttemptLimits {
     Objects.requireNonNull(perAccount, "perAccount");
@@ -118,18 +148,90 @@ public record LoginAttemptLimits(
    * reset the address counter: an attacker with one account of their own could otherwise reset
    * the counter of the address they spray from.
    *
+   * <p><strong>Failures only, no reservation (exit review RF03).</strong> Unlike the account
+   * counters, the address counter does not count attempts in flight against its threshold: it
+   * refuses an attempt only while the address is locked. Otherwise {@code failureThreshold}
+   * users behind one company or mobile NAT who log in at the same moment would lock out every
+   * further user of that address - without a single failure. The price is a bounded overshoot:
+   * the attempts from one address that were admitted before the failure that reaches the
+   * threshold are still checked, so the address can collect more failures than the threshold
+   * by up to the number of its attempts in flight at that moment. The credential-check gate
+   * bounds that number (JS-SEC-063): with {@link LoginAttemptLimits#maxConcurrentCredentialChecks()}
+   * set, at most that many checks run at once for all addresses together, and an attempt that
+   * waits for a permit longer than {@link LoginAttemptLimits#gateWait()} is deferred unchecked.
+   * The account counters keep their reservations, so no single account sees more than its own
+   * threshold in flight.
+   *
+   * <p><strong>IPv6 prefixes (JS-SEC-062).</strong> An IPv6 host can usually pick a new source
+   * address within its /64 for every request. The counter therefore keys an IPv6 address on its
+   * first {@code ipv6PrefixLength} bits - every address of one prefix shares one counter - and an
+   * IPv4 address, also when written as IPv4-mapped IPv6, on the exact address. See
+   * {@link #bucketOf(String)}. The {@code (tenant, user, address)} tuple counter of the
+   * store-backed policy and the {@code (user, address)} counter of the in-memory policy keep the
+   * exact address.
+   *
    * @param failureThreshold failures from one address within {@code window} that lock it
    * @param window           rolling window for the count
    * @param initialLockout   duration of the first lockout
    * @param maxLockout       cap for the progressive backoff
+   * @param ipv6PrefixLength bits of an IPv6 address that identify the client it is counted for,
+   *                         from {@link #MIN_IPV6_PREFIX_LENGTH} to
+   *                         {@link #MAX_IPV6_PREFIX_LENGTH}; {@link #DEFAULT_IPV6_PREFIX_LENGTH}
+   *                         with the four-argument constructor (since 00.84.00)
    */
   @ExperimentalJCustosApi
   public record AddressLimit(int failureThreshold, Duration window, Duration initialLockout,
-                             Duration maxLockout) {
+                             Duration maxLockout, int ipv6PrefixLength) {
 
-    /** Validates the components with the rules of {@link LoginAttemptConfiguration}. */
+    /**
+     * Validates the components: the thresholds with the rules of
+     * {@link LoginAttemptConfiguration}, the prefix length against its range - fail closed.
+     */
     public AddressLimit {
       new LoginAttemptConfiguration(failureThreshold, window, initialLockout, maxLockout);
+      if (ipv6PrefixLength < MIN_IPV6_PREFIX_LENGTH || ipv6PrefixLength > MAX_IPV6_PREFIX_LENGTH) {
+        throw new IllegalArgumentException("ipv6PrefixLength must be between "
+            + MIN_IPV6_PREFIX_LENGTH + " and " + MAX_IPV6_PREFIX_LENGTH + ": " + ipv6PrefixLength);
+      }
+    }
+
+    /**
+     * Thresholds with the default IPv6 prefix of {@link #DEFAULT_IPV6_PREFIX_LENGTH} bits.
+     *
+     * @param failureThreshold failures from one address within {@code window} that lock it
+     * @param window           rolling window for the count
+     * @param initialLockout   duration of the first lockout
+     * @param maxLockout       cap for the progressive backoff
+     */
+    public AddressLimit(int failureThreshold, Duration window, Duration initialLockout,
+                        Duration maxLockout) {
+      this(failureThreshold, window, initialLockout, maxLockout, DEFAULT_IPV6_PREFIX_LENGTH);
+    }
+
+    /**
+     * @param prefixLength bits of an IPv6 address that identify its bucket, from
+     *                     {@link #MIN_IPV6_PREFIX_LENGTH} to {@link #MAX_IPV6_PREFIX_LENGTH}
+     * @return a copy with the new prefix length
+     * @since 00.84.00
+     */
+    public AddressLimit withIpv6PrefixLength(int prefixLength) {
+      return new AddressLimit(failureThreshold, window, initialLockout, maxLockout, prefixLength);
+    }
+
+    /**
+     * The bucket the address counter counts {@code clientAddress} in: for an IPv6 literal its
+     * network prefix of {@link #ipv6PrefixLength()} bits in canonical form, such as
+     * {@code 2001:db8:1:2::/64}; for an IPv4 literal, also an IPv4-mapped one, the exact address;
+     * for any other text the trimmed, lower-cased text. Both shipped policies key their address
+     * counter on this value, so every node derives the same key. See
+     * {@link eu.jsentinel.jcustos.net.AddressBucket}.
+     *
+     * @param clientAddress the client address of an attempt; non-null
+     * @return the bucket
+     * @since 00.84.00
+     */
+    public String bucketOf(String clientAddress) {
+      return AddressBucket.of(clientAddress, ipv6PrefixLength);
     }
 
     /**

@@ -91,22 +91,34 @@ import static java.util.Objects.requireNonNull;
  * one of them that sets in between them is caught by the next attempt.
  *
  * <p><strong>Password spraying (JS-SEC-062, CWE-307).</strong> With
- * {@link LoginAttemptLimits#perAddress()} set, every attempt that carries a
- * client address is also counted on the address key
- * {@link LoginAttemptKey#forAddress(TenantId, String)}: a third store
- * operation per attempt, with the address thresholds and the flat lockout of
- * this policy ({@code initialLockout}; {@code maxLockout} is not used here). The
- * account keys are asked first; when the address then refuses, their
- * reservations are given back. A successful login releases the address's
- * reservation but does not reset its counter. User names pass through
- * {@link LoginAttemptKey#accountUserId(String)}, so no account can share the
- * counter of an address or of an account key.
+ * {@link LoginAttemptLimits#perAddress()} set, the failures of every attempt
+ * that carries a client address are also counted on the address key
+ * {@link LoginAttemptKey#forAddress(TenantId, String)}, with the address
+ * thresholds and the flat lockout of this policy ({@code initialLockout};
+ * {@code maxLockout} is not used here). The key's address is the bucket of
+ * {@link LoginAttemptLimits.AddressLimit#bucketOf(String)}: the IPv6 prefix of
+ * {@link LoginAttemptLimits.AddressLimit#ipv6PrefixLength()} bits, or the exact
+ * IPv4 address. The address counts <strong>failures only</strong> (exit review
+ * RF03): {@link #beforeAttempt} reads its counter with
+ * {@link LoginAttemptStore#failureCount} and
+ * {@link LoginAttemptStore#lastFailureAt} and refuses while it is locked, but
+ * reserves nothing on it, so concurrent logins of different accounts behind
+ * one NAT address do not throttle each other; {@link #recordFailure} counts the
+ * failure with {@link LoginAttemptStore#completeFailure}. Attempts from one
+ * address that were admitted before its threshold was reached are still
+ * checked; the overshoot is bounded by the credential-check gate, see
+ * {@link LoginAttemptLimits.AddressLimit}. The account keys are asked first;
+ * when the address then refuses, their reservations are given back. A
+ * successful login does not touch the address's counter. User names pass
+ * through {@link LoginAttemptKey#accountUserId(String)}, so no account can
+ * share the counter of an address or of an account key.
  *
  * <p><strong>Several nodes (JS-SEC-166).</strong> Policies on several nodes that
  * share one store act as one throttle: a lockout earned through one node refuses
  * the attempt on every other node, and the reservations of all nodes together
- * stay within the threshold - provided the store performs each attempt operation
- * atomically for every caller, not only within one process. Every node passes its
+ * stay within the threshold of the tuple and the account key - provided the store
+ * performs each attempt operation atomically for every caller, not only within
+ * one process. Every node passes its
  * own clock's instant to the store, so a skew between the node clocks lengthens or
  * shortens a lockout by up to that skew. The in-memory store and the Eclipse-Store
  * adapter live in one process and cannot be shared between nodes; the deployment
@@ -145,6 +157,8 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   private final AttemptLimits limits;
   /** Limits of the address key; {@code null} while the address counter is off (JS-SEC-062). */
   private final AttemptLimits addressLimits;
+  /** The address limit itself, for the bucket of an address; {@code null} while it is off. */
+  private final LoginAttemptLimits.AddressLimit addressLimit;
   private final CredentialCheckGate gate;
   private final TenantId tenant;
   private final Clock clock;
@@ -254,10 +268,11 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
     this.canonicalizer = requireNonNull(canonicalizer, "canonicalizer must not be null");
     this.limits = new AttemptLimits(config.failureThreshold(), config.window(),
         config.initialLockout(), InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL);
-    this.addressLimits = limits.perAddress()
-        .map(address -> new AttemptLimits(address.failureThreshold(), address.window(),
-            address.initialLockout(), InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL))
-        .orElse(null);
+    this.addressLimit = limits.perAddress().orElse(null);
+    this.addressLimits = addressLimit == null
+        ? null
+        : new AttemptLimits(addressLimit.failureThreshold(), addressLimit.window(),
+            addressLimit.initialLockout(), InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL);
     this.gate = CredentialCheckGate.of(limits, clock, auditService);
   }
 
@@ -288,11 +303,11 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
     // JS-SEC-123 (CWE-367): one store operation per key checks the lockout and reserves the
     // attempt. JS-SEC-166 / JS-SEC-062 (CWE-307): the tuple first, then the account, then the
     // address; a refusal gives back what the keys before it reserved.
-    List<LoginAttemptKey> reserved = new ArrayList<>(3);
-    for (Counter counter : keys.counters(limits, addressLimits)) {
+    List<LoginAttemptKey> reserved = new ArrayList<>(2);
+    for (LoginAttemptKey key : keys.reserving()) {
       AttemptStatus status;
       try {
-        status = store.tryBeginAttempt(counter.key(), now, counter.limits());
+        status = store.tryBeginAttempt(key, now, limits);
       } catch (RuntimeException storeFailure) {
         giveBack(reserved, now, storeFailure);
         throw storeFailure;
@@ -301,7 +316,23 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
         giveBack(reserved, now, null);
         return decision(status, now);
       }
-      reserved.add(counter.key());
+      reserved.add(key);
+    }
+    if (keys.address() != null) {
+      // Exit review RF03: the address counts failures only. It is read, not reserved - a
+      // reservation would let threshold-many logins in flight behind one NAT address lock out
+      // every further account from it without a single failure.
+      LoginAttemptDecision addressLock;
+      try {
+        addressLock = derivedLockout(keys.address(), addressLimits, now);
+      } catch (RuntimeException storeFailure) {
+        giveBack(reserved, now, storeFailure);
+        throw storeFailure;
+      }
+      if (addressLock instanceof LoginAttemptDecision.LockedOut) {
+        giveBack(reserved, now, null);
+        return addressLock;
+      }
     }
     return LoginAttemptDecision.allowed();
   }
@@ -327,13 +358,16 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   public LoginAttemptDecision peek(LoginAttemptContext context) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    for (Counter counter : keys(context).counters(limits, addressLimits)) {
-      LoginAttemptDecision lockout = derivedLockout(counter.key(), counter.limits(), now);
+    Keys keys = keys(context);
+    for (LoginAttemptKey key : keys.reserving()) {
+      LoginAttemptDecision lockout = derivedLockout(key, limits, now);
       if (lockout instanceof LoginAttemptDecision.LockedOut) {
         return lockout;
       }
     }
-    return LoginAttemptDecision.allowed();
+    return keys.address() == null
+        ? LoginAttemptDecision.allowed()
+        : derivedLockout(keys.address(), addressLimits, now);
   }
 
   /**
@@ -365,10 +399,9 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
     Instant now = clock.instant();
     Keys keys = keys(context);
     if (keys.address() != null) {
-      // JS-SEC-062: the address keeps its failures - a success only gives its slot back. A
-      // lockout of the address that set in while this attempt was checked denies the login,
+      // JS-SEC-062: the address keeps its failures and holds no reservation (exit review RF03).
+      // A lockout of the address that set in while this attempt was checked denies the login,
       // as a lockout of the account does (JS-SEC-123), and leaves the account counters alone.
-      store.abandonAttempt(keys.address(), now);
       LoginAttemptDecision addressLock = derivedLockout(keys.address(), addressLimits, now);
       if (addressLock instanceof LoginAttemptDecision.LockedOut) {
         store.abandonAttempt(keys.account(), now);
@@ -422,8 +455,8 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
       publishLimitReached(context, accountStatus, now);
     }
     if (addressStatus != null && lockedByThisFailure(addressStatus, now, addressLimits)) {
-      // JS-SEC-062: the lockout belongs to the address, not to the account that was tried last
-      publishLimitReached(new LoginAttemptContext("", context.clientAddress(),
+      // JS-SEC-062: the lockout belongs to the address bucket, not to the account tried last
+      publishLimitReached(new LoginAttemptContext("", keys.address().ip(),
           context.sessionId(), context.timestamp()), addressStatus, now);
     }
   }
@@ -477,9 +510,10 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
   public void abandonAttempt(LoginAttemptContext context) {
     requireNonNull(context, "context must not be null");
     Instant now = clock.instant();
-    // JS-SEC-126 (CWE-703): no verdict - release the reservations, count nothing.
-    for (Counter counter : keys(context).counters(limits, addressLimits)) {
-      store.abandonAttempt(counter.key(), now);
+    // JS-SEC-126 (CWE-703): no verdict - release the reservations, count nothing. The address
+    // took none (exit review RF03).
+    for (LoginAttemptKey key : keys(context).reserving()) {
+      store.abandonAttempt(key, now);
     }
   }
 
@@ -503,19 +537,20 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
     return new Keys(
         new LoginAttemptKey(tenant, LoginAttemptKey.accountUserId(canonical), address),
         LoginAttemptKey.forAccount(tenant, canonical),
-        addressKey(context, address));
+        addressKey(context));
   }
 
   /**
-   * JS-SEC-062: the address key, or {@code null} when the address counter is off or the attempt
-   * carries no client address - an address that is not known is not counted.
+   * JS-SEC-062: the address key on the address's bucket - an IPv6 prefix or the exact IPv4
+   * address -, or {@code null} when the address counter is off or the attempt carries no client
+   * address: an address that is not known is not counted.
    */
-  private LoginAttemptKey addressKey(LoginAttemptContext context, String normalisedAddress) {
-    if (addressLimits == null || context.clientAddress() == null
-        || context.clientAddress().isBlank()) {
+  private LoginAttemptKey addressKey(LoginAttemptContext context) {
+    String address = context.clientAddress();
+    if (addressLimit == null || address == null || address.isBlank()) {
       return null;
     }
-    return LoginAttemptKey.forAddress(tenant, normalisedAddress);
+    return LoginAttemptKey.forAddress(tenant, addressLimit.bucketOf(address));
   }
 
   /** The canonical user name, or {@code "-"} for a missing or blank one. */
@@ -540,16 +575,12 @@ public final class StoreBackedLoginAttemptPolicy implements LoginAttemptPolicy {
    */
   private record Keys(LoginAttemptKey tuple, LoginAttemptKey account, LoginAttemptKey address) {
 
-    /** The keys with their limits, in the order they are asked. */
-    List<Counter> counters(AttemptLimits accountLimits, AttemptLimits addressLimits) {
-      return address == null
-          ? List.of(new Counter(tuple, accountLimits), new Counter(account, accountLimits))
-          : List.of(new Counter(tuple, accountLimits), new Counter(account, accountLimits),
-              new Counter(address, addressLimits));
+    /**
+     * The keys that reserve an attempt, in the order they are asked: the tuple, then the
+     * account, both with the account limits. The address reserves nothing (exit review RF03).
+     */
+    List<LoginAttemptKey> reserving() {
+      return List.of(tuple, account);
     }
-  }
-
-  /** A key and the limits it is counted with. */
-  private record Counter(LoginAttemptKey key, AttemptLimits limits) {
   }
 }

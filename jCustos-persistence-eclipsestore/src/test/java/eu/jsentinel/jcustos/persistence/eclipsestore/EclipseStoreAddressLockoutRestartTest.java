@@ -117,4 +117,39 @@ class EclipseStoreAddressLockoutRestartTest {
           "the lockout ends on time");
     }
   }
+
+  @Test
+  @DisplayName("an IPv6 spray from new addresses of one /64 locks the /64, and the lockout of the prefix key survives a restart")
+  void ipv6PrefixLockoutSurvivesRestart() {
+    LoginAttemptKey prefixKey = LoginAttemptKey.forAddress(TenantId.DEFAULT, "2001:db8:5:6::/64");
+    try (EclipseStoreJCustosStorage storage = EclipseStoreJCustosStorage.openAt(tempDir)) {
+      LoginAttemptStore store = storage.loginAttemptStore();
+      for (int i = 0; i < 20; i++) {
+        StoreBackedLoginAttemptPolicy policy = policy(store, T0.plusSeconds(i));
+        // a fresh source address of the same /64 for every guess
+        LoginAttemptContext attempt = ctx("user-" + i, "2001:db8:5:6:" + Integer.toHexString(i + 1)
+            + "::1", T0.plusSeconds(i));
+        if (policy.beforeAttempt(attempt) instanceof LoginAttemptDecision.Allowed) {
+          policy.recordFailure(attempt);
+        }
+      }
+      assertEquals(8, store.failureCount(prefixKey), "eight guesses were evaluated");
+      assertTrue(storage.tables().loginAttempts.containsKey(prefixKey),
+          "the prefix key is persisted verbatim");
+    }
+
+    Instant afterRestart = T0.plus(Duration.ofMinutes(10));
+    try (EclipseStoreJCustosStorage reopened = EclipseStoreJCustosStorage.openAt(tempDir)) {
+      LoginAttemptStore store = reopened.loginAttemptStore();
+      assertEquals(8, store.failureCount(prefixKey));
+      assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+          policy(store, afterRestart).beforeAttempt(ctx("someone-new", "2001:db8:5:6:dead::beef",
+              afterRestart)), "a new address of the locked /64 is refused after the restart");
+      LoginAttemptContext neighbour = ctx("someone-new", "2001:db8:5:7::1", afterRestart);
+      StoreBackedLoginAttemptPolicy policy = policy(store, afterRestart);
+      assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(neighbour),
+          "the neighbouring /64 is not locked");
+      policy.abandonAttempt(neighbour);
+    }
+  }
 }

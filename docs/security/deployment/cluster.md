@@ -83,7 +83,11 @@ policy (JS-SEC-166):
   tuple only (JS-SEC-012), so whoever moved to it to run several nodes lost the protection against
   an attacker who changes address after every few guesses;
 - the **address**, `LoginAttemptKey.forAddress(tenant, address)`, across all accounts - only with
-  `LoginAttemptLimits.perAddress()` (JS-SEC-062, password spraying).
+  `LoginAttemptLimits.perAddress()` (JS-SEC-062, password spraying). The key's address is the
+  bucket of `AddressLimit.bucketOf(...)`: an IPv4 address exactly, an IPv6 address per prefix of
+  `ipv6PrefixLength` bits (default 64, written as `2001:db8:1:2::/64`), so all nodes derive the
+  same key. The address counts failures only: it takes no reservation, and logins of different
+  accounts in flight from one NAT address do not throttle each other (exit review RF03).
 
 The account counter is always on, as it is in the in-memory policy. The consequence is the same as
 there: whoever knows a user name can lock that account for `initialLockout` by failing
@@ -91,14 +95,20 @@ there: whoever knows a user name can lock that account for `initialLockout` by f
 
 The policy keeps no state of its own. Every node asks the store, so a lockout earned through one
 node refuses the account on every node, and the attempts in flight on all nodes together never
-exceed the threshold - provided the store is atomic as described below. An attempt that a node
+exceed the threshold of the tuple and the account key - provided the store is atomic as described
+below. The address key is read before an attempt (`failureCount`, `lastFailureAt`) and written only
+when one fails; the attempts from one address that were admitted before its threshold was reached
+are still checked, which the credential-check gate of each node bounds. An attempt that a node
 admitted but never reported, because the node failed, lapses after
 `InMemoryLoginAttemptPolicy.ATTEMPT_RESERVATION_TTL` (30 seconds) and frees its slot. The lockout of
 the store-backed policy is flat (`initialLockout` from the failure that reached the threshold); the
 progressive backoff of the in-memory policy needs per-key history the store contract does not carry.
 
 The tuple, the account and the address are separate store operations, not one atomic step: a
-lockout of one of them that sets in between them is caught by the next attempt.
+lockout of one of them that sets in between them is caught by the next attempt. A shared store
+has to answer `failureCount` and `lastFailureAt` of an address key from the same state its atomic
+operations write, and count a `completeFailure` for a key that has no attempt in flight without
+releasing anything.
 
 ## Building blocks that stay on each node
 

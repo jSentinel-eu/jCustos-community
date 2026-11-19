@@ -40,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -69,10 +70,17 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>Address keys (JS-SEC-062): {@code StoreBackedLoginAttemptPolicy} counts
  * the failures of a client address on {@link LoginAttemptKey#forAddress}, an
- * ordinary key with a reserved user id, under limits of their own. A store
- * keeps such a key like any other; the tests below check the round trip,
- * the independence from account keys and - for an atomic store - the
- * reservation.
+ * ordinary key with a reserved user id, under limits of their own. Its
+ * {@code ip} is the address's bucket - the exact IPv4 address or an IPv6
+ * prefix such as {@code 2001:db8:1:2::/64}. The policy takes no reservation on
+ * it (exit review RF03): it reads {@link LoginAttemptStore#failureCount} and
+ * {@link LoginAttemptStore#lastFailureAt} before an attempt and reports a
+ * failure with {@link LoginAttemptStore#completeFailure} for a key without an
+ * attempt in flight. A store keeps such a key like any other; the tests below
+ * check the round trip of a plain and of a prefix bucket, the independence from
+ * account keys, the reservation an atomic store still grants when asked, and -
+ * through the policy - that logins in flight from one address do not lock it
+ * while its failures do, and that the addresses of one /64 share one counter.
  *
  * <p>Precision (since 00.84.00): the tests whose name starts with {@code CWE-778}
  * run at sub-millisecond instants - every other test uses whole seconds. A store
@@ -473,7 +481,7 @@ public interface LoginAttemptStoreContract {
   }
 
   @Test
-  @DisplayName("JS-SEC-062: an admitted attempt on an address key is a reservation; abandon gives it back and counts nothing")
+  @DisplayName("JS-SEC-062: a store reserves on an address key as on any other key when asked; abandon gives it back and counts nothing")
   default void addressKeyReservation() {
     assumeTrue(this instanceof AtomicLoginAttemptStoreContract,
         "only an atomic store reserves attempts");
@@ -493,6 +501,89 @@ public interface LoginAttemptStoreContract {
     assertFalse(store.tryBeginAttempt(address, t0.plusSeconds(1), limits).blocked(),
         "an abandoned attempt frees its slot");
     assertEquals(0, store.failureCount(address), "and counts nothing");
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: an address key whose ip is an IPv6 prefix is kept verbatim and apart from the bare address")
+  default void addressKeyWithPrefixBucketRoundTrip() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptKey prefix = LoginAttemptKey.forAddress(TenantId.DEFAULT, "2001:db8:1:2::/64");
+    LoginAttemptKey bare = LoginAttemptKey.forAddress(TenantId.DEFAULT, "2001:db8:1:2::");
+    LoginAttemptKey wider = LoginAttemptKey.forAddress(TenantId.DEFAULT, "2001:db8:1::/48");
+    AttemptLimits limits = addressLimits();
+
+    store.completeFailure(prefix, t0, limits);
+    store.completeFailure(prefix, t0.plusSeconds(1), limits);
+    store.completeFailure(wider, t0, limits);
+
+    assertEquals(2, store.failureCount(prefix));
+    assertEquals(Optional.of(t0.plusSeconds(1)), store.lastFailureAt(prefix));
+    assertEquals(0, store.failureCount(bare), "the bucket text is the key, character for character");
+    assertEquals(1, store.failureCount(wider), "a /48 and a /64 that start alike are two keys");
+  }
+
+  @Test
+  @DisplayName("RF03: over this store, logins of different accounts in flight from one address do not lock it; its failures do")
+  default void addressCountsFailuresNotLoginsInFlight() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptLimits limits = nodeLimits().withAddressLimit(new LoginAttemptLimits.AddressLimit(
+        3, Duration.ofHours(1), Duration.ofMinutes(30), Duration.ofHours(4)));
+    LoginAttemptPolicy policy = new StoreBackedLoginAttemptPolicy(store, limits, TenantId.DEFAULT,
+        Clock.fixed(t0, ZoneOffset.UTC), SubjectKeyCanonicalizer.defaults(),
+        NoopJCustosAuditService.INSTANCE);
+    int threshold = limits.perAddress().orElseThrow().failureThreshold();
+
+    List<LoginAttemptContext> inFlight = new ArrayList<>();
+    for (int i = 0; i <= threshold; i++) {
+      LoginAttemptContext attempt = new LoginAttemptContext("user" + i, "10.0.0.1", null, t0);
+      assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(attempt),
+          "user" + i + ": " + i + " logins of other accounts are in flight from the address");
+      inFlight.add(attempt);
+    }
+    assertEquals(0, store.failureCount(LoginAttemptKey.forAddress(TenantId.DEFAULT, "10.0.0.1")),
+        "the address holds no failure and no reservation");
+
+    for (LoginAttemptContext attempt : inFlight) {
+      policy.recordFailure(attempt);
+    }
+    assertEquals(threshold + 1,
+        store.failureCount(LoginAttemptKey.forAddress(TenantId.DEFAULT, "10.0.0.1")));
+    LoginAttemptDecision.LockedOut locked = assertInstanceOf(LoginAttemptDecision.LockedOut.class,
+        policy.beforeAttempt(new LoginAttemptContext("user-next", "10.0.0.1", null, t0)),
+        "the failures lock the address");
+    assertTrue(locked.remaining().compareTo(Duration.ofMinutes(30)) <= 0
+            && locked.remaining().compareTo(Duration.ofMinutes(30)
+            .minus(StoreBackedLoginAttemptPolicy.STORE_INSTANT_TOLERANCE)) >= 0,
+        "for the address lockout: " + locked.remaining());
+  }
+
+  @Test
+  @DisplayName("JS-SEC-062: over this store, the addresses of one IPv6 /64 share the address counter of the store-backed policy")
+  default void addressesOfOneSlash64ShareTheCounter() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptLimits limits = nodeLimits().withAddressLimit(new LoginAttemptLimits.AddressLimit(
+        3, Duration.ofHours(1), Duration.ofMinutes(30), Duration.ofHours(4)));
+    LoginAttemptPolicy policy = new StoreBackedLoginAttemptPolicy(store, limits, TenantId.DEFAULT,
+        Clock.fixed(t0, ZoneOffset.UTC), SubjectKeyCanonicalizer.defaults(),
+        NoopJCustosAuditService.INSTANCE);
+
+    String[] addresses = {"2001:db8:1:2::1", "2001:db8:1:2:aaaa::2", "2001:db8:1:2:ffff::3"};
+    for (int i = 0; i < addresses.length; i++) {
+      LoginAttemptContext guess = new LoginAttemptContext("user" + i, addresses[i], null, t0);
+      assertEquals(LoginAttemptDecision.allowed(), policy.beforeAttempt(guess), addresses[i]);
+      policy.recordFailure(guess);
+    }
+
+    assertEquals(addresses.length, store.failureCount(
+        LoginAttemptKey.forAddress(TenantId.DEFAULT, "2001:db8:1:2::/64")),
+        "one address key, the /64 in canonical form");
+    assertInstanceOf(LoginAttemptDecision.LockedOut.class, policy.beforeAttempt(
+        new LoginAttemptContext("fresh", "2001:db8:1:2::99", null, t0)), "the /64 is locked");
+    assertEquals(LoginAttemptDecision.allowed(), policy.peek(
+        new LoginAttemptContext("fresh", "2001:db8:1:3::1", null, t0)), "another /64 is not");
   }
 
   // ── several nodes on one store (JS-SEC-166, since 00.84.00) ────────

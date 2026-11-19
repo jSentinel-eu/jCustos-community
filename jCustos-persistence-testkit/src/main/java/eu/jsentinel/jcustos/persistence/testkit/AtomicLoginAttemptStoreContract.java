@@ -17,6 +17,7 @@
 package eu.jsentinel.jcustos.persistence.testkit;
 
 import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
+import eu.jsentinel.jcustos.authorization.api.tenant.TenantId;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptKey;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore;
 import eu.jsentinel.jcustos.bruteforce.LoginAttemptStore.AttemptLimits;
@@ -39,8 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * What a {@link LoginAttemptStore} must satisfy when it implements the
  * attempt operations <em>atomically</em> (JS-SEC-122, JS-SEC-123) instead
  * of inheriting the SPI defaults: an admitted attempt is a reservation,
- * parallel requests cannot exceed the threshold, and a counter is
- * forgotten once no failure has been recorded for a full window.
+ * parallel requests cannot exceed the threshold, a counter is
+ * forgotten once no failure has been recorded for a full window, and a
+ * failure reported for a key without an attempt in flight - the address key
+ * of {@code StoreBackedLoginAttemptPolicy} (exit review RF03) - releases
+ * nothing.
  *
  * <p>A store that passes this contract gives
  * {@code StoreBackedLoginAttemptPolicy} its full guarantees. A store that
@@ -97,6 +101,27 @@ public interface AtomicLoginAttemptStoreContract extends LoginAttemptStoreContra
     assertFalse(store.tryBeginAttempt(k, t0, limits).blocked());
     assertFalse(store.tryBeginAttempt(k, t0, limits).blocked());
     assertTrue(store.tryBeginAttempt(k, t0, limits).blocked(), "0 failures + 3 in flight = threshold");
+  }
+
+  @Test
+  @DisplayName("RF03: a failure reported for a key without an attempt in flight is counted and frees no slot it never took")
+  default void failureWithoutReservationReleasesNothing() {
+    LoginAttemptStore store = newStore();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    LoginAttemptKey k = LoginAttemptKey.forAddress(TenantId.DEFAULT, "1.1.1.1");
+    AttemptLimits limits = limits();
+
+    // the address key of the store-backed policy: failures arrive without tryBeginAttempt
+    assertFalse(store.completeFailure(k, t0, limits).blocked());
+    assertFalse(store.completeFailure(k, t0, limits).blocked());
+    assertEquals(2, store.failureCount(k));
+
+    assertFalse(store.tryBeginAttempt(k, t0, limits).blocked(), "2 failures + 0 in flight");
+    assertTrue(store.tryBeginAttempt(k, t0, limits).blocked(),
+        "2 failures + 1 in flight reach the threshold - no slot went below zero");
+    AttemptStatus third = store.completeFailure(k, t0, limits);
+    assertTrue(third.blocked(), "the third failure locks");
+    assertEquals(3, third.failures());
   }
 
   @Test

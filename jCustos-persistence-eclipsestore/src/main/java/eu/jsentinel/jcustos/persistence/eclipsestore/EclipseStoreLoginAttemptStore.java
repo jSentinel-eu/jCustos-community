@@ -56,9 +56,15 @@ import static java.util.Objects.requireNonNull;
  *       evicted; a store full of live lockouts refuses new keys.</li>
  *   <li><strong>Address keys</strong> (JS-SEC-062): the counter of a client
  *       address is persisted under {@link LoginAttemptKey#forAddress}, a key
- *       of the existing shape, so the format is unchanged. After a restart the
- *       working state derives an address lockout from the limits of the first
- *       address operation, not from the shorter limits of the accounts.</li>
+ *       of the existing shape, so the format is unchanged; for IPv6 its
+ *       {@code ip} is the prefix bucket, such as {@code 2001:db8:1:2::/64}.
+ *       The policy takes no reservation on it (exit review RF03): it reads
+ *       counter and last failure, which the adapter answers from the
+ *       persistent table, and reports failures. After a restart the working
+ *       state derives an address lockout from the limits of the first address
+ *       failure, not from the shorter limits of the accounts; until then the
+ *       policy derives the lockout from the restored counter with its own
+ *       address limits.</li>
  *   <li><strong>Account keys</strong> (JS-SEC-166): the counter of an account
  *       across all addresses is persisted under {@link LoginAttemptKey#forAccount},
  *       a key of the existing shape as well.</li>

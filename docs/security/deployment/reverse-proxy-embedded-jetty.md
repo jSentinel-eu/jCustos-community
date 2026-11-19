@@ -147,7 +147,15 @@ VaadinSecurity.bootstrap()
 ```
 
 Choose the threshold with the clients in mind that legitimately share one address: an office
-behind one NAT, a mobile carrier's gateway.
+behind one NAT, a mobile carrier's gateway. Only their failed logins count against it: the address
+counter takes no reservation for logins in flight, so many users of one NAT address can log in at
+the same moment (exit review RF03).
+
+IPv6 clients are counted per prefix, because a host can usually pick a new address within its /64
+for every request: the default is 64 bits, `AddressLimit.withIpv6PrefixLength(48)` or
+`security.login.attempts.address.ipv6-prefix=48` widens the bucket, `128` counts every address
+exactly. Values outside 32 to 128 stop the start. IPv4 addresses, also when written as
+IPv4-mapped IPv6 (`::ffff:203.0.113.5`), are always counted exactly.
 
 ## 7. Origin guard for cookie-based REST sessions (CSRF)
 

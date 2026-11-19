@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.audit.LoginFailed;
 import eu.jsentinel.jcustos.audit.LoginSucceeded;
 import eu.jsentinel.jcustos.audit.JCustosAuditService;
 import eu.jsentinel.jcustos.authentication.AuthenticationService;
+import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import eu.jsentinel.jcustos.authorization.api.JCustosServiceResolver;
 import eu.jsentinel.jcustos.authorization.api.SubjectStores;
 import eu.jsentinel.jcustos.bruteforce.CredentialCheckGate;
@@ -81,8 +82,15 @@ import java.util.Objects;
  *       exception is logged with its class only.</li>
  * </ol>
  *
- * <p>The flow has no client address; the address counter of the policy
- * (JS-SEC-062) therefore does not apply to it.
+ * <p><strong>Client address (JS-SEC-062).</strong> {@link #login(Object, String)}
+ * passes no client address, so the address counter of the policy
+ * ({@code LoginAttemptLimits.perAddress()}) does not apply to it - right for a
+ * CLI or desktop application, which has no remote client. An application that
+ * serves remote clients itself - a socket or line-protocol server - knows the
+ * peer address and calls {@link #login(Object, String, String)} with it; the
+ * policy then counts the failures from that address across all user names and
+ * locks a spraying address, and the {@link LoginSucceeded} and
+ * {@link LoginFailed} events the flow publishes carry it.
  *
  * @param <T> the credentials type
  * @param <U> the subject type
@@ -157,8 +165,36 @@ public final class StandaloneLoginFlow<T, U> {
    *         carries the retry-after.
    */
   public LoginResult<U> login(T credentials, String username) {
+    return login(credentials, username, null);
+  }
+
+  /**
+   * Runs one login attempt from a known client address (JS-SEC-062, CWE-307): as
+   * {@link #login(Object, String)}, and the policy also counts the attempt on the address. With
+   * an address limit configured ({@code LoginAttemptLimits.withAddressLimit(...)} or
+   * {@code security.login.attempts.address.threshold}), failures from one address across many
+   * user names lock that address - password spraying. {@code login(credentials, username)} is
+   * this method with {@code clientAddress} {@code null}.
+   *
+   * <p>Pass the IP literal of the peer as the server observed it, for example
+   * {@code ((InetSocketAddress) socket.getRemoteSocketAddress()).getAddress().getHostAddress()}
+   * - not {@code getRemoteSocketAddress().toString()}, whose leading slash and port would give
+   * every connection a counter of its own. Never take it from what the client sends. Behind a
+   * proxy, pass the address the proxy reports only when the connection comes from that proxy.
+   *
+   * @param credentials   credentials accepted by the configured {@link AuthenticationService}
+   * @param username      displayed username, used for brute-force tracking and audit; may be
+   *                      {@code null} or empty for anonymous flows
+   * @param clientAddress the client's IP address; {@code null} or blank when it is not known -
+   *                      the address counter then does not apply
+   * @return the outcome
+   * @throws CredentialVerificationUnavailableException as {@link #login(Object, String)}
+   * @since 00.84.00
+   */
+  @ExperimentalJCustosApi
+  public LoginResult<U> login(T credentials, String username, String clientAddress) {
     LoginAttemptPolicy policy = JCustosServiceResolver.loginAttemptPolicy();
-    LoginAttemptContext attempt = LoginAttemptContext.now(username, null, null);
+    LoginAttemptContext attempt = LoginAttemptContext.now(username, clientAddress, null);
     // obtained before the reservation: a policy that cannot hand out its gate reserves nothing
     CredentialCheckGate gate = policy.credentialCheckGate();
 
@@ -220,11 +256,11 @@ public final class StandaloneLoginFlow<T, U> {
     // JS-SEC-123 (CWE-367, CWE-307): the key can have been locked while the credentials were
     // being checked. A correct password neither lifts that lockout nor passes it.
     if (policy.confirmSuccess(attempt) instanceof LoginAttemptDecision.LockedOut lockout) {
-      audit(new LoginFailed(now(), username, null, REASON_LOCKED_IN_FLIGHT));
+      audit(new LoginFailed(now(), username, clientAddress, REASON_LOCKED_IN_FLIGHT));
       return LoginResult.lockedOut(lockout);
     }
     SubjectStores.subjectStore().setCurrentSubject(subject, authenticationService.subjectType());
-    audit(new LoginSucceeded(now(), username, null, null));
+    audit(new LoginSucceeded(now(), username, clientAddress, null));
     return LoginResult.success(subject);
   }
 

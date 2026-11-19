@@ -57,14 +57,23 @@ import java.util.Optional;
  * password or two against each of many accounts stays below all of them.
  * With {@link LoginAttemptLimits#perAddress()} set, a third counter on the
  * client address alone catches that: its own threshold, window and
- * progressive lockout, the same reservation of attempts in flight, the same
- * capacity bound and the same promise never to evict a live lockout. The
- * counter is used only for an attempt that carries a client address. A
- * successful login releases its reservation but does not reset it - an
- * attacker with one account of their own could otherwise reset the counter
- * of the address they spray from. A lockout of the address is audited as
- * {@link BruteForceLimitReached} with an empty user name. Without
- * {@code perAddress} - the default - the counter does not exist.
+ * progressive lockout, the same capacity bound and the same promise never to
+ * evict a live lockout. The counter is used only for an attempt that carries
+ * a client address. It counts <strong>failures only</strong>: it takes no
+ * reservation and refuses an attempt only while the address is locked (exit
+ * review RF03), so concurrent logins of different accounts behind one NAT
+ * address do not throttle each other. Attempts from one address that were
+ * admitted before its threshold was reached are still checked; the overshoot
+ * is bounded by the {@linkplain #credentialCheckGate() credential-check gate},
+ * see {@link LoginAttemptLimits.AddressLimit}. An IPv6 address is counted per
+ * prefix of {@link LoginAttemptLimits.AddressLimit#ipv6PrefixLength()} bits,
+ * an IPv4 address exactly ({@link LoginAttemptLimits.AddressLimit#bucketOf}).
+ * A successful login does not reset the counter - an attacker with one
+ * account of their own could otherwise reset the counter of the address they
+ * spray from. A lockout of the address is audited as
+ * {@link BruteForceLimitReached} with an empty user name and the address
+ * bucket as client address. Without {@code perAddress} - the default - the
+ * counter does not exist.
  *
  * <h2>Concurrent credential checks (JS-SEC-063, CWE-770)</h2>
  *
@@ -75,9 +84,10 @@ import java.util.Optional;
  * <h2>Attempts in flight (JS-SEC-123, CWE-367)</h2>
  *
  * <p>{@link #beforeAttempt} does not merely read. Under the policy's monitor
- * it checks the lockouts, counts the attempt as in flight on both keys and
- * allows it only while {@code failures + inFlight} stays below the
- * threshold. The report that follows - {@link #recordFailure},
+ * it checks the lockouts, counts the attempt as in flight on both account
+ * counters - the (user, address) pair and the user name, not on the address
+ * counter - and allows it only while {@code failures + inFlight} stays below
+ * the threshold. The report that follows - {@link #recordFailure},
  * {@link #confirmSuccess}/{@link #recordSuccess} or {@link #abandonAttempt} -
  * releases the reservation. Fifty requests that arrive together therefore
  * get at most {@code failureThreshold} evaluations; the others receive
@@ -89,7 +99,9 @@ import java.util.Optional;
  *
  * <p>Each of the maps (account and user name, and the address map when the
  * address counter is on) holds at most {@code maxEntries} keys - a hard
- * bound. A key that is locked or has an attempt in flight is never evicted.
+ * bound. A key that is locked or has an attempt in flight is never evicted;
+ * an address has no attempts in flight, so its entry is protected while it is
+ * locked.
  * State that has expired (failures older than the window, a lockout that
  * ended more than {@code maxLockout} ago) is dropped on the next call via an
  * expiry index. When room is still needed the unprotected entry written
@@ -147,6 +159,8 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
   private final LoginAttemptConfiguration config;
   /** Thresholds of the address counter; {@code null} while it is off (JS-SEC-062). */
   private final LoginAttemptConfiguration addressConfig;
+  /** The address limit itself, for the bucket of an address; {@code null} while it is off. */
+  private final LoginAttemptLimits.AddressLimit addressLimit;
   private final CredentialCheckGate gate;
   private final Clock clock;
   private final JCustosAuditService auditService;
@@ -248,9 +262,8 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
                                     SubjectKeyCanonicalizer canonicalizer) {
     this.limits = Objects.requireNonNull(limits, "limits");
     this.config = limits.perAccount();
-    this.addressConfig = limits.perAddress()
-        .map(LoginAttemptLimits.AddressLimit::asConfiguration)
-        .orElse(null);
+    this.addressLimit = limits.perAddress().orElse(null);
+    this.addressConfig = addressLimit == null ? null : addressLimit.asConfiguration();
     this.clock = Objects.requireNonNull(clock, "clock");
     this.auditService = auditService;
     this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
@@ -314,7 +327,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     Instant now = Instant.now(clock);
     CombinedKey combinedKey = combinedKey(context);
     String usernameKey = combinedKey.username();
-    String addressKey = addressKey(combinedKey);
+    String addressKey = addressKey(context);
 
     boolean capacityExhausted = false;
     LoginAttemptDecision decision;
@@ -323,6 +336,9 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       State user = byUsername.get(usernameKey, now);
       State address = addressKey == null ? null : byAddress.get(addressKey, now);
 
+      // JS-SEC-062 (CWE-307): a spray across many accounts locks the address. The address counts
+      // failures only (exit review RF03) - it refuses here while it is locked and takes no
+      // reservation below, so concurrent logins behind one NAT address do not throttle each other.
       Optional<LoginAttemptDecision> locked = firstLockout(now, combined, user, address);
       if (locked.isPresent()) {
         return locked.get();
@@ -332,47 +348,35 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       // together see each other's attempts in flight instead of all reading "below threshold".
       combined = prepare(combined, now, config);
       user = prepare(user, now, config);
-      if (addressKey != null) {
-        address = prepare(address, now, addressConfig);
-      }
       Optional<LoginAttemptDecision> saturated = saturation(combined, now, config);
       if (saturated.isEmpty()) {
         saturated = saturation(user, now, config);
-      }
-      if (saturated.isEmpty() && addressKey != null) {
-        // JS-SEC-062 (CWE-307): a spray across many accounts saturates the address
-        saturated = saturation(address, now, addressConfig);
       }
       if (saturated.isPresent()) {
         return saturated.get();
       }
 
       Instant reservedUntil = plus(now, ATTEMPT_RESERVATION_TTL);
-      combined.reserve(reservedUntil);
-      if (!store(byCombinedKey, combinedKey, combined, now, config)) {
-        decision = capacityRefusal(byCombinedKey, now);
+      if (address == null && addressKey != null && !byAddress.hasRoomFor(addressKey, now)) {
+        // JS-SEC-122 (CWE-770): the address map is full of live address lockouts; a new address
+        // is refused, as a new account is, instead of evicting one of them or going uncounted.
+        decision = capacityRefusal(byAddress, now);
         capacityExhausted = true;
       } else {
-        user.reserve(reservedUntil);
-        if (!store(byUsername, usernameKey, user, now, config)) {
-          combined.release(now);
-          store(byCombinedKey, combinedKey, combined, now, config);
-          decision = capacityRefusal(byUsername, now);
+        combined.reserve(reservedUntil);
+        if (!store(byCombinedKey, combinedKey, combined, now, config)) {
+          decision = capacityRefusal(byCombinedKey, now);
           capacityExhausted = true;
-        } else if (addressKey != null) {
-          address.reserve(reservedUntil);
-          if (!store(byAddress, addressKey, address, now, addressConfig)) {
+        } else {
+          user.reserve(reservedUntil);
+          if (!store(byUsername, usernameKey, user, now, config)) {
             combined.release(now);
             store(byCombinedKey, combinedKey, combined, now, config);
-            user.release(now);
-            store(byUsername, usernameKey, user, now, config);
-            decision = capacityRefusal(byAddress, now);
+            decision = capacityRefusal(byUsername, now);
             capacityExhausted = true;
           } else {
             decision = LoginAttemptDecision.allowed();
           }
-        } else {
-          decision = LoginAttemptDecision.allowed();
         }
       }
       if (capacityExhausted) {
@@ -393,7 +397,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     Objects.requireNonNull(context, "context");
     Instant now = Instant.now(clock);
     CombinedKey combinedKey = combinedKey(context);
-    String addressKey = addressKey(combinedKey);
+    String addressKey = addressKey(context);
     synchronized (monitor) {
       return firstLockout(now,
           byCombinedKey.get(combinedKey, now), byUsername.get(combinedKey.username(), now),
@@ -413,7 +417,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     Instant now = Instant.now(clock);
     CombinedKey combinedKey = combinedKey(context);
     String usernameKey = combinedKey.username();
-    String addressKey = addressKey(combinedKey);
+    String addressKey = addressKey(context);
 
     synchronized (monitor) {
       State combined = byCombinedKey.get(combinedKey, now);
@@ -425,16 +429,13 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       if (user != null) {
         user.release(now);
       }
-      if (address != null) {
-        address.release(now);
-      }
+      // JS-SEC-062: the address holds no reservation to give back (exit review RF03)
       Optional<LoginAttemptDecision> locked = firstLockout(now, combined, user, address);
       if (locked.isPresent()) {
         // JS-SEC-123 (CWE-307): the key was locked while this attempt was being checked. The
         // lockout stays, and the caller is told to deny the login.
         restore(byCombinedKey, combinedKey, combined, now, config);
         restore(byUsername, usernameKey, user, now, config);
-        restore(byAddress, addressKey, address, now, addressConfig);
         return locked.get();
       }
       if (combined != null) {
@@ -446,8 +447,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
         store(byUsername, usernameKey, user, now, config);
       }
       // JS-SEC-062: the address counter keeps its failures - one account of the attacker's own
-      // must not reset the counter of the address they spray from. Only the slot is given back.
-      restore(byAddress, addressKey, address, now, addressConfig);
+      // must not reset the counter of the address they spray from.
       return LoginAttemptDecision.allowed();
     }
   }
@@ -458,7 +458,6 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     Instant now = Instant.now(clock);
     CombinedKey combinedKey = combinedKey(context);
     String usernameKey = combinedKey.username();
-    String addressKey = addressKey(combinedKey);
 
     // JS-SEC-126 (CWE-703): the check produced no verdict - release the slot, count nothing.
     synchronized (monitor) {
@@ -472,11 +471,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
         user.release(now);
         store(byUsername, usernameKey, user, now, config);
       }
-      State address = addressKey == null ? null : byAddress.get(addressKey, now);
-      if (address != null) {
-        address.release(now);
-        store(byAddress, addressKey, address, now, addressConfig);
-      }
+      // JS-SEC-062: the address took no reservation (exit review RF03); nothing to give back
     }
   }
 
@@ -491,7 +486,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     Instant now = Instant.now(clock);
     CombinedKey combinedKey = combinedKey(context);
     String usernameKey = combinedKey.username();
-    String addressKey = addressKey(combinedKey);
+    String addressKey = addressKey(context);
 
     State justLocked;
     Instant lockedUntil;
@@ -503,6 +498,7 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
     synchronized (monitor) {
       State combined = recordOn(byCombinedKey, combinedKey, now, config);
       State user = recordOn(byUsername, usernameKey, now, config);
+      // JS-SEC-062: recordOn releases no reservation on the address - it never took one
       State address = addressKey == null
           ? null
           : recordOn(byAddress, addressKey, now, addressConfig);
@@ -531,8 +527,8 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
       auditBruteForceLimitReached(context, lockedUntil, totalFailures, now);
     }
     if (addressLockedUntil != null) {
-      // JS-SEC-062: the lockout belongs to the address, not to the account that was tried last
-      auditBruteForceLimitReached(new LoginAttemptContext("", context.clientAddress(),
+      // JS-SEC-062: the lockout belongs to the address bucket, not to the account tried last
+      auditBruteForceLimitReached(new LoginAttemptContext("", addressKey,
           context.sessionId(), context.timestamp()), addressLockedUntil, addressFailures, now);
     }
   }
@@ -674,13 +670,15 @@ public final class InMemoryLoginAttemptPolicy implements LoginAttemptPolicy, Has
   }
 
   /**
-   * JS-SEC-062: the key of the address counter, or {@code null} when the counter is off or the
-   * attempt carries no client address - an address that is not known is not counted.
+   * JS-SEC-062: the key of the address counter - the address's bucket, an IPv6 prefix or the
+   * exact IPv4 address - or {@code null} when the counter is off or the attempt carries no client
+   * address: an address that is not known is not counted.
    */
-  private String addressKey(CombinedKey combinedKey) {
-    return byAddress == null || combinedKey.clientAddress().isEmpty()
+  private String addressKey(LoginAttemptContext context) {
+    String address = context.clientAddress();
+    return addressLimit == null || address == null || address.isBlank()
         ? null
-        : combinedKey.clientAddress();
+        : addressLimit.bucketOf(address);
   }
 
   private String canonicalUsername(String value) {

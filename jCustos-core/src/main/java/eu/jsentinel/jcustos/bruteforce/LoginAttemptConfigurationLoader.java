@@ -62,6 +62,10 @@ import java.util.function.Function;
  *   <tr><td>{@code security.login.attempts.address.max-lockout}</td>
  *       <td>{@code SECURITY_LOGIN_ATTEMPTS_ADDRESS_MAX_LOCKOUT}</td>
  *       <td>the larger of the account maximum and the address initial lockout</td></tr>
+ *   <tr><td>{@code security.login.attempts.address.ipv6-prefix}</td>
+ *       <td>{@code SECURITY_LOGIN_ATTEMPTS_ADDRESS_IPV6_PREFIX}</td>
+ *       <td>{@code 64} - IPv6 addresses are counted per /64; an integer from
+ *       {@code 32} to {@code 128}, where {@code 128} counts every address exactly</td></tr>
  *   <tr><td>{@code security.login.attempts.max-concurrent-checks}</td>
  *       <td>{@code SECURITY_LOGIN_ATTEMPTS_MAX_CONCURRENT_CHECKS}</td>
  *       <td>{@code 0} - unbounded</td></tr>
@@ -73,8 +77,11 @@ import java.util.function.Function;
  *       <td>{@code PT1S}</td></tr>
  * </table>
  *
- * <p>The address counter is switched on by its threshold. An address window or lockout without
- * a threshold is refused - it would look like a configured counter that does not exist.
+ * <p>The address counter is switched on by its threshold. An address window, lockout or IPv6
+ * prefix without a threshold is refused - it would look like a configured counter that does not
+ * exist. An IPv6 prefix outside {@link LoginAttemptLimits#MIN_IPV6_PREFIX_LENGTH} to
+ * {@link LoginAttemptLimits#MAX_IPV6_PREFIX_LENGTH} is refused as well; IPv4 addresses are always
+ * counted exactly.
  *
  * <p>Duration values are parsed as ISO-8601 (e.g. {@code PT5M},
  * {@code PT1H}). The {@link #forBootstrap()} variant uses
@@ -114,6 +121,20 @@ public final class LoginAttemptConfigurationLoader {
   public static final String LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY =
       "security.login.attempts.address.max-lockout";
   public static final String LOGIN_ADDRESS_MAX_LOCKOUT_ENV = "SECURITY_LOGIN_ATTEMPTS_ADDRESS_MAX_LOCKOUT";
+  /**
+   * The IPv6 prefix length of the address counter (JS-SEC-062), see
+   * {@link LoginAttemptLimits.AddressLimit#ipv6PrefixLength()}.
+   *
+   * @since 00.84.00
+   */
+  public static final String LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY =
+      "security.login.attempts.address.ipv6-prefix";
+  /**
+   * Environment variable of {@link #LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY}.
+   *
+   * @since 00.84.00
+   */
+  public static final String LOGIN_ADDRESS_IPV6_PREFIX_ENV = "SECURITY_LOGIN_ATTEMPTS_ADDRESS_IPV6_PREFIX";
   public static final String LOGIN_MAX_CONCURRENT_CHECKS_PROPERTY =
       "security.login.attempts.max-concurrent-checks";
   public static final String LOGIN_MAX_CONCURRENT_CHECKS_ENV =
@@ -181,8 +202,11 @@ public final class LoginAttemptConfigurationLoader {
    * {@code LoginAttemptLimits.of(forLogin())} - no address counter, no bound.
    *
    * @return the limits
-   * @throws IllegalArgumentException when a value is invalid, or an address key other than the
-   *                                  threshold is set without the threshold
+   * @throws IllegalArgumentException when a value is invalid - an IPv6 prefix outside
+   *                                  {@link LoginAttemptLimits#MIN_IPV6_PREFIX_LENGTH} to
+   *                                  {@link LoginAttemptLimits#MAX_IPV6_PREFIX_LENGTH} among
+   *                                  them -, or an address key other than the threshold is set
+   *                                  without the threshold
    * @since 00.84.00
    */
   public LoginAttemptLimits loadLimits() {
@@ -192,7 +216,8 @@ public final class LoginAttemptConfigurationLoader {
     String threshold = value(LOGIN_ADDRESS_THRESHOLD_PROPERTY, LOGIN_ADDRESS_THRESHOLD_ENV);
     boolean addressDetails = value(LOGIN_ADDRESS_WINDOW_PROPERTY, LOGIN_ADDRESS_WINDOW_ENV) != null
         || value(LOGIN_ADDRESS_INITIAL_LOCKOUT_PROPERTY, LOGIN_ADDRESS_INITIAL_LOCKOUT_ENV) != null
-        || value(LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY, LOGIN_ADDRESS_MAX_LOCKOUT_ENV) != null;
+        || value(LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY, LOGIN_ADDRESS_MAX_LOCKOUT_ENV) != null
+        || value(LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY, LOGIN_ADDRESS_IPV6_PREFIX_ENV) != null;
     if (threshold == null && addressDetails) {
       // fail closed: a window without a threshold would look like a counter that does not exist
       throw new IllegalArgumentException("The per-address login limit needs "
@@ -211,8 +236,9 @@ public final class LoginAttemptConfigurationLoader {
           : perAccount.maxLockout();
       Duration max = readDuration(LOGIN_ADDRESS_MAX_LOCKOUT_PROPERTY,
           LOGIN_ADDRESS_MAX_LOCKOUT_ENV, defaultMax);
+      int ipv6Prefix = readIpv6PrefixLength();
       limits = limits.withAddressLimit(
-          new LoginAttemptLimits.AddressLimit(addressThreshold, window, initial, max));
+          new LoginAttemptLimits.AddressLimit(addressThreshold, window, initial, max, ipv6Prefix));
     }
 
     limits = limits.withMaxConcurrentCredentialChecks(readNonNegative(
@@ -228,6 +254,30 @@ public final class LoginAttemptConfigurationLoader {
         .withGateWait(gateWait)
         .withGateRetryAfter(readDuration(LOGIN_GATE_RETRY_AFTER_PROPERTY,
             LOGIN_GATE_RETRY_AFTER_ENV, LoginAttemptLimits.DEFAULT_GATE_RETRY_AFTER));
+  }
+
+  /** The IPv6 prefix of the address counter; fails closed outside its range. */
+  private int readIpv6PrefixLength() {
+    String value = value(LOGIN_ADDRESS_IPV6_PREFIX_PROPERTY, LOGIN_ADDRESS_IPV6_PREFIX_ENV);
+    if (value == null) {
+      return LoginAttemptLimits.DEFAULT_IPV6_PREFIX_LENGTH;
+    }
+    int parsed;
+    try {
+      parsed = Integer.parseInt(value.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException("Invalid IPv6 prefix length '" + value
+          + "' for the per-address login limit. Expected an integer from "
+          + LoginAttemptLimits.MIN_IPV6_PREFIX_LENGTH + " to "
+          + LoginAttemptLimits.MAX_IPV6_PREFIX_LENGTH + ".", e);
+    }
+    if (parsed < LoginAttemptLimits.MIN_IPV6_PREFIX_LENGTH
+        || parsed > LoginAttemptLimits.MAX_IPV6_PREFIX_LENGTH) {
+      throw new IllegalArgumentException("IPv6 prefix length of the per-address login limit must"
+          + " be from " + LoginAttemptLimits.MIN_IPV6_PREFIX_LENGTH + " to "
+          + LoginAttemptLimits.MAX_IPV6_PREFIX_LENGTH + ": " + value);
+    }
+    return parsed;
   }
 
   private String value(String property, String envVar) {

@@ -26,7 +26,13 @@ import java.util.Objects;
  * caller is expected to pass them as-is; the policy applies its
  * {@link eu.jsentinel.jcustos.util.SubjectKeyCanonicalizer} to the
  * username and trims and lower-cases the client address, so identical
- * user / client pairs collapse into the same counter.
+ * user / client pairs collapse into the same counter. The address counter
+ * of {@link LoginAttemptLimits#perAddress()} counts the address's bucket
+ * instead: an IPv6 address per prefix, an IPv4 address exactly
+ * ({@link LoginAttemptLimits.AddressLimit#bucketOf(String)}). Pass the IP
+ * literal - as {@code InetAddress.getHostAddress()} or a
+ * {@code ClientAddressResolver} renders it -, not a socket address with a
+ * leading slash.
  *
  * @param username      the username being attempted; may be {@code null}
  *                      if not yet known (e.g. raw form submission)
