@@ -220,12 +220,18 @@ TESTS=$(python3 - <<'PY'
 import glob
 import xml.etree.ElementTree as ET
 totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+outcome_elements = {"failures": "failure", "errors": "error", "skipped": "skipped"}
 modules = set()
+# Count the test cases, not the testsuite attributes: Surefire writes a "tests"
+# attribute that undercounts a class with @Nested tests (00.83.00: 14 for 18 cases).
 for report in glob.glob("*/target/surefire-reports/TEST-*.xml"):
     root = ET.parse(report).getroot()
     modules.add(report.split("/", 1)[0])
-    for key in totals:
-        totals[key] += int(root.get(key, 0))
+    for case in root.iter("testcase"):
+        totals["tests"] += 1
+        for key, element in outcome_elements.items():
+            if case.find(element) is not None:
+                totals[key] += 1
 print(f"{totals['tests']} tests in {len(modules)} modules, {totals['failures']} failures, "
       f"{totals['errors']} errors, {totals['skipped']} skipped")
 PY
