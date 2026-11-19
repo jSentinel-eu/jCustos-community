@@ -122,7 +122,7 @@ check_uploads() {
       ;;
     esac
     files=$((files + 1))
-    if ! printf '%s\n' "$uploaded" | grep -qxF "$url.asc"; then
+    if ! grep -qxF "$url.asc" <<<"$uploaded"; then
       missing=$((missing + 1))
       jc_fail "uploaded without signature: $url"
     fi

@@ -181,7 +181,7 @@ jc_validsig_fingerprints() {
 jc_fingerprint_matches() {
   local fingerprints="$1"
   [ -n "$JCUSTOS_RELEASE_KEY_FINGERPRINT" ] || return 1
-  printf '%s\n' "$fingerprints" | grep -qx "$JCUSTOS_RELEASE_KEY_FINGERPRINT"
+  grep -qx "$JCUSTOS_RELEASE_KEY_FINGERPRINT" <<<"$fingerprints"
 }
 
 # 0 when <signature> is a good signature over <file> made with the pinned key.
@@ -282,16 +282,16 @@ jc_planned_path() {
 # carries the aggregate SBOM; the BOM is a POM and nothing else.
 jc_check_module_files() {
   local module="$1" version="$2" files="$3" base="$1-$2" required
-  if ! printf '%s\n' "$files" | grep -qx "$base.pom"; then
+  if ! grep -qx "$base.pom" <<<"$files"; then
     jc_fail "$module: no POM ($base.pom)"
   fi
-  if printf '%s\n' "$files" | grep -qx "$base.jar"; then
+  if grep -qx "$base.jar" <<<"$files"; then
     for required in "$base-sources.jar" "$base-javadoc.jar" "$base-cyclonedx.json" "$base-cyclonedx.xml"; do
-      printf '%s\n' "$files" | grep -qx "$required" || jc_fail "$module: $required is missing"
+      grep -qx "$required" <<<"$files" || jc_fail "$module: $required is missing"
     done
   elif [ "$module" = "$JC_PARENT_ARTIFACT" ]; then
     for required in "$base-cyclonedx.json" "$base-cyclonedx.xml"; do
-      printf '%s\n' "$files" | grep -qx "$required" || jc_fail "$module: aggregate SBOM $required is missing"
+      grep -qx "$required" <<<"$files" || jc_fail "$module: aggregate SBOM $required is missing"
     done
   elif [ "$module" != "$JC_BOM_ARTIFACT" ]; then
     jc_fail "$module: no jar ($base.jar)"
