@@ -123,6 +123,8 @@ public final class HttpUserInfoClient implements UserInfoClient {
     if (!(json.get("sub") instanceof String sub) || sub.isBlank()) {
       return Result.failure(new OAuth2Error.MalformedResponse("userinfo response without sub"));
     }
+    // CWE-476: a claim the provider sends as JSON null ("middle_name": null, allowed by OIDC
+    // Core) is dropped by UserInfoResponse as an absent claim; it no longer throws there.
     return Result.success(new UserInfoResponse(sub, json));
   }
 }

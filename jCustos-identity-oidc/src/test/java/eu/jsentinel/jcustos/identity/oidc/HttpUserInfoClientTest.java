@@ -42,12 +42,18 @@ package eu.jsentinel.jcustos.identity.oidc;
  */
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.svenruppert.functional.result.Result;
+import eu.jsentinel.jcustos.jwt.api.JoseHeader;
+import eu.jsentinel.jcustos.jwt.api.ValidatedJwt;
 import eu.jsentinel.jcustos.oauth2.api.OAuth2Error;
 import eu.jsentinel.jcustos.oidc.api.UserInfoResponse;
+import eu.jsentinel.jcustos.oidc.api.ValidatedIdToken;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
@@ -56,6 +62,11 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -144,6 +155,53 @@ class HttpUserInfoClientTest {
     body = "{\"sub\":\"alice\",\"deep\":" + "[".repeat(65) + "]".repeat(65) + "}";
     assertInstanceOf(OAuth2Error.MalformedResponse.class,
         new HttpUserInfoClient(HttpClient.newHttpClient(), endpoint).fetch("AT").fold(x -> null, e -> e));
+  }
+
+  // ── defect 625469c2 (CWE-476): JSON null claims ──
+
+  @Test
+  @DisplayName("625469c2: a JSON null claim is an absent claim; nulls inside nested values are kept, nothing throws")
+  void nullClaimsAreAbsentClaims() {
+    body = "{\"sub\":\"alice\",\"name\":null,\"middle_name\":null,\"email\":\"a@example.com\","
+        + "\"address\":{\"locality\":null,\"country\":\"DE\"},\"groups\":[\"staff\",null]}";
+
+    Result<UserInfoResponse, OAuth2Error> fetched =
+        new HttpUserInfoClient(HttpClient.newHttpClient(), endpoint).fetch("AT");
+
+    UserInfoResponse r = fetched.toOptional().orElseThrow(
+        () -> new AssertionError("a response with null claims must be accepted: " + fetched));
+    assertEquals("alice", r.subject());
+    assertFalse(r.claims().containsKey("middle_name"), "a null claim is dropped");
+    assertEquals(Optional.empty(), r.claim("middle_name", Object.class));
+    assertEquals(Optional.of("a@example.com"), r.claim("email", String.class));
+    Map<?, ?> address = r.claim("address", Map.class).orElseThrow();
+    assertTrue(address.containsKey("locality"), "a nested null is kept as the provider sent it");
+    assertNull(address.get("locality"));
+    assertEquals("DE", address.get("country"));
+    assertEquals(Arrays.asList("staff", null), r.claim("groups", List.class).orElseThrow());
+
+    // the mapper reads the null "name" as absent and falls back to the next display-name claim
+    assertEquals("a@example.com",
+        new DefaultClaimsToSubjectMapper().map(idTokenFor("alice"), Optional.of(r)).displayName());
+  }
+
+  private static ValidatedIdToken idTokenFor(String subject) {
+    Map<String, Object> claims = new LinkedHashMap<>();
+    claims.put("iss", "https://idp.example/");
+    claims.put("sub", subject);
+    ValidatedJwt jwt = new ValidatedJwt("compact",
+        new JoseHeader("RS256", Optional.empty(), Optional.empty()), claims, Instant.now());
+    return new ValidatedIdToken(jwt, Optional.empty(), Optional.empty(), Optional.empty(),
+        List.of(), Optional.empty(), Optional.empty());
+  }
+
+  @Test
+  @DisplayName("625469c2: a null sub is an absent sub - malformed, not a NullPointerException")
+  void nullSubIsMalformed() {
+    body = "{\"sub\":null,\"email\":\"a@example.com\"}";
+    Result<UserInfoResponse, OAuth2Error> r =
+        new HttpUserInfoClient(HttpClient.newHttpClient(), endpoint).fetch("AT");
+    assertInstanceOf(OAuth2Error.MalformedResponse.class, r.fold(x -> null, e -> e));
   }
 
   @Test

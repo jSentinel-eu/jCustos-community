@@ -16,6 +16,7 @@
  */
 package eu.jsentinel.jcustos.oidc.api;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -25,15 +26,41 @@ import java.util.Optional;
  * {@code sub} claim is mandatory and MUST match the ID token's {@code sub} (the RP
  * verifies this) — the rest are provider-specific profile claims.
  *
+ * <p>A claim whose value is JSON {@code null} — {@code "middle_name": null}, which OIDC Core
+ * §5.3.2 allows a provider to send — is an absent claim (CWE-476, as for the claims of a
+ * validated JWT, JS-SEC-149): it is dropped from {@link #claims()}. Until 00.84.00 the
+ * immutable copy threw a {@link NullPointerException} for such a response. Values inside a
+ * nested object or array are kept as given, {@code null} included; the copy is shallow.
+ *
  * @param subject the {@code sub} claim (mandatory)
- * @param claims  the full claim set (immutable; includes {@code sub})
+ * @param claims  the full claim set (immutable; includes {@code sub}); entries with a
+ *                {@code null} value are dropped, a {@code null} claim name is refused
  * @since 00.78.00
  */
 public record UserInfoResponse(String subject, Map<String, Object> claims) {
 
+  /**
+   * Validates the subject and keeps an immutable copy of the claims without the entries
+   * whose value is {@code null}.
+   *
+   * @throws NullPointerException when {@code subject}, {@code claims} or a claim name is
+   *                              {@code null}
+   */
   public UserInfoResponse {
     Objects.requireNonNull(subject, "subject");
-    claims = Map.copyOf(Objects.requireNonNull(claims, "claims"));
+    claims = presentClaims(Objects.requireNonNull(claims, "claims"));
+  }
+
+  /** CWE-476: a JSON {@code null} claim is an absent claim; {@link Map#copyOf} refuses it. */
+  private static Map<String, Object> presentClaims(Map<String, Object> claims) {
+    Map<String, Object> present = new HashMap<>();
+    claims.forEach((name, value) -> {
+      Objects.requireNonNull(name, "claim name");
+      if (value != null) {
+        present.put(name, value);
+      }
+    });
+    return Map.copyOf(present);
   }
 
   /** @return the claim {@code name} as {@code type}, if present and assignable. */
