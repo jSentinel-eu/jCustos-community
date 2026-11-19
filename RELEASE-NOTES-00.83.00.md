@@ -134,6 +134,10 @@ Nothing changes for an application that never calls `.decisionMapper(...)`.
 
 Full reactor green: **6632 tests**, up from 6610 in V00.82.
 
+> **Correction (00.84.00):** both totals counted every test twice; they summed every
+> `Tests run:` line of the Maven log, class lines and module summaries alike. Measured again
+> from the tags: 3316 tests (00.82.00: 3305), and 237 in the enterprise edition, no failures.
+
 Each behavioural change was verified by removing it:
 
 | Change | Disabled | Result |

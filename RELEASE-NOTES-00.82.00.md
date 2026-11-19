@@ -104,3 +104,7 @@ suggests protection that does not apply.
 Community 6600+ tests, enterprise 474 — no failures. Every security fix has a
 test that was confirmed to fail when the fix is disabled; a test that never goes
 red proves nothing.
+
+> **Correction (00.84.00):** these totals counted every test twice; they summed every
+> `Tests run:` line of the Maven log, class lines and module summaries alike. Measured again
+> from the tag: 3305 community tests and 237 enterprise tests, no failures.
