@@ -225,7 +225,7 @@ class RestVersionFilterCorrelationTest {
   }
 
   /** A request with a peer address and multi-line headers. */
-  private record PeerRequest(String method, String path, String remoteAddress,
+  private record PeerRequest(String method, String path, String peer,
                              Map<String, List<String>> lines) implements RestRequest {
 
     static final String CLIENT = "203.0.113.5";
@@ -249,6 +249,11 @@ class RestVersionFilterCorrelationTest {
     @Override
     public Map<String, String> queryParameters() {
       return Map.of();
+    }
+
+    @Override
+    public Optional<String> remoteAddress() {
+      return Optional.ofNullable(peer);
     }
   }
 }

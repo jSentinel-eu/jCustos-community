@@ -19,8 +19,10 @@ package eu.jsentinel.jcustos.net;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,6 +61,30 @@ class DefaultClientAddressResolverTest {
   }
 
   @Test
+  @DisplayName("SP06: the factories' view is empty for a null or blank peer, otherwise the peer as reported")
+  void viewPeerIsEmptyWhenAbsentOrBlank() {
+    Function<String, List<String>> noHeaders = name -> List.of();
+    assertEquals(Optional.empty(), ClientRequestView.of(null, noHeaders).remoteAddress());
+    assertEquals(Optional.empty(), ClientRequestView.of("", noHeaders).remoteAddress());
+    assertEquals(Optional.empty(), ClientRequestView.of(" \t ", noHeaders).remoteAddress());
+    assertEquals(Optional.empty(), ClientRequestView.of("  ", Map.of()).remoteAddress());
+    assertEquals(Optional.of("203.0.113.5"),
+        ClientRequestView.of("203.0.113.5", noHeaders).remoteAddress());
+    assertEquals(Optional.of(" client.example "),
+        ClientRequestView.of(" client.example ", Map.of()).remoteAddress(),
+        "the view reports the peer untouched; canonical form is the resolver's job");
+  }
+
+  @Test
+  @DisplayName("SP06: a blank peer from a view that ignores the contract resolves to empty")
+  void blankPeerOfForeignViewResolvesToEmpty() {
+    assertTrue(resolver.resolve(viewWithPeer(Optional.of("   "))).isEmpty());
+    assertTrue(resolver.resolve(viewWithPeer(Optional.of(""))).isEmpty());
+    assertTrue(resolver.resolve(viewWithPeer(Optional.empty())).isEmpty());
+    assertEquals(Optional.of("203.0.113.5"), resolver.resolve(viewWithPeer(Optional.of(" 203.0.113.5"))));
+  }
+
+  @Test
   @DisplayName("ClientRequestView.of(map) looks headers up case-insensitively and tolerates null")
   void viewSemantics() {
     ClientRequestView view = ClientRequestView.of("203.0.113.5", Map.of("X-Forwarded-For", "a"));
@@ -73,5 +99,20 @@ class DefaultClientAddressResolverTest {
   void trustsNoPeer() {
     assertTrue(!resolver.trustsPeer(ClientRequestView.of("127.0.0.1", Map.of())));
     assertTrue(!resolver.trustsPeer(ClientRequestView.of("203.0.113.5", Map.of())));
+  }
+
+  /** A hand-written view, as a third-party adapter would write it, that reports {@code peer}. */
+  static ClientRequestView viewWithPeer(Optional<String> peer) {
+    return new ClientRequestView() {
+      @Override
+      public Optional<String> remoteAddress() {
+        return peer;
+      }
+
+      @Override
+      public List<String> headers(String name) {
+        return List.of();
+      }
+    };
   }
 }

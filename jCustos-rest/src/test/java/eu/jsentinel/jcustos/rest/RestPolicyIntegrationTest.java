@@ -254,8 +254,8 @@ class RestPolicyIntegrationTest {
       }
 
       @Override
-      public String remoteAddress() {
-        return peer;
+      public Optional<String> remoteAddress() {
+        return Optional.ofNullable(peer);
       }
     };
   }

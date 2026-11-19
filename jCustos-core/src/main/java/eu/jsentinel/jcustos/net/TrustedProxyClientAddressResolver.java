@@ -76,7 +76,7 @@ public final class TrustedProxyClientAddressResolver implements ClientAddressRes
   @Override
   public Optional<String> resolve(ClientRequestView request) {
     Objects.requireNonNull(request, "request");
-    Optional<InetAddress> peer = IpLiterals.parse(request.remoteAddress());
+    Optional<InetAddress> peer = request.remoteAddress().flatMap(IpLiterals::parse);
     if (peer.isEmpty()) {
       return DefaultClientAddressResolver.INSTANCE.resolve(request);
     }
@@ -123,7 +123,7 @@ public final class TrustedProxyClientAddressResolver implements ClientAddressRes
   @Override
   public boolean trustsPeer(ClientRequestView request) {
     Objects.requireNonNull(request, "request");
-    Optional<InetAddress> peer = IpLiterals.parse(request.remoteAddress());
+    Optional<InetAddress> peer = request.remoteAddress().flatMap(IpLiterals::parse);
     return peer.isPresent() && isTrusted(peer.get());
   }
 

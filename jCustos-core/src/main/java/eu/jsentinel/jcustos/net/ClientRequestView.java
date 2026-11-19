@@ -21,6 +21,7 @@ import eu.jsentinel.jcustos.authorization.api.ExperimentalJCustosApi;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.TreeMap;
 import java.util.function.Function;
 
@@ -38,10 +39,15 @@ public interface ClientRequestView {
   /**
    * Address of the peer that opened the connection, as the transport reports it
    * ({@code getRemoteAddr()} in the servlet world).
+   * <p>
+   * The value is never blank: when the transport exposes no peer, or reports a
+   * blank one, an implementation returns empty, not {@code Optional.of("")}. The
+   * factories of this interface do so. The resolvers of this package still treat
+   * a blank value from a view that ignores this rule as absent.
    *
-   * @return the peer address, or {@code null} when the transport does not expose it
+   * @return the peer address, or empty when the transport does not expose it
    */
-  String remoteAddress();
+  Optional<String> remoteAddress();
 
   /**
    * All values of a request header in wire order. Header names compare
@@ -56,7 +62,8 @@ public interface ClientRequestView {
    * A view over a single-valued header map. Names compare case-insensitively;
    * the map is copied.
    *
-   * @param remoteAddress peer address, may be {@code null}
+   * @param remoteAddress peer address as the transport reports it; {@code null} or
+   *                      blank makes {@link #remoteAddress()} empty
    * @param headers       headers, may be {@code null}
    * @return the view
    * @deprecated JS-SEC-113 (CWE-348): a single-valued map cannot represent a
@@ -89,16 +96,19 @@ public interface ClientRequestView {
    * multi-valued headers. The lookup returns one entry per header line in wire
    * order; this is the factory every adapter should use (JS-SEC-113).
    *
-   * @param remoteAddress peer address, may be {@code null}
+   * @param remoteAddress peer address as the transport reports it; {@code null} or
+   *                      blank makes {@link #remoteAddress()} empty
    * @param headers       lookup by header name; may return {@code null} for "absent"
    * @return the view
    */
   static ClientRequestView of(String remoteAddress, Function<String, List<String>> headers) {
     Objects.requireNonNull(headers, "headers");
+    Optional<String> peer = Optional.ofNullable(remoteAddress)
+        .filter(address -> !address.isBlank());
     return new ClientRequestView() {
       @Override
-      public String remoteAddress() {
-        return remoteAddress;
+      public Optional<String> remoteAddress() {
+        return peer;
       }
 
       @Override

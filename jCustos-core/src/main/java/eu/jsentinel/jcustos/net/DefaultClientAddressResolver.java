@@ -48,12 +48,11 @@ public final class DefaultClientAddressResolver implements ClientAddressResolver
   @Override
   public Optional<String> resolve(ClientRequestView request) {
     Objects.requireNonNull(request, "request");
-    String remote = request.remoteAddress();
-    if (remote == null || remote.isBlank()) {
-      return Optional.empty();
-    }
-    Optional<InetAddress> literal = IpLiterals.parse(remote);
-    return Optional.of(literal.map(InetAddress::getHostAddress).orElse(remote.trim()));
+    // a blank peer from a view that ignores the contract of remoteAddress() counts as absent
+    return request.remoteAddress()
+        .map(String::trim)
+        .filter(remote -> !remote.isEmpty())
+        .map(remote -> IpLiterals.parse(remote).map(InetAddress::getHostAddress).orElse(remote));
   }
 
   @Override

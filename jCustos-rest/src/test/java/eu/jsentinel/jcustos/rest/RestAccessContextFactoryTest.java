@@ -53,8 +53,13 @@ class RestAccessContextFactoryTest {
   private record PeerRequest(
       String method, String path,
       Map<String, String> headers, Map<String, String> queryParameters,
-      String remoteAddress
+      String peer
   ) implements RestRequest {
+
+    @Override
+    public Optional<String> remoteAddress() {
+      return Optional.ofNullable(peer);
+    }
   }
 
   @AfterEach
@@ -99,6 +104,20 @@ class RestAccessContextFactoryTest {
         Map.of("X-Forwarded-For", "198.51.100.9"), Map.of(), "203.0.113.5");
     AccessContext ctx = factory.create(request, Optional.empty(), "read", Map.of());
     assertEquals("203.0.113.5", ctx.attributes().get(RestAccessContextFactory.CLIENT_ADDRESS_ATTRIBUTE));
+  }
+
+  @Test
+  @DisplayName("SP06: remoteAddress() defaults to empty; the resolver's view keeps the peer, a blank one is empty")
+  void peerContract() {
+    assertEquals(Optional.empty(), req().remoteAddress(), "the default of RestRequest");
+    assertEquals(Optional.empty(), RestClientAddress.view(req()).remoteAddress());
+    assertEquals(Optional.of("203.0.113.5"), RestClientAddress.view(
+        new PeerRequest("GET", "/x", Map.of(), Map.of(), "203.0.113.5")).remoteAddress());
+
+    PeerRequest blank = new PeerRequest("GET", "/x", Map.of(), Map.of(), " ");
+    assertEquals(Optional.of(" "), blank.remoteAddress(), "an adapter that ignores the contract");
+    assertEquals(Optional.empty(), RestClientAddress.view(blank).remoteAddress());
+    assertTrue(RestClientAddress.resolve(blank).isEmpty());
   }
 
   @Test

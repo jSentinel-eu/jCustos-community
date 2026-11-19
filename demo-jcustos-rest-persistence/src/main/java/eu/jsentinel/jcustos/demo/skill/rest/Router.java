@@ -337,12 +337,12 @@ public final class Router implements HttpHandler, HasLogger {
     String method = exchange.getRequestMethod();
     String path = uri.getPath();
     var remote = exchange.getRemoteAddress();
-    String remoteAddress = remote == null || remote.getAddress() == null
-        ? null : remote.getAddress().getHostAddress();
+    Optional<String> remoteAddress = remote == null || remote.getAddress() == null
+        ? Optional.empty() : Optional.of(remote.getAddress().getHostAddress());
     return new RestRequest() {
       /** JS-SEC-061: expose the connection peer; the ClientAddressResolver decides the client. */
       @Override
-      public String remoteAddress() {
+      public Optional<String> remoteAddress() {
         return remoteAddress;
       }
 

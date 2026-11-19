@@ -141,6 +141,28 @@ class TrustedProxyClientAddressResolverTest {
   }
 
   @Test
+  @DisplayName("SP06: a hand-written view's peer is read through the Optional; a blank one is absent")
+  void foreignView_peerThroughOptional() {
+    ClientRequestView fromProxy = new ClientRequestView() {
+      @Override
+      public Optional<String> remoteAddress() {
+        return Optional.of(PROXY);
+      }
+
+      @Override
+      public List<String> headers(String name) {
+        return "X-Forwarded-For".equalsIgnoreCase(name) ? List.of(CLIENT) : List.of();
+      }
+    };
+    assertEquals(Optional.of(CLIENT), loopbackProxy.resolve(fromProxy));
+    assertTrue(loopbackProxy.trustsPeer(fromProxy));
+
+    ClientRequestView blankPeer = DefaultClientAddressResolverTest.viewWithPeer(Optional.of("  "));
+    assertTrue(loopbackProxy.resolve(blankPeer).isEmpty());
+    assertTrue(!loopbackProxy.trustsPeer(blankPeer));
+  }
+
+  @Test
   @DisplayName("configuration rejects empty sets, hostnames and bad prefixes")
   void configurationValidation() {
     assertThrows(IllegalArgumentException.class, () -> ClientAddressResolver.trustedProxies(List.of()));

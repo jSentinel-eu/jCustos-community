@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Demo {@link BodyRestRequest} implementation backed by raw byte payloads.
@@ -63,8 +64,9 @@ public final class DemoHttpRequest implements BodyRestRequest {
   }
 
   /**
-   * @param remoteAddress connection peer as the transport reports it, or {@code null}
-   *                      (JS-SEC-061: the client address is resolved from it, never from a header)
+   * @param remoteAddress connection peer as the transport reports it, or {@code null}; blank
+   *                      counts as absent (JS-SEC-061: the client address is resolved from it,
+   *                      never from a header)
    */
   public DemoHttpRequest(
       String method,
@@ -112,7 +114,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
     this.queryParameterValues = Map.copyOf(copyLines(queryLines));
     this.queryParameters = Map.copyOf(lastValues(this.queryParameterValues));
     this.body = body == null ? new byte[0] : body.clone();
-    this.remoteAddress = remoteAddress;
+    this.remoteAddress = remoteAddress == null || remoteAddress.isBlank() ? null : remoteAddress;
   }
 
   /**
@@ -123,7 +125,7 @@ public final class DemoHttpRequest implements BodyRestRequest {
    * @param headerLines     every header line, per name in wire order
    * @param queryLines      every value of every decoded query parameter, in wire order
    * @param body            raw body, or {@code null}
-   * @param remoteAddress   connection peer, or {@code null}
+   * @param remoteAddress   connection peer, or {@code null}; blank counts as absent
    * @return the request
    */
   public static DemoHttpRequest fromHeaderLines(
@@ -147,8 +149,8 @@ public final class DemoHttpRequest implements BodyRestRequest {
   }
 
   @Override
-  public String remoteAddress() {
-    return remoteAddress;
+  public Optional<String> remoteAddress() {
+    return Optional.ofNullable(remoteAddress);
   }
 
   @Override

@@ -354,9 +354,10 @@ class RestHeaderLinesTest {
     }
 
     @Override
-    public String remoteAddress() {
+    public Optional<String> remoteAddress() {
       InetSocketAddress remote = exchange.getRemoteAddress();
-      return remote == null || remote.getAddress() == null ? null : remote.getAddress().getHostAddress();
+      return remote == null || remote.getAddress() == null
+          ? Optional.empty() : Optional.of(remote.getAddress().getHostAddress());
     }
   }
 

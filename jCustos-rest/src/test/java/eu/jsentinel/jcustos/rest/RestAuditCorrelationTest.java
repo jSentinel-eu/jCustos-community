@@ -209,7 +209,7 @@ class RestAuditCorrelationTest {
   }
 
   /** A request with a peer address and multi-line headers. */
-  private record PeerRequest(String method, String path, String remoteAddress,
+  private record PeerRequest(String method, String path, String peer,
                              Map<String, List<String>> lines) implements RestRequest {
 
     @Override
@@ -231,6 +231,11 @@ class RestAuditCorrelationTest {
     @Override
     public Map<String, String> queryParameters() {
       return Map.of();
+    }
+
+    @Override
+    public Optional<String> remoteAddress() {
+      return Optional.ofNullable(peer);
     }
   }
 

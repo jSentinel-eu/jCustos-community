@@ -68,6 +68,7 @@ public final class RestClientAddress {
   public static ClientRequestView view(RestRequest request) {
     Objects.requireNonNull(request, "request");
     // JS-SEC-113 (CWE-348, CWE-290): multi-valued lookup, never the flattened map.
-    return ClientRequestView.of(request.remoteAddress(), request::headerValues);
+    // The factory takes the peer as a nullable string and maps absent or blank to empty.
+    return ClientRequestView.of(request.remoteAddress().orElse(null), request::headerValues);
   }
 }

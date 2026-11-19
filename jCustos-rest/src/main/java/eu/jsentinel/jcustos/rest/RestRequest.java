@@ -19,6 +19,7 @@ package eu.jsentinel.jcustos.rest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Minimal framework-independent REST request abstraction.
@@ -145,10 +146,14 @@ public interface RestRequest {
    * the default keeps existing implementations compiling and means "unknown",
    * in which case no client address is recorded.
    *
-   * @return the peer address, or {@code null} when the transport does not expose it
+   * <p>The value is never blank: an adapter whose transport exposes no peer, or
+   * reports a blank one, returns empty, not {@code Optional.of("")}.
+   * {@link RestClientAddress} treats a blank value as absent all the same.
+   *
+   * @return the peer address, or empty when the transport does not expose it
    * @since 00.84.00
    */
-  default String remoteAddress() {
-    return null;
+  default Optional<String> remoteAddress() {
+    return Optional.empty();
   }
 }
