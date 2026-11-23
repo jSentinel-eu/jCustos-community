@@ -32,7 +32,7 @@
   -->
   <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-bom</artifactId>
-  <version>00.84.00</version>
+  <version>00.84.10-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>jCustos BOM</name>
