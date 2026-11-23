@@ -7,7 +7,9 @@ free software; the operations and forensics layer is commercial.
 
 ## Community Edition — EUPL 1.2
 
-`eu.jsentinel:jCustos-*` · Maven Central and https://repo.jsentinel.eu/releases
+`eu.jsentinel:jCustos-*` · https://repo.jsentinel.eu/releases (every release, on the day it is
+made) and Maven Central (at most once a month); see
+[release verification](../security/release-verification.md#resolving-from-repojsentineleu)
 
 Complete and production-ready on its own. Nothing here is time-limited,
 feature-gated or nagware.

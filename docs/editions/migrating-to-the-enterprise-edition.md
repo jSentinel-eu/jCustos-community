@@ -47,6 +47,15 @@ Add the repository and the credentials that came with your licence:
 </server>
 ```
 
+From 00.84.10 the parent POM of the enterprise modules lists
+`https://repo.jsentinel.eu/releases` (id `jsentinel-releases`) before Maven
+Central, because each community release appears there first and on Central
+up to a month later. Maven therefore asks that host first for the dependencies
+of the enterprise modules too. To keep it to the jCustos groups, enable the
+resolver's groupId filter as described in
+[release verification](../security/release-verification.md#resolving-from-repojsentineleu);
+list `jsentinel-sensitive` there as well if you want the same rule for it.
+
 ## Staying on the free edition
 
 The 00.81.10 releases of these modules remain on Maven Central under the EUPL

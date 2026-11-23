@@ -155,6 +155,11 @@ script for `repo.jsentinel.eu` did not sign (for `jCustos-core` 00.83.00 the
 [docs/security/release-verification.md](docs/security/release-verification.md)
 describes how to check signature, checksum and SBOM.
 
+From 00.84.10 on every release is published to `repo.jsentinel.eu/releases`
+on the day it is made and reaches Maven Central with the next monthly deploy;
+see [docs/security/release-verification.md](docs/security/release-verification.md),
+*Resolving from repo.jsentinel.eu*.
+
 Fingerprint of the release signing key:
 
 - `4CCC E751 C38A D66A B1DC  94D0 44A7 EECD 3701 0CF3` (RSA 2048, user ID

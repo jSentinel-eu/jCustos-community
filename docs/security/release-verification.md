@@ -1,6 +1,6 @@
 # Verifying a jCustos release
 
-Status: V00.84.00 (security analysis 2026-11-10, SA42 – SA44)
+Status: V00.84.10 (security analysis 2026-11-10, SA42 – SA44; resolution order 7f768a00)
 
 This page is for anyone who consumes jCustos and wants to know that the
 artefact in their build is the one the project released: which key signed it,
@@ -29,12 +29,66 @@ Test jars and test sources are not published. Demo modules are not published.
 
 Where:
 
-- Maven Central — `https://repo.maven.apache.org/maven2/eu/jsentinel/`
 - `https://repo.jsentinel.eu/releases/eu/jsentinel/` — the project's own
-  registry, same artefact set from 00.84.00 on. Up to 00.83.00 the deploy
-  script uploaded there without signing and without the release profile, so
-  signatures, sources and Javadoc are missing (checked for `jCustos-core`
-  00.83.00); verify those versions against Maven Central.
+  registry and the first place a release appears: every release is published
+  there on the day it is made, with the artefact set above from 00.84.00 on.
+  Up to 00.83.00 the deploy script uploaded there without signing and without
+  the release profile, so signatures, sources and Javadoc are missing (checked
+  for `jCustos-core` 00.83.00); verify those versions against Maven Central.
+- Maven Central — `https://repo.maven.apache.org/maven2/eu/jsentinel/`. From
+  00.84.10 on Central receives at most one deploy a month, which carries the
+  releases made since the previous one. A version can therefore be on
+  `repo.jsentinel.eu` for some weeks before it reaches Central.
+
+### Resolving from `repo.jsentinel.eu`
+
+To use a release before it reaches Central, list the registry before Central
+and restrict it to the jCustos groups, so that it is never asked for anything
+else:
+
+```xml
+<repositories>
+  <repository>
+    <id>jsentinel-releases</id>
+    <url>https://repo.jsentinel.eu/releases</url>
+    <snapshots><enabled>false</enabled></snapshots>
+  </repository>
+  <repository>
+    <id>central</id>
+    <url>https://repo.maven.apache.org/maven2</url>
+    <snapshots><enabled>false</enabled></snapshots>
+  </repository>
+</repositories>
+```
+
+The restriction is a feature of Maven's resolver (Maven 3.9 and 4), the
+groupId filter. Enable it in `.mvn/maven.config` of your project:
+
+```text
+-Daether.remoteRepositoryFilter.groupId=true
+-Daether.remoteRepositoryFilter.groupId.basedir=${session.rootDirectory}/.mvn/rrf
+```
+
+and create `.mvn/rrf/groupId-jsentinel-releases.txt` (the file name carries
+the repository id):
+
+```text
+eu.jsentinel
+eu.jsentinel.jcustos.enterprise
+```
+
+Any other artefact asked of `jsentinel-releases` is refused there and resolved
+from Central; a repository without a rules file is not filtered. With Maven 4
+(resolver 2.0) an entry also permits every group below it, so the first line
+alone would do; Maven 3.9 (resolver 1.9) compares the groupId exactly, hence
+the second line. `${session.rootDirectory}` is a Maven 4 expression; with
+Maven 3.9 give the directory as an absolute path or leave the property out,
+which places the rules under `<local repository>/.remoteRepositoryFilters/`.
+The enterprise build itself resolves this way from 00.84.10 on.
+
+The filter decides which host is asked, not whether the answer is genuine. Keep
+`--strict-checksums` and verify the signatures as described below, wherever an
+artefact came from.
 
 ## The release signing key
 
@@ -72,6 +126,8 @@ the fingerprint gpg reports with the one above.
 
 ```bash
 BASE=https://repo.maven.apache.org/maven2/eu/jsentinel/jCustos-core/00.84.00
+# a release that has not reached Central yet:
+# BASE=https://repo.jsentinel.eu/releases/eu/jsentinel/jCustos-core/00.84.00
 curl -fsSO $BASE/jCustos-core-00.84.00.jar
 curl -fsSO $BASE/jCustos-core-00.84.00.jar.asc
 
@@ -106,8 +162,9 @@ is a warning; `mvn --strict-checksums` (`-C`) makes it an error, and the
 release build of jCustos runs with it.
 
 Maven Central and `repo.jsentinel.eu` are filled by two separate builds of the
-same tag. The build is reproducible, so a version is expected to have the same
-bytes in both places; compare the SHA-256 if in doubt. The signature files
+same tag, from 00.84.10 on usually weeks apart. The build is reproducible, so
+a version is expected to have the same bytes in both places; compare the
+SHA-256 if in doubt. The signature files
 differ between the two because they are made in separate runs; both verify
 against the same key.
 
@@ -198,6 +255,13 @@ check and the whole build without signing, installing or uploading anything.
    `scripts/deploy-jsentinel.sh --verify-published <version>` repeats that
    check at any time; with `JCUSTOS_VERIFY_BASE_URL` it checks another
    repository, for example Maven Central.
+
+The order: step 3 for every release on the day it is made, step 2 for the
+monthly deploy to Central (at most one a month, after the maintainer's
+approval), for each release made since the previous one. The enterprise release
+(`scripts/deploy-sensitive.sh` in that repository) resolves the community
+artefacts from `repo.jsentinel.eu` first and verifies the signature of each of
+them against the release key above before it builds.
 
 Only the library modules are built in steps 2 and 3. The demo applications run
 an npm build without a lockfile; that build stays out of the process that
