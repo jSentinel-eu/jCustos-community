@@ -25,7 +25,7 @@
 
     <groupId>eu.jsentinel</groupId>
     <artifactId>jCustos-community-parent</artifactId>
-    <version>00.84.10-SNAPSHOT</version>
+    <version>00.84.10</version>
     <packaging>pom</packaging>
 
     <name>jCustos Community — Security for Vaadin Flow</name>
