@@ -68,6 +68,13 @@
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- 00.84.10 (R9): RefreshTokenFamilyStoreContract for the in-memory family store. -->
+    <dependency>
+      <groupId>eu.jsentinel</groupId>
+      <artifactId>jCustos-persistence-testkit</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>

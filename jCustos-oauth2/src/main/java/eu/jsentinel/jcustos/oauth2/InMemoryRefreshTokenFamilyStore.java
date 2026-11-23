@@ -1,5 +1,4 @@
-/**import eu.jsentinel.jcustos.oauth2.api.RefreshTokenFamilyStore;
-
+/**
  * Copyright © 2017 Sven Ruppert (sven.ruppert@gmail.com)
  *
  * Licensed under the EUPL, Version 1.2 or - as soon they will be
@@ -45,6 +44,10 @@ package eu.jsentinel.jcustos.oauth2;
 import eu.jsentinel.jcustos.oauth2.api.RefreshTokenFamilyStore;
 import eu.jsentinel.jcustos.util.CapacityBound;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -54,12 +57,24 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * In-process {@link RefreshTokenFamilyStore} (V00.77). Holds only the current
+ * In-process {@link RefreshTokenFamilyStore} (V00.77). Holds the current
  * refresh-token <em>hash</em> per family. {@link #consumeAndRotate} is atomic
  * under {@code synchronized}: presenting the current hash rotates the family to
  * the new hash; presenting anything else (an already-rotated token being
  * replayed, or a revoked family) revokes the family and reports
  * {@link RotationResult#REUSE_DETECTED}.
+ *
+ * <p>Since 00.84.10 the store also keeps, per family, the hashes it rotated away —
+ * the last {@link RefreshTokenFamilyStore#ISSUED_HASH_HISTORY} issued hashes, the
+ * current one included — and overrides {@link #classify}. The earlier hashes are
+ * kept as 64-bit fingerprints (the first eight bytes of the SHA-256 of the hash
+ * string), so a family costs at most fifteen {@code long}s beside its current hash;
+ * the chance that a made-up hash matches one of them is about 15 in 2<sup>64</sup>.
+ * {@link #recordIssued} starts a family's history afresh, and a revoked or evicted
+ * family takes its history with it: its hashes are
+ * {@link RefreshTokenFamilyStore.PresentedHash#UNKNOWN}.
+ * Being in memory, the history does not outlive the process — which is why it is
+ * part of the store: a persistent store keeps it in its storage.
  *
  * @since 00.77.00
  */
@@ -70,7 +85,7 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
 
   // Insertion-ordered so the family seen first is the eviction candidate (JS-SEC-078,
   // CWE-770: family ids arrive from clients and were never bounded before 00.84.00).
-  private final LinkedHashMap<String, String> currentHashByFamily = new LinkedHashMap<>();
+  private final LinkedHashMap<String, Family> families = new LinkedHashMap<>();
   /** revoked family id → instant it may be forgotten. */
   private final LinkedHashMap<String, Instant> revokedFamilies = new LinkedHashMap<>();
   private final int maxFamilies;
@@ -101,7 +116,7 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
 
   /** @return number of families with a current token (test and diagnostics hook). */
   public synchronized int trackedFamilyCount() {
-    return currentHashByFamily.size();
+    return families.size();
   }
 
   /** @return number of revoked family ids still remembered. */
@@ -115,11 +130,11 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
     Objects.requireNonNull(familyId, "familyId");
     Objects.requireNonNull(tokenHash, "tokenHash");
     revokedFamilies.remove(familyId);
-    if (!currentHashByFamily.containsKey(familyId) && currentHashByFamily.size() >= maxFamilies) {
-      String oldest = currentHashByFamily.keySet().iterator().next();
-      currentHashByFamily.remove(oldest);
+    if (!families.containsKey(familyId) && families.size() >= maxFamilies) {
+      String oldest = families.keySet().iterator().next();
+      families.remove(oldest);
     }
-    currentHashByFamily.put(familyId, tokenHash);
+    families.put(familyId, new Family(tokenHash));
   }
 
   @Override
@@ -130,9 +145,9 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
     if (isRevokedNow(familyId)) {
       return RotationResult.REUSE_DETECTED;
     }
-    String current = currentHashByFamily.get(familyId);
-    if (current != null && current.equals(presentedHash)) {
-      currentHashByFamily.put(familyId, newHash);
+    Family family = families.get(familyId);
+    if (family != null && family.current.equals(presentedHash)) {
+      family.rotateTo(newHash);
       return RotationResult.ROTATED;
     }
     // an already-rotated or unknown token was replayed — theft signal (BCP 9700)
@@ -147,8 +162,8 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
     if (isRevokedNow(familyId)) {
       return RotationResult.REUSE_DETECTED;
     }
-    String current = currentHashByFamily.get(familyId);
-    if (current != null && current.equals(presentedHash)) {
+    Family family = families.get(familyId);
+    if (family != null && family.current.equals(presentedHash)) {
       return RotationResult.ROTATED; // current — safe to forward, no rotation yet
     }
     // an already-rotated or unknown token was replayed — revoke before the AS call
@@ -159,13 +174,36 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
   @Override
   public synchronized void revokeFamily(String familyId) {
     Objects.requireNonNull(familyId, "familyId");
-    currentHashByFamily.remove(familyId);
+    families.remove(familyId);
     expireRevoked();
     if (!revokedFamilies.containsKey(familyId) && revokedFamilies.size() >= maxFamilies) {
       String oldest = revokedFamilies.keySet().iterator().next();
       revokedFamilies.remove(oldest);
     }
     revokedFamilies.put(familyId, clock.instant().plus(revokedRetention));
+  }
+
+  /**
+   * Classifies a presented hash against the family's history without any side effect
+   * (00.84.10, R9).
+   *
+   * @since 00.84.10
+   */
+  @Override
+  public synchronized PresentedHash classify(String familyId, String presentedHash) {
+    Objects.requireNonNull(familyId, "familyId");
+    Objects.requireNonNull(presentedHash, "presentedHash");
+    // a revoked family was removed from the map, so it lands here as well
+    Family family = families.get(familyId);
+    if (family == null) {
+      return PresentedHash.UNKNOWN;
+    }
+    if (family.current.equals(presentedHash)) {
+      return PresentedHash.CURRENT;
+    }
+    return family.rotatedAway(fingerprint(presentedHash))
+        ? PresentedHash.PREVIOUSLY_ISSUED
+        : PresentedHash.UNKNOWN;
   }
 
   /** @return whether {@code familyId} is revoked and still within its retention (test/diagnostic aid). */
@@ -188,6 +226,47 @@ public final class InMemoryRefreshTokenFamilyStore implements RefreshTokenFamily
         break;
       }
       it.remove();
+    }
+  }
+
+  /** The first eight bytes of the SHA-256 of {@code hash}: what the history keeps of an earlier hash. */
+  private static long fingerprint(String hash) {
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256").digest(hash.getBytes(StandardCharsets.UTF_8));
+      return ByteBuffer.wrap(digest).getLong();
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 unavailable", e);
+    }
+  }
+
+  /** One family: its current hash and a ring of the fingerprints of the hashes rotated away. */
+  private static final class Family {
+    private final long[] earlier = new long[ISSUED_HASH_HISTORY - 1];
+    private String current;
+    private int size;
+    private int next;
+
+    Family(String current) {
+      this.current = current;
+    }
+
+    void rotateTo(String newHash) {
+      if (current.equals(newHash)) {
+        return; // the authorisation server kept the token; nothing was rotated away
+      }
+      earlier[next] = fingerprint(current);
+      next = (next + 1) % earlier.length;
+      size = Math.min(size + 1, earlier.length);
+      current = newHash;
+    }
+
+    boolean rotatedAway(long fingerprint) {
+      for (int i = 0; i < size; i++) {
+        if (earlier[i] == fingerprint) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 }

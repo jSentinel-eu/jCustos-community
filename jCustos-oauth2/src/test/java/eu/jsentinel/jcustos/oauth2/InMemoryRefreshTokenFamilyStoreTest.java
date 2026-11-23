@@ -41,6 +41,8 @@ package eu.jsentinel.jcustos.oauth2;
  * #L%
  */
 
+import eu.jsentinel.jcustos.oauth2.api.RefreshTokenFamilyStore;
+import eu.jsentinel.jcustos.oauth2.api.RefreshTokenFamilyStore.PresentedHash;
 import eu.jsentinel.jcustos.oauth2.api.RefreshTokenFamilyStore.RotationResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -105,6 +107,48 @@ class InMemoryRefreshTokenFamilyStoreTest {
     assertTrue(store.isRevoked("fam"));
     assertEquals(RotationResult.REUSE_DETECTED, store.detectReuse("fam", "h2"), "the whole family is dead");
     assertEquals(0, store.trackedFamilyCount());
+  }
+
+  @Test
+  @DisplayName("R9: the history holds exactly ISSUED_HASH_HISTORY hashes; the oldest falls out and is unknown")
+  void historyIsBounded() {
+    InMemoryRefreshTokenFamilyStore store = new InMemoryRefreshTokenFamilyStore();
+    store.recordIssued("fam", "h0");
+    int rotations = RefreshTokenFamilyStore.ISSUED_HASH_HISTORY;
+    for (int i = 1; i <= rotations; i++) {
+      assertEquals(RotationResult.ROTATED, store.consumeAndRotate("fam", "h" + (i - 1), "h" + i));
+    }
+    assertEquals(PresentedHash.UNKNOWN, store.classify("fam", "h0"), "older than the history");
+    for (int i = 1; i < rotations; i++) {
+      assertEquals(PresentedHash.PREVIOUSLY_ISSUED, store.classify("fam", "h" + i), "h" + i);
+    }
+    assertEquals(PresentedHash.CURRENT, store.classify("fam", "h" + rotations));
+    assertFalse(store.isRevoked("fam"));
+  }
+
+  @Test
+  @DisplayName("R9: recordIssued starts a family's history afresh; a revoked or evicted family knows no hash")
+  void historyGoesWithTheFamily() {
+    InMemoryRefreshTokenFamilyStore store = new InMemoryRefreshTokenFamilyStore(2, Duration.ofDays(7), Clock.systemUTC());
+    store.recordIssued("fam", "h0");
+    store.consumeAndRotate("fam", "h0", "h1");
+    store.recordIssued("fam", "n0");
+    assertEquals(PresentedHash.UNKNOWN, store.classify("fam", "h0"));
+    assertEquals(PresentedHash.UNKNOWN, store.classify("fam", "h1"));
+    assertEquals(PresentedHash.CURRENT, store.classify("fam", "n0"));
+
+    store.consumeAndRotate("fam", "n0", "n1");
+    store.revokeFamily("fam");
+    assertEquals(PresentedHash.UNKNOWN, store.classify("fam", "n0"));
+    assertEquals(PresentedHash.UNKNOWN, store.classify("fam", "n1"));
+
+    store.recordIssued("a", "a0");
+    store.consumeAndRotate("a", "a0", "a1");
+    store.recordIssued("b", "b0");
+    store.recordIssued("c", "c0");
+    assertEquals(PresentedHash.UNKNOWN, store.classify("a", "a0"), "evicted with its family");
+    assertEquals(PresentedHash.UNKNOWN, store.classify("a", "a1"));
+    assertEquals(PresentedHash.CURRENT, store.classify("c", "c0"));
   }
 
   @Test

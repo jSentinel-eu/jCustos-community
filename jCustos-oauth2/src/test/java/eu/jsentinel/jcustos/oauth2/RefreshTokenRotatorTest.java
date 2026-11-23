@@ -155,4 +155,22 @@ class RefreshTokenRotatorTest {
     // RT-2 -> RT-3 (the endpoint issued RT-2 as the n+1 of the first call)
     assertTrue(rotator.rotate("fam", SecretValue.ofString("RT-2")).toOptional().isPresent());
   }
+
+  @Test
+  @DisplayName("R9: the rotator does not classify - a never-issued token still revokes the family, as before 00.84.10")
+  void neverIssuedTokenStillRevokes() {
+    InMemoryRefreshTokenFamilyStore store = new InMemoryRefreshTokenFamilyStore();
+    RefreshTokenRotator rotator = rotator(store);
+    rotator.registerInitial("fam", "RT-1");
+    assertTrue(rotator.rotate("fam", SecretValue.ofString("RT-1")).toOptional().isPresent());
+    int calls = counter.get();
+
+    // RT-99 was never issued. The store would classify it as UNKNOWN, but the rotator
+    // keeps the 00.77 semantics of detectReuse: anything that is not current revokes.
+    Result<TokenResponse, OAuth2Error> unknown = rotator.rotate("fam", SecretValue.ofString("RT-99"));
+    assertInstanceOf(OAuth2Error.RefreshTokenFamilyRevoked.class,
+        unknown.map(t -> (OAuth2Error) null).getOrElse(e -> e));
+    assertTrue(store.isRevoked("fam"));
+    assertEquals(calls, counter.get(), "the unknown token never reaches the token endpoint");
+  }
 }
