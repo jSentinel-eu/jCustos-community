@@ -487,13 +487,17 @@ comparison against 00.81.00, is in the *Mutation coverage* section of
 
 ### Add the dependency
 
+Every release is on `https://repo.jsentinel.eu/releases` the day it is made and reaches Maven
+Central with the next monthly deploy; list the registry before Central to get it at once (see
+[docs/security/release-verification.md](docs/security/release-verification.md)).
+
 For a Vaadin Flow application:
 
 ```xml
 <dependency>
   <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-vaadin</artifactId>
-  <version>00.84.00</version>
+  <version>00.84.10</version>
 </dependency>
 ```
 
@@ -503,7 +507,7 @@ For a REST handler / servlet application:
 <dependency>
   <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-rest</artifactId>
-  <version>00.84.00</version>
+  <version>00.84.10</version>
 </dependency>
 ```
 
@@ -513,7 +517,7 @@ For a plain-Java / desktop / CLI application:
 <dependency>
   <groupId>eu.jsentinel</groupId>
   <artifactId>jCustos-standalone</artifactId>
-  <version>00.84.00</version>
+  <version>00.84.10</version>
 </dependency>
 ```
 
